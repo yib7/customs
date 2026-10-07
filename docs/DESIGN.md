@@ -313,7 +313,14 @@ exactly one directory and nothing besides sidecar `*.json` files (other than
 `setup.cfg`, `pyproject.toml` or a `*.dist-info/` directory. This removes `name-version/`
 from sdists, `package/` from npm tarballs, and the wrapper directories and
 `package_info-*.json` sidecars of sample collections such as the Datadog dataset
-(`tmp/tmpXXXX/name/name-version/`). Paths whose trailing components repeat
+(`tmp/tmpXXXX/name/name-version/`). If stripping stops with no manifest at the root (the
+top level holds a package directory beside something else), the shallowest directory that
+holds a manifest becomes the root, provided it is unique; a tie between a built
+distribution and a source checkout goes to the one with `PKG-INFO` or `package.json`.
+Files outside the new root keep their paths and are still scanned. Before this rule,
+69 malicious and 6 benign PyPI archives in the corpus had their manifest below such a level
+and so no install surface at all (one campaign stored each release beside a `sources/`
+git checkout of the same project). Paths whose trailing components repeat
 (`pkg/mod.py/pkg/mod.py`, an artifact of re-extracted wheels in that dataset) collapse to
 `pkg/mod.py`. Ecosystem detection: an explicit argument wins; otherwise a stripped
 `package/` with `package.json` is npm; `PKG-INFO`, `setup.py`, `pyproject.toml`, `setup.cfg`

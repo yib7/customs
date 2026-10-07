@@ -530,6 +530,7 @@ fn strip_prefix(c: &mut Contents) {
         }
         stripped.push(root);
     }
+    reroot_nested(c, &mut stripped);
     if dropped > 0 {
         c.errors.push(format!(
             "{dropped} metadata file(s) outside the package root ignored"
@@ -538,6 +539,75 @@ fn strip_prefix(c: &mut Contents) {
     if !stripped.is_empty() {
         c.stripped_prefix = Some(stripped.join("/"));
     }
+}
+
+fn has_root_marker(c: &Contents) -> bool {
+    c.entries.iter().any(|e| {
+        e.depth == 0
+            && (ROOT_MARKERS.contains(&e.path.as_str())
+                || e.path
+                    .split_once('/')
+                    .is_some_and(|(d, _)| d.ends_with(".dist-info")))
+    })
+}
+
+/// When stripping stops above the package (the top level holds more than one directory,
+/// as in `foo/foo-1.0/setup.py` next to a `sources/` checkout), use the shallowest
+/// directory that holds a manifest as the root, if exactly one does. Files outside it keep
+/// their paths, so they are still scanned; they just cannot be mistaken for the package's
+/// own manifest or install hooks.
+fn reroot_nested(c: &mut Contents, stripped: &mut Vec<String>) {
+    if has_root_marker(c) {
+        return;
+    }
+    let dirs: Vec<(usize, &str)> = c
+        .entries
+        .iter()
+        .filter(|e| e.depth == 0)
+        .filter_map(|e| {
+            let (dir, file) = e.path.rsplit_once('/')?;
+            ROOT_MARKERS
+                .contains(&file)
+                .then(|| (dir.matches('/').count(), dir))
+        })
+        .collect();
+    let Some(min) = dirs.iter().map(|(d, _)| *d).min() else {
+        return;
+    };
+    let mut cands: Vec<&str> = dirs
+        .iter()
+        .filter(|(d, _)| *d == min)
+        .map(|(_, p)| *p)
+        .collect();
+    cands.sort_unstable();
+    cands.dedup();
+    if cands.len() > 1 {
+        // A built distribution next to a source checkout of the same project: prefer the
+        // directory with the distribution's own metadata (`PKG-INFO`, `package.json`).
+        let built: Vec<&str> = cands
+            .iter()
+            .copied()
+            .filter(|d| {
+                let has = |f: &str| {
+                    let want = format!("{d}/{f}");
+                    c.entries.iter().any(|e| e.depth == 0 && e.path == want)
+                };
+                has("PKG-INFO") || has("package.json")
+            })
+            .collect();
+        cands = built;
+    }
+    if cands.len() != 1 || min + 1 > MAX_STRIP_LEVELS {
+        return;
+    }
+    let root = cands[0].to_string();
+    let prefix = format!("{root}/");
+    for e in c.entries.iter_mut().filter(|e| e.depth == 0) {
+        if let Some(rest) = e.path.strip_prefix(&prefix) {
+            e.path = rest.to_string();
+        }
+    }
+    stripped.push(root);
 }
 
 #[cfg(test)]
@@ -595,13 +665,52 @@ mod tests {
         assert_eq!(paths, vec!["PKG-INFO", "foo/__init__.py"]);
         assert_eq!(c.stripped_prefix.as_deref(), Some("tmp/tmpx/foo/foo-1.0"));
 
-        // Code next to the directory stops stripping.
+        // Code next to the directory stops wrapper stripping; the package is re-rooted at
+        // its manifest and the stray file keeps its own path, so it is still scanned.
         let mut c = Contents {
             entries: vec![entry("evil.py"), entry("pkg-1.0/setup.py")],
             ..Default::default()
         };
         strip_prefix(&mut c);
-        assert_eq!(c.entries.len(), 2);
+        let paths: Vec<&str> = c.entries.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(paths, vec!["evil.py", "setup.py"]);
+        assert_eq!(c.stripped_prefix.as_deref(), Some("pkg-1.0"));
+
+        // A package nested next to another directory is re-rooted at its manifest.
+        let mut c = Contents {
+            entries: vec![
+                entry("pd-1.0/pd/pd-1.0/setup.py"),
+                entry("pd-1.0/pd/pd-1.0/pd/game.py"),
+                entry("pd-1.0/sources/pd/.git/config"),
+            ],
+            ..Default::default()
+        };
+        strip_prefix(&mut c);
+        let paths: Vec<&str> = c.entries.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec!["setup.py", "pd/game.py", "sources/pd/.git/config"]
+        );
+        assert_eq!(c.stripped_prefix.as_deref(), Some("pd-1.0/pd/pd-1.0"));
+
+        // A distribution next to a source checkout: the one with PKG-INFO wins.
+        let mut c = Contents {
+            entries: vec![
+                entry("x/dist/pd-1.0/PKG-INFO"),
+                entry("x/dist/pd-1.0/setup.py"),
+                entry("x/src/pd/setup.py"),
+            ],
+            ..Default::default()
+        };
+        strip_prefix(&mut c);
+        assert_eq!(c.stripped_prefix.as_deref(), Some("x/dist/pd-1.0"));
+
+        // Two candidate roots at the same depth: ambiguous, left alone.
+        let mut c = Contents {
+            entries: vec![entry("a/setup.py"), entry("b/setup.py")],
+            ..Default::default()
+        };
+        strip_prefix(&mut c);
         assert!(c.stripped_prefix.is_none());
 
         // Wheels keep their layout.
