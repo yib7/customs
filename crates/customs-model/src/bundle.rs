@@ -302,7 +302,21 @@ impl Models {
         }
         if let Some(ns) = &name {
             let w = self.ensemble.weight_for(&logits, "name");
-            if let Some((feat, value, c)) = ns.contributions.first() {
+            // Prefer the human explanation (edit distance to a popular name, typo, scope)
+            // when the name model leans malicious; otherwise report its largest term.
+            let explained = ns
+                .explanation
+                .as_ref()
+                .zip(ns.features.explanation_feature())
+                .filter(|_| w * ns.logit > 0.0);
+            if let Some((text, (feat, value))) = explained {
+                reasons.push(Reason {
+                    feature: format!("name_{feat}"),
+                    value: Some(value),
+                    contribution: w * ns.logit,
+                    label: text.clone(),
+                });
+            } else if let Some((feat, value, c)) = ns.contributions.first() {
                 if *c > 0.0 && w * c > 0.0 {
                     let feature = format!("name_{feat}");
                     let label = ns

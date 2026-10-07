@@ -416,6 +416,7 @@ impl Engine {
             }
         }
         self.metrics.cache("scan_miss");
+        let started = Instant::now();
         let summary = if size > self.limits.max_scan_bytes {
             self.name_only_summary(
                 eco,
@@ -435,7 +436,7 @@ impl Engine {
                 .await
                 .map_err(internal)?
         };
-        self.metrics.scan_latency(std::time::Duration::from_millis(summary.scanned_ms));
+        self.metrics.scan_latency(started.elapsed());
         let json = serde_json::to_string(&summary).map_err(internal)?;
         self.store.scan_cache_put(&key, &json).map_err(internal)?;
         Ok((summary, false))

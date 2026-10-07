@@ -156,7 +156,11 @@ pub fn init_logging(json: bool, default_level: &str) {
         .or_else(|_| tracing_subscriber::EnvFilter::try_from_default_env())
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_level));
     // Logs go to stderr: the hook's stdout must carry only its JSON decision.
-    let b = tracing_subscriber::fmt().with_env_filter(filter).with_writer(std::io::stderr);
+    use std::io::IsTerminal;
+    let b = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .with_ansi(std::io::stderr().is_terminal());
     let _ = if json { b.json().try_init() } else { b.try_init() };
 }
 

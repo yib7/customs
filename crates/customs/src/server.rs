@@ -14,7 +14,7 @@ use axum::{Json, Router};
 use serde_json::json;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
 
 use crate::engine::Engine;
@@ -45,7 +45,7 @@ code{background:#eee;padding:.1rem .3rem;border-radius:3px}@media(prefers-color-
 
 pub fn router(state: AppState, ui_dir: Option<&Path>) -> Router {
     let cors = CorsLayer::new()
-        .allow_origin(HeaderValue::from_static(DEV_ORIGIN))
+        .allow_origin(AllowOrigin::list([HeaderValue::from_static(DEV_ORIGIN)]))
         .allow_methods([Method::GET, Method::POST, Method::PUT, Method::OPTIONS])
         .allow_headers([header::CONTENT_TYPE, header::ACCEPT]);
 

@@ -481,6 +481,23 @@ impl NameFeatures {
         })
     }
 
+    /// The feature behind [`NameFeatures::explanation`] and its value.
+    pub fn explanation_feature(&self) -> Option<(&'static str, f64)> {
+        if self.is_popular {
+            None
+        } else if self.keyboard_typo {
+            Some(("keyboard_typo", 1.0))
+        } else if (1..=2).contains(&self.min_edit_distance) {
+            Some(("min_edit_distance", self.min_edit_distance as f64))
+        } else if self.scope_squat.is_some() {
+            Some(("scope_squat", 1.0))
+        } else if self.contains_popular_token.is_some() {
+            Some(("contains_popular_token", 1.0))
+        } else {
+            None
+        }
+    }
+
     /// A one-line explanation of the strongest name signal, if any.
     pub fn explanation(&self) -> Option<String> {
         if self.is_popular {
