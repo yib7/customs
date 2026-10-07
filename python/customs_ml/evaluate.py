@@ -145,8 +145,16 @@ def run(scheme: str = SCHEME, with_guarddog: bool = True) -> dict:
     return res
 
 
+GUARDDOG_PER_CLASS = 1500
+
+
 def _guarddog(T: pd.DataFrame, y, cl, s) -> dict:
-    gd = baselines.run(T)
+    # GuardDog takes seconds per package, so it runs on a fixed random sample of the test
+    # set (up to GUARDDOG_PER_CLASS per class); Customs is compared on exactly those rows.
+    sample = T.groupby("label", group_keys=False).apply(
+        lambda g: g.sample(min(len(g), GUARDDOG_PER_CLASS), random_state=0)
+    )
+    gd = baselines.run(sample)
     if gd.empty:
         return {}
     m = T.merge(gd, left_on="canonical_path", right_on="path", how="left")
@@ -172,6 +180,8 @@ def _guarddog(T: pd.DataFrame, y, cl, s) -> dict:
         deltas.append(np.mean(a[lab == 1] >= t_match) - np.mean(b[lab == 1] > 0.5))
     lo, hi = np.percentile(deltas, [2.5, 97.5])
     gd_high = (m.gd_label.to_numpy()[ok] == "high_risk").astype(float)
+    high_fpr = float(gd_high[yy == 0].mean())
+    t_high = metrics.threshold_at_fpr(yy, ss, high_fpr)
     return {
         "n": int(ok.sum()),
         "n_malicious": int(yy.sum()),
@@ -180,8 +190,9 @@ def _guarddog(T: pd.DataFrame, y, cl, s) -> dict:
         "customs_roc_auc_same_rows": _auc(yy, ss),
         "fpr": gd_fpr,
         "recall": gd_recall,
-        "high_risk_fpr": float(gd_high[yy == 0].mean()),
+        "high_risk_fpr": high_fpr,
         "high_risk_recall": float(gd_high[yy == 1].mean()),
+        "customs_recall_at_high_risk_fpr": float(np.mean(ss[yy == 1] >= t_high)),
         "customs_recall_at_matched_fpr": float(np.mean(ss[yy == 1] >= t_match)),
         "customs_fpr_at_matched": float(np.mean(ss[yy == 0] >= t_match)),
         "recall_gain_ci": [float(lo), float(hi)],
@@ -277,7 +288,7 @@ def export(scheme: str = SCHEME) -> None:
         "feature_schema_version": 1,
         "thresholds": ens["thresholds"],
         "metrics": {
-            "split": f"{scheme} (test = malware discovered on or after {ev['split_meta']['test_cutoff']})",
+            "split": f"{scheme} (test: malware found from {ev['split_meta']['test_cutoff']})",
             "roc_auc": h["roc_auc"],
             "pr_auc": h["pr_auc"],
             "recall_at_fpr_0_001": h["recall_at_fpr_0_001"],

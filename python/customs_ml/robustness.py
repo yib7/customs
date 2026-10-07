@@ -29,10 +29,13 @@ import numpy as np
 
 from . import config, features, gbdt
 from . import nn as cnn
+from .augment import load_files, starjack
 from .malicious import canonicalize, read_tar_tree
 from .pipeline import SCHEME, load_table, log, work
 
 Files = dict[str, bytes]
+# Families the augmentation stage trains on (see augment.py); the rest are unseen attacks.
+SEEN_IN_TRAINING = {"metadata_mimicry", "starjack", "trojan_padding"}
 
 STR_RE = re.compile(r"""(?P<q>["'])(?P<body>[A-Za-z0-9_./:@\-]{6,200})(?P=q)""")
 
@@ -158,6 +161,10 @@ class Scorer:
         return gbdt.apply_calibration(self.ens["calibration"], 1 / (1 + np.exp(-z)))
 
 
+def _starjack(files: Files, eco: str, donors: dict[str, Files]) -> Files:
+    return starjack(files, eco, donors[eco]) if eco in donors else files
+
+
 def _readme(donor: Files) -> bytes:
     for p, d in donor.items():
         if p.lower().startswith("readme"):
@@ -177,6 +184,14 @@ def run(n: int = 600, scheme: str = SCHEME, seed: int = 0) -> dict:
     donor_row = ben.iloc[(ben.f_all_n_lines - 3000).abs().argsort().iloc[0]]
     donor = read_tar_tree(Path(donor_row.canonical_path).read_bytes())
     donor = {p.split("/", 1)[1]: d for p, d in donor.items() if "/" in p}
+    # Starjacking copies metadata from a real project of the same ecosystem; donors here
+    # come from the benign *test* split, never from training.
+    donors = {}
+    for eco in ("pypi", "npm"):
+        cand = ben[ben.ecosystem == eco]
+        if len(cand):
+            r = cand.sample(1, random_state=seed).iloc[0]
+            donors[eco] = load_files(r.canonical_path)
     transforms = {
         "none": lambda f, e: f,
         "string_split": string_split,
@@ -184,6 +199,7 @@ def run(n: int = 600, scheme: str = SCHEME, seed: int = 0) -> dict:
         "trojan_padding": make_trojan_padding(donor),
         "indirection": indirection,
         "metadata_mimicry": make_metadata_mimicry(_readme(donor)),
+        "starjack": lambda f, e: _starjack(f, e, donors),
     }
     scorer = Scorer(scheme)
     tmp = config.sub("robustness")
@@ -215,5 +231,6 @@ def run(n: int = 600, scheme: str = SCHEME, seed: int = 0) -> dict:
         for p in paths:
             Path(p).unlink(missing_ok=True)
     results["donor"] = {"name": donor_row["name"], "ecosystem": donor_row.ecosystem}
+    results["seen_in_training"] = sorted(SEEN_IN_TRAINING)
     (work() / f"robustness_{scheme}.json").write_text(json.dumps(results, indent=1))
     return results

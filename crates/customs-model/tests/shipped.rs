@@ -1,0 +1,95 @@
+//! Parity of the Rust inference against the Python training pipeline, on the trained models
+//! shipped in `models/`.
+//!
+//! The fixtures in `models/parity/` are written by `customs_ml.evaluate.export` from the
+//! reference implementations (`gbdt.predict_raw_exported`, `nn.numpy_forward`,
+//! `name_model.score_exported`). If training and serving ever disagree, this fails.
+//! Skipped when no trained models are present (for example in a fresh checkout that only
+//! has `models/dev`).
+
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+
+use customs_model::Models;
+use customs_scan::Ecosystem;
+use serde_json::Value;
+
+fn models_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../models")
+}
+
+fn fixture(name: &str) -> Option<Vec<Value>> {
+    let text = std::fs::read_to_string(models_dir().join("parity").join(name)).ok()?;
+    Some(serde_json::from_str(&text).expect("parity fixture is valid JSON"))
+}
+
+fn shipped() -> Option<Models> {
+    if !models_dir().join("manifest.json").exists() {
+        eprintln!("no trained models in models/, skipping");
+        return None;
+    }
+    Some(Models::load(models_dir()).expect("shipped models load"))
+}
+
+#[test]
+fn tree_ensemble_matches_training() {
+    let (Some(models), Some(cases)) = (shipped(), fixture("code_gbdt.json")) else {
+        return;
+    };
+    let gbdt = models.code_gbdt.as_ref().expect("code_gbdt loaded");
+    for case in cases {
+        let features: BTreeMap<String, f64> = case["features"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.as_f64().unwrap()))
+            .collect();
+        let out = gbdt.predict_map(&features);
+        let want = case["raw"].as_f64().unwrap();
+        assert!((out.raw - want).abs() < 1e-6, "raw {} vs {want}", out.raw);
+        let bias = case["bias"].as_f64().unwrap();
+        assert!(
+            (out.bias - bias).abs() < 1e-6,
+            "bias {} vs {bias}",
+            out.bias
+        );
+    }
+}
+
+#[test]
+fn code_cnn_matches_training() {
+    let (Some(models), Some(cases)) = (shipped(), fixture("code_nn.json")) else {
+        return;
+    };
+    let cnn = models.code_nn.as_ref().expect("code_nn loaded");
+    for case in cases {
+        let tokens: Vec<String> = case["tokens"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t.as_str().unwrap().to_string())
+            .collect();
+        let got = f64::from(cnn.logit(&tokens));
+        let want = case["logit"].as_f64().unwrap();
+        // f32 accumulation over up to max_len x kernel x dim terms.
+        assert!((got - want).abs() < 1e-3, "cnn logit {got} vs {want}");
+    }
+}
+
+#[test]
+fn name_model_matches_training() {
+    let (Some(models), Some(cases)) = (shipped(), fixture("name_model.json")) else {
+        return;
+    };
+    let nm = models.name_model.as_ref().expect("name_model loaded");
+    for case in cases {
+        let eco = match case["ecosystem"].as_str().unwrap() {
+            "pypi" => Ecosystem::Pypi,
+            _ => Ecosystem::Npm,
+        };
+        let name = case["name"].as_str().unwrap();
+        let got = nm.score(eco, name).expect("ecosystem present").logit;
+        let want = case["logit"].as_f64().unwrap();
+        assert!((got - want).abs() < 1e-4, "{name}: {got} vs {want}");
+    }
+}

@@ -353,6 +353,9 @@ def main(argv: list[str]) -> None:
         "ensemble": stage_ensemble,
         "ablation": stage_ablation,
     }
+    from . import augment
+
+    stages["augment"] = augment.stage_augment
     try:
         from . import evaluate
 

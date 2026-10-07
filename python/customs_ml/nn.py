@@ -37,6 +37,10 @@ class Config:
     channels: int = 96
     hidden: int = 64
     dropout: float = 0.3
+    # Probability of replacing a training token with <unk>. Forces the model to use many
+    # weak cues instead of memorizing one campaign's exact strings, which matters on a
+    # time split where test campaigns are new.
+    token_dropout: float = 0.0
     lr: float = 2e-3
     weight_decay: float = 1e-4
     batch_size: int = 64
@@ -117,6 +121,9 @@ def train(
             idx = torch.from_numpy(batch)
             # Trim padding columns shared by the whole batch: most packages are short.
             xb = _trim(Xt[idx])
+            if cfg.token_dropout > 0:
+                drop = (torch.rand(xb.shape) < cfg.token_dropout) & (xb != PAD)
+                xb = xb.masked_fill(drop, UNK)
             loss = (loss_fn(model(xb), yt[idx]) * wt[idx]).sum() / wt[idx].sum()
             opt.zero_grad()
             loss.backward()
