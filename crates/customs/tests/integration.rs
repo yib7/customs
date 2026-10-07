@@ -640,7 +640,20 @@ fn rules_of(v: &Value) -> Vec<String> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn release_history_rules() {
+    // The default policy blocks a release that adds an install script.
     let h = Harness::start(|_| {}).await;
+    let (_, v) = h.check("npm", "hijacked", None).await;
+    assert_eq!(v["decision"], "block");
+    let r = h.get("/npm/hijacked/-/hijacked-1.1.1.tgz").await;
+    assert_eq!(r.status(), 403);
+    let err: Value = r.json().await.unwrap();
+    assert!(err["error"]
+        .as_str()
+        .unwrap()
+        .contains("install_script_added"));
+    h.stop().await;
+
+    let h = Harness::start(|p| p.install_script_added = RuleSeverity::Warn).await;
     // `check` and the proxy both compare the release with the ones before it.
     let (s, v) = h.check("npm", "hijacked", None).await;
     assert_eq!(s, 200);
@@ -691,6 +704,7 @@ async fn release_history_rules() {
 
     // Severities are configurable, and `off` keeps a rule quiet.
     let h = Harness::start(|p| {
+        p.install_script_added = RuleSeverity::Warn;
         p.provenance_dropped = RuleSeverity::Block;
         p.publisher_changed = RuleSeverity::Off;
         p.dormant_revival = RuleSeverity::Off;

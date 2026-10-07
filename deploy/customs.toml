@@ -9,7 +9,7 @@ block_install_scripts_from_new = true
 # Release history rules ("off", "warn" or "block"): heuristics that compare a version with
 # the releases before it to flag possible account takeovers. See docs/DESIGN.md section 8.
 provenance_dropped = "warn"
-install_script_added = "warn"
+install_script_added = "block"
 publisher_changed = "warn"
 dormant_revival = "warn"
 dormant_days = 365

@@ -550,7 +550,7 @@ block_nonexistent = true    # requesting a name the registry does not know is re
 block_install_scripts_from_new = true  # npm install scripts in packages younger than min_age_days
 # Release history rules: "off", "warn" or "block"
 provenance_dropped = "warn"    # npm: no provenance attestation, the previous release had one
-install_script_added = "warn"  # npm: install script added or its command changed
+install_script_added = "block" # npm: install script added or its command changed
 publisher_changed = "warn"     # npm: publisher of none of the previous 5 releases
 dormant_revival = "warn"       # previous release is more than dormant_days older
 dormant_days = 365
@@ -592,9 +592,29 @@ itself a prerelease. A version without a publish time gets no history rules.
 
 These are heuristics with known false positives: maintainers move publishing on or off CI
 (provenance comes and goes), add native builds (`install: node-gyp rebuild`), hand packages
-to new owners, and revive old projects. That is why they default to `warn` (and
-`version_anomaly`, the noisiest, to `off`); the model still judges the archive itself, and
-`block` is available for teams that would rather review such releases first. The npm rules
+to new owners, and revive old projects. The defaults follow a measurement
+(`python -m customs_ml.history_eval`, "Release history rules" in the evaluation report) on
+the corpus's compromised npm releases and on two years of releases of 260 benign npm
+packages:
+
+| Rule | Default | Compromised releases | Benign releases |
+|---|---|---:|---:|
+| `install_script_added` | block | 38% to 62% | 0.02% |
+| `provenance_dropped` | warn | unknown (most malicious versions were unpublished) | 0.19% |
+| `publisher_changed` | warn | unknown (same) | 1.06% |
+| `dormant_revival` | warn | 16% | 0.50% |
+| `version_anomaly` | off | 3% | 0.09% |
+
+`install_script_added` blocks because it is both common in takeovers and rare in
+legitimate releases: 3 of 14,895, well under the 0.1% budget of the model's block
+threshold. On the compromised npm releases of the test period it raises the share blocked
+from 41% to at least 55%. The others warn (and `version_anomaly`, which fires on releases
+the model already flags, is off); the model still judges the archive itself, and `block` is
+available for teams that would rather review such releases first. Provenance is weaker
+evidence than it looks: an attacker who takes over the project's CI publishes with valid
+provenance, and 2 of the 3 still-listed compromised releases that followed an attested
+release carry it. The Python replay of the rules matches `customs check` on 105 of 105
+sampled releases. The npm rules
 read the full packument; PyPI's JSON API names neither uploaders nor attestations, so
 `provenance_dropped` and `publisher_changed` are npm only (PEP 740 attestations through
 PyPI's Integrity API are future work, since they cost a request per file). For PyPI

@@ -115,9 +115,12 @@ customs audit -r --format sarif -o customs.sarif      # see docs/github-action.m
 ```
 
 **Release history rules.** Account takeovers show up in registry metadata before anyone
-reads the code. The policy engine compares each release with the ones before it and warns
-when npm provenance disappears, an install script appears or changes, the publisher is new,
-or a project wakes up after a year of silence (`docs/DESIGN.md`, section 8).
+reads the code. The policy engine compares each release with the ones before it and flags
+npm provenance disappearing, an install script appearing or changing, a new publisher, or
+a project waking up after a year of silence (`docs/DESIGN.md`, section 8). An added install
+script blocks by default: it fired on at least 38% of compromised npm releases and on 3 of
+14,895 legitimate ones, and it lifts the share of test-period compromised npm releases
+blocked from 41% to at least 55%. The rest warn.
 
 ## Results
 
@@ -175,7 +178,7 @@ parsed `bun run index.js` correctly and followed hooks that call other scripts
 single-run differences of a few points there are noise. Packages whose payload is a
 compiled binary are the largest group of misses with no code signal, and strings inside
 those binaries do not separate malware from benign native modules. The policy rules
-(minimum package age, install scripts in new packages) are the backstop.
+(minimum package age, install scripts in new packages, release history) are the backstop.
 
 The full report, with every slice, the ablation, calibration and the GuardDog
 methodology, is in [`docs/EVALUATION.md`](docs/EVALUATION.md).

@@ -164,8 +164,9 @@ fn shown_command(cmd: &str) -> String {
 
 /// The release history rules, which compare a version with the releases published before
 /// it. These are heuristics, not proof: maintainers move publishing on or off CI, add native
-/// build steps, hand packages over, and revive old projects. That is why they warn by
-/// default; the model still judges the archive's content.
+/// build steps, hand packages over, and revive old projects. That is why most warn by
+/// default (`install_script_added`, rare in legitimate releases, blocks); the model still
+/// judges the archive's content.
 pub fn history_hits(policy: &Policy, eco: Ecosystem, h: &ReleaseHistory) -> Vec<PolicyHit> {
     let mut hits = Vec::new();
     let mut hit = |rule: &str, severity: RuleSeverity, detail: String| {
@@ -805,7 +806,16 @@ mod tests {
                 "publisher_changed"
             ]
         );
-        assert_eq!(o.decide(Decision::Allow), Decision::Warn);
+        // `install_script_added` blocks by default; the other two warn.
+        assert_eq!(o.decide(Decision::Allow), Decision::Block);
+        let warn_only = Policy {
+            install_script_added: RuleSeverity::Warn,
+            ..policy()
+        };
+        assert_eq!(
+            evaluate(&warn_only, &c).decide(Decision::Allow),
+            Decision::Warn
+        );
         // The allow list still overrides.
         let p = Policy {
             allow: vec!["npm:@acme/widget".into()],

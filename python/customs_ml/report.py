@@ -638,6 +638,91 @@ def render(scheme: str = SCHEME) -> str:
             )
         )
 
+    hist = _load("history_eval.json")
+    if hist:
+        hc, hb = hist["compromised"], hist["benign"]
+        add("## Release history rules on compromised npm releases\n")
+        add(
+            "The proxy's release history rules (`provenance_dropped`, `install_script_added`, "
+            "`publisher_changed`, `dormant_revival`, `version_anomaly`) read registry metadata, "
+            "not code, so they can catch hijacked releases the model scores low. "
+            "`python -m customs_ml.history_eval` replays them on every compromised npm "
+            f"release in the corpus with an earlier release ({hc['n_releases']} releases of "
+            f"{hc['n_names']} packages) and on every release from the last "
+            f"{hist['benign_window_years']:g} years of {hb['n_packages']} benign npm packages "
+            f"from the corpus ({hb['n_releases']:,} releases). Most compromised versions were "
+            f"unpublished ({hc['n_releases'] - hc['n_listed']} of {hc['n_releases']}): their "
+            "publish time survives and their install scripts come from the archive, but "
+            "whether they carried provenance and who published them is gone, so those two "
+            "rules give a range (unknown counted as silent, then as firing).\n"
+        )
+        add(
+            "| Rule | Default | Compromised releases | Benign releases | Benign packages "
+            "alarmed in the window |\n|---|---|---:|---:|---:|"
+        )
+        defaults = {
+            "provenance_dropped": "warn",
+            "install_script_added": "block",
+            "publisher_changed": "warn",
+            "dormant_revival": "warn",
+            "version_anomaly": "off",
+        }
+
+        def rng(r):
+            return pct(r["low"]) if r["unknown"] == 0 else f"{pct(r['low'])} to {pct(r['high'])}"
+
+        for k, d in defaults.items():
+            add(
+                f"| `{k}` | {d} | {rng(hc['rules'][k])} | {pct(hb['rules'][k]['low'], 2)} | "
+                f"{pct(hb['packages_with_alarm'][k])} |"
+            )
+        add(
+            f"| any rule on by default | | {rng(hc['rules']['any_default'])} | "
+            f"{pct(hb['rules']['any_default']['low'], 2)} | |"
+        )
+        u = hc.get("union_test")
+        if u:
+            add(
+                f"\nOn the {u['n']} compromised releases in the test period, together with the "
+                "model:\n"
+            )
+            add("| | Model alone | With the rules |\n|---|---:|---:|")
+            add(
+                f"| Warned or blocked (any default rule) | {pct(u['model_warn'])} | "
+                f"{pct(u['model_or_rules_low'])} to {pct(u['model_or_rules_high'])} |"
+            )
+            add(
+                f"| Blocked (`install_script_added` at block) | {pct(u['model_block'])} | "
+                f"{pct(u['block_with_install_rule_low'])} to "
+                f"{pct(u['block_with_install_rule_high'])} |"
+            )
+        isa = hb["rules"]["install_script_added"]
+        add(
+            f"\n`install_script_added` is the rule that earns its place: it fired on "
+            f"{isa['fired']} of {hb['n_releases']:,} legitimate releases "
+            f"({pct(isa['low'], 2)}, under the block budget of 0.1%) and on at least "
+            f"{pct(hc['rules']['install_script_added']['low'])} of compromised ones, because "
+            "the classic takeover adds a `postinstall` and established packages rarely change "
+            "theirs. It therefore blocks by default. `publisher_changed` is the noisiest rule "
+            f"on by default ({pct(hb['rules']['publisher_changed']['low'], 2)} of releases; "
+            f"{pct(hb['packages_with_alarm']['publisher_changed'])} of packages over the "
+            "window, since large projects rotate release managers), and its value on "
+            "compromised releases cannot be measured once they are unpublished, so it stays "
+            "at warn. Provenance cannot be judged from what survives: of the "
+            f"{hc['n_listed']} compromised releases still listed, "
+            f"{hc['listed_after_attested']} followed a release with provenance, and "
+            f"{hc['listed_after_attested_still_attested']} of those carry valid provenance "
+            "themselves, because the attacker published through the project's own CI. A "
+            "takeover by stolen token drops provenance; a takeover of the build does not.\n"
+        )
+        par = _load("history_parity.json")
+        if par:
+            add(
+                f"The Python replay agrees with the proxy's own `customs check` on "
+                f"{par['agree']} of {par['checked']} benign releases sampled across the rules "
+                "(every rule set to warn).\n"
+            )
+
     live = _load("live_study.json")
     if live:
         add("## Prospective study: live PyPI traffic\n")

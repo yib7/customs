@@ -62,7 +62,7 @@ const HISTORY_RULE_TEXT: Record<HistoryRule, { label: string; description: strin
   },
   install_script_added: {
     label: 'Install script added',
-    description: 'npm: this version adds an install script or changes its command.',
+    description: 'npm: this version adds an install script or changes its command. Rare in legitimate releases, so it blocks by default.',
   },
   publisher_changed: {
     label: 'New publisher',
@@ -393,7 +393,7 @@ function PolicyForm({
       <Card
         id="release-history"
         title="Release history"
-        description="Compare a version with the releases before it to catch compromised releases of established packages. These heuristics also fire on legitimate changes (new CI, new maintainers), so they warn by default and the model still judges the code."
+        description="Compare a version with the releases before it to catch compromised releases of established packages. These heuristics also fire on legitimate changes (new CI, new maintainers), so most warn by default and the model still judges the code. An added install script is rare in legitimate releases and blocks."
       >
         <div className="divide-y divide-line">
           {HISTORY_RULES.map((rule) => (

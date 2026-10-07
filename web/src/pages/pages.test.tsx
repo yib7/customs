@@ -57,6 +57,7 @@ describe('Policy page', () => {
     const provenance = await screen.findByRole('combobox', { name: 'Provenance dropped' });
     expect(provenance).toHaveValue('warn');
     expect(screen.getByRole('combobox', { name: 'Unusual version jump' })).toHaveValue('off');
+    expect(screen.getByRole('combobox', { name: 'Install script added' })).toHaveValue('block');
     await user.selectOptions(provenance, 'block');
     await user.selectOptions(screen.getByRole('combobox', { name: 'New publisher' }), 'off');
     const dormant = screen.getByRole('textbox', { name: 'Dormancy period (days)' });
@@ -71,7 +72,7 @@ describe('Policy page', () => {
     expect(window.__customsMock?.server.policy).toMatchObject({
       provenance_dropped: 'block',
       publisher_changed: 'off',
-      install_script_added: 'warn',
+      install_script_added: 'block',
       dormant_days: 180,
     });
   });

@@ -467,7 +467,7 @@ export const INITIAL_POLICY = {
   block_nonexistent: true,
   block_install_scripts_from_new: true,
   provenance_dropped: 'warn',
-  install_script_added: 'warn',
+  install_script_added: 'block',
   publisher_changed: 'warn',
   dormant_revival: 'warn',
   dormant_days: 365,

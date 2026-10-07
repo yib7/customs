@@ -349,7 +349,7 @@ export function parsePolicy(v: unknown): Policy {
     block_nonexistent: asBool(r.block_nonexistent, true),
     block_install_scripts_from_new: asBool(r.block_install_scripts_from_new, true),
     provenance_dropped: parseRuleSeverity(r.provenance_dropped, 'warn'),
-    install_script_added: parseRuleSeverity(r.install_script_added, 'warn'),
+    install_script_added: parseRuleSeverity(r.install_script_added, 'block'),
     publisher_changed: parseRuleSeverity(r.publisher_changed, 'warn'),
     dormant_revival: parseRuleSeverity(r.dormant_revival, 'warn'),
     dormant_days: dormantDays === null ? 365 : dormantDays,

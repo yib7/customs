@@ -180,6 +180,9 @@ fn default_min_age() -> u32 {
 fn default_warn() -> RuleSeverity {
     RuleSeverity::Warn
 }
+fn default_block() -> RuleSeverity {
+    RuleSeverity::Block
+}
 fn default_off() -> RuleSeverity {
     RuleSeverity::Off
 }
@@ -210,13 +213,15 @@ pub struct Policy {
     pub block_install_scripts_from_new: bool,
     // Release history rules: compare the requested version with the releases published
     // before it to catch compromised releases of established packages. They are heuristics
-    // with known false positives (CI changes, new native builds, new maintainers), so they
-    // warn by default and the model still judges the archive itself.
+    // with known false positives (CI changes, new native builds, new maintainers), so most
+    // warn by default and the model still judges the archive itself. `install_script_added`
+    // blocks: it fired on 0.02% of legitimate npm releases and on at least 37% of
+    // compromised ones (DESIGN.md section 8).
     /// npm: this version has no provenance attestation but the previous release had one.
     #[serde(default = "default_warn")]
     pub provenance_dropped: RuleSeverity,
     /// npm: this version adds an install script or changes its command.
-    #[serde(default = "default_warn")]
+    #[serde(default = "default_block")]
     pub install_script_added: RuleSeverity,
     /// npm: this version was published by an account that published none of the previous
     /// five releases.
@@ -250,7 +255,7 @@ impl Default for Policy {
             block_nonexistent: true,
             block_install_scripts_from_new: true,
             provenance_dropped: default_warn(),
-            install_script_added: default_warn(),
+            install_script_added: default_block(),
             publisher_changed: default_warn(),
             dormant_revival: default_warn(),
             dormant_days: default_dormant_days(),
@@ -545,7 +550,7 @@ npm = "https://registry.npmjs.org"
     fn release_history_keys() {
         let p = Policy::default();
         assert_eq!(p.provenance_dropped, RuleSeverity::Warn);
-        assert_eq!(p.install_script_added, RuleSeverity::Warn);
+        assert_eq!(p.install_script_added, RuleSeverity::Block);
         assert_eq!(p.publisher_changed, RuleSeverity::Warn);
         assert_eq!(p.dormant_revival, RuleSeverity::Warn);
         assert_eq!(p.dormant_days, 365);
