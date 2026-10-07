@@ -144,7 +144,7 @@ training was augmented with disguised malware. Detection at the warn threshold:
 | install script moved behind an import | no | 79.9% | 77.6% |
 | payload wrapped in base64 + exec | no | 91.6% | 92.2% |
 
-**A second source.** All of the above uses one collector's malware.
+**A second source.** The test sets above hold one collector's malware.
 [MalRegistry](https://github.com/lxyeternal/pypi_malregistry) (ASE 2023) was gathered by
 another team. Its samples with no name or near-duplicate in the training data are split by
 campaign into a dev half and a held-out half that is never looked at or trained on:
