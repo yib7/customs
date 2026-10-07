@@ -218,3 +218,45 @@ def test_dependency_rules_see_through_a_burst():
     hits = he.history_rules(doc, "1.0.2", lookup=lambda d: DEPS.get(d, {}), name="pkg")
     assert hits["nonregistry_dependency_added"] is False
     assert hits["young_dependency_added"] is False
+
+
+def test_takeover_families():
+    assert he.family("@mastra/core") == "@mastra/*"
+    assert he.family("autotel-terminal") == "autotel-*"
+    assert he.family("pgserve") == "pgserve"
+
+    def row(name, block=False, isa=None, split="test"):
+        r = {k: None for k in he.RULES}
+        r.update(
+            name=name,
+            version="1.0.0",
+            split=split,
+            listed=False,
+            attested=None,
+            prev_attested=None,
+            model_warn=block,
+            model_block=block,
+            young_dependencies=[],
+            install_script_added=isa,
+        )
+        return r
+
+    rows = [
+        row("@w/a", block=True),
+        row("@w/b", isa=True),
+        row("@w/c"),
+        row("x-1", isa=True),
+        row("x-2", isa=True),
+        row("@w/d", split="train"),
+    ]
+    out = he.summarize({"rows": rows, "n_names": 5, "n_without_history": 0}, [])
+    assert out["compromised"]["families_test"] == [
+        {
+            "family": "@w/*",
+            "n": 3,
+            "packages": 3,
+            "model_block": 1,
+            "rules_block": 1,
+            "block_with_rules": 2,
+        }
+    ]
