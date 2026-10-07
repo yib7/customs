@@ -384,6 +384,45 @@ def render(scheme: str = SCHEME) -> str:
         add(f"| Largest risk difference vs Python | {rep['max_abs_risk_diff']:.2e} |")
         add("")
 
+    lt = _load("loadtest.json")
+    if lt:
+        add("### Latency under concurrent installs\n")
+        add(
+            f"`scripts/loadtest.py` serves {lt['archives']:,} test archives (median "
+            f"{lt['archive_kb']['p50']:.0f} KB, 95th percentile "
+            f"{lt['archive_kb']['p95']:.0f} KB) from a local fake registry and requests "
+            f"them through the firewall in enforce mode on a {lt['cpus']}-core machine. "
+            "Cold requests fetch, scan, score and decide; warm requests hit the verdict "
+            "and artifact cache. Each concurrency level gets its own archives.\n"
+        )
+        add("| Run | Clients | Requests/s | p50 ms | p95 ms | p99 ms |")
+        add("|---|---:|---:|---:|---:|---:|")
+        d = lt["direct"]
+        rows = [("Upstream directly (no firewall)", d)]
+        rows += [("Cold", lt["cold"][c]) for c in lt["cold"]]
+        rows += [("Warm (cached)", lt["warm"])]
+        for label, r in rows:
+            add(
+                f"| {label} | {r['concurrency']} | {r['throughput_per_s']:.1f} | "
+                f"{r['p50_ms']:.0f} | {r['p95_ms']:.0f} | {r['p99_ms']:.0f} |"
+            )
+        c1 = next(iter(lt["cold"].values()))
+        sz = c1.get("p50_ms_by_size", {})
+        sf = lt["single_flight"]
+        add(
+            f"\nThe server's own scan-and-score time averages {lt['server_scan_mean_ms']:.0f} "
+            "ms. Sequential cold latency grows with archive size (median "
+            + ", ".join(
+                f"{v:.0f} ms {k.replace('_', ' ').replace('kb', ' KB').replace('mb', ' MB')}"
+                for k, v in sz.items()
+                if v is not None
+            )
+            + f"). When {sf['clients_per_package']} clients request the same uncached "
+            f"archive at once, {sf['packages']} such bursts ({sf['requests']} requests) "
+            f"cost {sf['scans']} scans: the other {sf['joins']} requests waited on the "
+            "scan already in flight.\n"
+        )
+
     ext = _load("external_malregistry.json")
     ext_base = _load("external_malregistry_baseline.json")
     adapt = _load("external_adapt_100.json")
