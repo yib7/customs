@@ -1,0 +1,129 @@
+# Customs as a shared, cluster-internal package firewall for a team or CI fleet.
+# Verdict history lives in SQLite on a persistent volume, so this runs as a single-replica
+# StatefulSet; the scanner is CPU-bound and stateless per request, so vertical scaling
+# (more CPU) is the knob, not replicas.
+#   kubectl apply -k deploy/k8s
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: customs
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: customs-policy
+  namespace: customs
+data:
+  customs.toml: |
+    mode = "enforce"
+    warn_threshold = "model"
+    block_threshold = "model"
+    min_age_days = 3
+    block_nonexistent = true
+    block_install_scripts_from_new = true
+    allow = []
+    deny = []
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: customs
+  namespace: customs
+spec:
+  serviceName: customs
+  replicas: 1
+  selector:
+    matchLabels: { app: customs }
+  template:
+    metadata:
+      labels: { app: customs }
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "7878"
+        prometheus.io/path: /metrics
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+        seccompProfile: { type: RuntimeDefault }
+      initContainers:
+        # Seed the writable policy file from the ConfigMap on first start only, so edits
+        # made through the dashboard survive restarts.
+        - name: seed-policy
+          image: customs:latest
+          command: ["sh", "-c", "test -f /var/lib/customs/policy.toml || cp /etc/customs/customs.toml /var/lib/customs/policy.toml"]
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/customs }
+            - { name: policy, mountPath: /etc/customs }
+      containers:
+        - name: customs
+          image: customs:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - { name: http, containerPort: 7878 }
+          env:
+            - { name: CUSTOMS_LOG_JSON, value: "1" }
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 30
+            failureThreshold: 3
+          resources:
+            requests: { cpu: 500m, memory: 256Mi }
+            limits: { cpu: "2", memory: 1Gi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/customs }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: policy
+          configMap: { name: customs-policy }
+        - name: tmp
+          emptyDir: {}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests: { storage: 5Gi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: customs
+  namespace: customs
+spec:
+  selector: { app: customs }
+  ports:
+    - { name: http, port: 7878, targetPort: http }
+---
+# Only workloads labelled customs-client may reach the firewall; it may only talk to DNS
+# and HTTPS (the upstream registries).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: customs
+  namespace: customs
+spec:
+  podSelector:
+    matchLabels: { app: customs }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels: { customs-client: "true" }
+      ports:
+        - { port: 7878 }
+  egress:
+    - ports:
+        - { port: 53, protocol: UDP }
+        - { port: 53, protocol: TCP }
+        - { port: 443, protocol: TCP }

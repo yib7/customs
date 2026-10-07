@@ -1,0 +1,10 @@
+# Example policy. See docs/DESIGN.md section 8.
+mode = "enforce"
+warn_threshold = "model"
+block_threshold = "model"
+min_age_days = 3
+min_age_severity = "block"
+block_nonexistent = true
+block_install_scripts_from_new = true
+allow = []
+deny = []

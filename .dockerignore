@@ -1,0 +1,10 @@
+target
+**/node_modules
+web/dist
+web/screenshots
+web/test-results
+web/playwright-report
+python
+.git
+.claude
+docs
