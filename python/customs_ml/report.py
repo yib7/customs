@@ -213,6 +213,61 @@ def render(scheme: str = SCHEME) -> str:
         "source-line counts, to expose any small-package shortcut.\n"
     )
 
+    mis = _load("misses.json")
+    if mis:
+        cats = mis["categories"]
+        add("## What the misses are\n")
+        add(
+            f"Of {mis['n_test_malware']:,} test malware packages, {mis['n_missed']:,} fall "
+            "below the warn threshold. Grouped by what the scanner saw:\n"
+        )
+        add("| Scanner saw | n malicious | Missed | Miss rate |\n|---|---:|---:|---:|")
+        labels = {
+            "indicators_on_surface": "Behavior indicators on the install surface",
+            "indicators_off_surface": "Indicators only outside the install surface",
+            "no_indicator": "No behavior indicator anywhere",
+        }
+        for k, label in labels.items():
+            c = cats[k]
+            add(f"| {label} | {c['n']:,} | {c['missed']:,} | {pct(c['miss_rate'])} |")
+        add("")
+        bo = mis["binary_only"]
+        add(
+            "A hand audit of 20 missed packages with no indicator anywhere (one per "
+            "campaign, sampled at random) found 12 whose payload is a compiled binary "
+            "(`.node`, `.exe`, `.so`, a macOS app), 1 that ships no code and depends on a "
+            "malicious package (which the proxy scans on its own when the client fetches "
+            "it), and 7 with no malicious content in the archive: two placeholders (a "
+            "name reserved against dependency confusion that only raises an error, and "
+            "the PyPA sample project) and five releases that read as clean. Those seven "
+            "are label noise, so part of this row is not detectable by any scanner.\n"
+        )
+        add(
+            f"Binary-only packages (a compiled binary and under 50 lines of source) are a "
+            f"temporal blind spot: {bo['n_test_malware']:,} test malware packages against "
+            f"{bo['n_train_malware']:,} in training, and {pct(bo['miss_rate'])} of the test "
+            "ones are missed at warn."
+        )
+        bs = mis.get("binary_strings") or {}
+        tr_m, tr_b = bs.get("train:malicious"), bs.get("train:benign")
+        te_m = bs.get("test:malicious")
+        if tr_m and tr_b and te_m:
+            add(
+                " Searching every packaged binary for infostealer and dropper strings "
+                "(webhook and bot endpoints, browser credential stores, wallet and SSH key "
+                "paths, anti-VM process names, autorun commands, IP-literal URLs) does not "
+                f"separate the classes: at least one appears in {pct(tr_m['any_stealer_string'])} "
+                f"of malicious and {pct(tr_b['any_stealer_string'])} of benign training "
+                f"binaries, and in {pct(te_m['any_stealer_string'])} of malicious test ones. "
+                f"PyInstaller marks {pct(tr_m.get('pyinstaller', 0))} of malicious training "
+                f"binaries but {pct(te_m.get('pyinstaller', 0))} in test, so a feature built "
+                "on it would learn the past. Binary payloads stay with the policy rules "
+                "(minimum package age, install scripts in new packages) rather than the "
+                "classifier.\n"
+            )
+        else:
+            add("\n")
+
     if abl:
         add("## Ablation: what does the code itself say?\n")
         add(
@@ -570,6 +625,51 @@ def render(scheme: str = SCHEME) -> str:
             f"({pct(flagged / max(live['scanned'], 1))}) {'was' if flagged == 1 else 'were'} "
             "warned or blocked, the rate a "
             "user installing brand-new releases would see.\n"
+        )
+
+    var = _load("seed_variance.json")
+    if var and len(var.get("runs", [])) > 1:
+        sp = var["spread"]
+        add("## Retrain variance\n")
+        add(
+            f"The tree model and the CNN retrained with {len(var['runs'])} seeds "
+            f"({', '.join(map(str, var['seeds'][: len(var['runs'])]))}) on identical data, "
+            "each stacked and thresholded the same way as the shipped model. A change "
+            "between two training runs smaller than these ranges is not evidence that "
+            "anything improved or regressed.\n"
+        )
+        add("| Test metric | Mean | SD | Min | Max |\n|---|---:|---:|---:|---:|")
+        rows = [
+            ("ROC AUC", "roc_auc", False),
+            ("Recall at block", "recall_block", True),
+            ("FPR at block", "fpr_block", True),
+            ("Recall at warn", "recall_warn", True),
+            ("Recall at exactly 0.1% FPR (test ROC)", "roc_recall_0_001", True),
+            ("Compromised libraries: ROC AUC", "compromised_lib_roc_auc", False),
+            ("Compromised libraries: recall at block", "compromised_lib_recall_block", True),
+            ("PyPI malware: ROC AUC", "pypi_roc_auc", False),
+            ("PyPI malware: recall at block", "pypi_recall_block", True),
+        ]
+        for label, k, is_pct in rows:
+            v = sp.get(k)
+            if not v:
+                continue
+            if is_pct:
+                d = 2 if k.startswith("fpr") else 1
+                add(
+                    f"| {label} | {pct(v['mean'], d)} | {100 * v['std']:.{d}f} pts | "
+                    f"{pct(v['min'], d)} | {pct(v['max'], d)} |"
+                )
+            else:
+                add(
+                    f"| {label} | {v['mean']:.3f} | {v['std']:.3f} | {v['min']:.3f} | "
+                    f"{v['max']:.3f} |"
+                )
+        add(
+            "\nThe block threshold sits at the 0.1% tail of about 2,000 benign validation "
+            "packages, so it rests on two or three scores and moves with every retrain; "
+            "recall at block inherits that movement. The threshold-free row shows how "
+            "much of the spread is the model and how much is the threshold.\n"
         )
 
     add("## Calibration\n")
