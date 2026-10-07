@@ -508,7 +508,14 @@ def main():
     for i in range(14):
         eco, name = NAME_CASES[(i * 5) % len(NAME_CASES)]
         feats = random_features() if i % 4 != 3 else {}
-        toks = [] if i % 3 == 2 else [str(token_pool[j]) for j in rng.integers(0, len(token_pool), 20)]
+        # None: the archive was never tokenized, so the CNN is skipped. []: tokenized with no
+        # install-time code, which the CNN still scores (it was trained on such packages).
+        if i % 6 == 2:
+            toks = None
+        elif i % 6 == 5:
+            toks = []
+        else:
+            toks = [str(token_pool[j]) for j in rng.integers(0, len(token_pool), 20)]
         use_name = i % 5 != 4
         logits, scores = {}, {}
         if feats:
@@ -516,7 +523,7 @@ def main():
             logits["code_gbdt"], scores["code_gbdt"] = g["raw"], g["calibrated"]
         else:
             logits["code_gbdt"], scores["code_gbdt"] = None, None
-        if toks:
+        if toks is not None:
             _, l = cnn_forward(cnn, arrays, toks)
             logits["code_nn"], scores["code_nn"] = l, sigmoid(l)
         else:

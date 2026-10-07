@@ -338,3 +338,13 @@ fn report_serializes_to_design_shape() {
     assert!(v.get("tokens").is_none());
     assert_eq!(v["ecosystem"], "pypi");
 }
+
+#[test]
+fn features_do_not_depend_on_the_archive_file_name() {
+    // A package without a manifest version: only the file name carries one.
+    let tgz = tar_gz_files(&[("pkg-9.9/pkg/__init__.py", "import os\n")]);
+    let opts = ScanOptions::default();
+    let a = scan_archive(&tgz, "pkg-99.0.0.tar.gz", Some(Ecosystem::Pypi), &opts).unwrap();
+    let b = scan_archive(&tgz, "0123abcd.tar.gz", Some(Ecosystem::Pypi), &opts).unwrap();
+    assert_eq!(a.features, b.features);
+}

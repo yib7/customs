@@ -238,12 +238,13 @@ impl Models {
             }
             _ => None,
         };
+        // An empty token stream (no install-time code) is still a scan result: the CNN was
+        // trained on such packages and scores them, so it runs here too. Only an archive
+        // that was never tokenized (`tokens: None`) skips the CNN.
         if let (Some(m), Some(t)) = (&self.code_nn, input.tokens) {
-            if !t.is_empty() {
-                let l = m.logit(t) as f64;
-                scores.code_nn = Some(sigmoid(l));
-                logits.code_nn = Some(l);
-            }
+            let l = m.logit(t) as f64;
+            scores.code_nn = Some(sigmoid(l));
+            logits.code_nn = Some(l);
         }
         let name = input
             .name

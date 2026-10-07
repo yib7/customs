@@ -99,6 +99,15 @@ def render(scheme: str = SCHEME) -> str:
         f"{ci(h['recall_at_fpr_0_01'])} |"
     )
     add(f"| Realized test FPR at warn | {ci(h['test_fpr_warn'], 2)} |")
+    if "roc_recall_at_fpr_0_001" in h:
+        add(
+            f"| Detection at exactly 0.1% FPR on the test ROC (threshold-free) | "
+            f"{ci(h['roc_recall_at_fpr_0_001'])} |"
+        )
+        add(
+            f"| Detection at exactly 1% FPR on the test ROC (threshold-free) | "
+            f"{ci(h['roc_recall_at_fpr_0_01'])} |"
+        )
     add(f"| Brier score | {num(h['brier'])} |")
     add(f"| Expected calibration error | {num(h['ece'])} |")
     add("")
@@ -272,9 +281,38 @@ def render(scheme: str = SCHEME) -> str:
         add("")
         add(
             "The name model's job is the pre-download check (typosquats and names an agent "
-            "hallucinated). Its stacking weight is small because, once the archive is "
-            "scanned, the code models carry the decision.\n"
+            "hallucinated), before any archive exists to scan. Once the archive is scanned "
+            "it adds nothing: its stacking weight is near zero. An earlier run gave it a "
+            "clearly positive weight; that turned out to be a leak (the source dataset "
+            "spells scoped npm names `@scope@name`, a form no benign name has), found by "
+            "the end-to-end replay and fixed.\n"
         )
+
+    rep = _load("replay.json")
+    if rep:
+        add("## End to end through the Rust firewall\n")
+        add(
+            "`scripts/replay.py` serves held-out test archives from a local fake registry and "
+            "requests each one through the real `customs serve` binary (nothing is installed "
+            "or executed). This exercises the shipped scanner, Rust inference and policy "
+            "engine together, and checks them against the Python evaluation.\n"
+        )
+        add("| | Value |\n|---|---:|")
+        add(f"| Requests | {rep['requests']:,} |")
+        add(
+            f"| Mean latency per request (scan + score + policy) | "
+            f"{1000 * rep['seconds_per_request']:.0f} ms |"
+        )
+        add(f"| Malicious: blocked (HTTP 403) | {pct(rep['malicious_blocked'])} |")
+        add(f"| Malicious: blocked or warned | {pct(rep['malicious_block_or_warn'])} |")
+        add(f"| Benign: blocked | {pct(rep['benign_blocked'])} |")
+        add(f"| Benign: warned | {pct(rep['benign_warned'])} |")
+        add(
+            f"| Decisions identical to the Python pipeline | "
+            f"{pct(rep['decision_agreement_with_python'])} |"
+        )
+        add(f"| Largest risk difference vs Python | {rep['max_abs_risk_diff']:.2e} |")
+        add("")
 
     add("## Calibration\n")
     add("![Calibration](figures/calibration.png)\n")

@@ -240,17 +240,14 @@ fn bundle_assess_parity() {
     let cases = load("expected_assess.json");
     for (i, c) in cases["cases"].as_array().unwrap().iter().enumerate() {
         let feats = features(&c["features"]);
-        let tokens: Vec<String> = c["tokens"]
+        let tokens: Option<Vec<String>> = c["tokens"]
             .as_array()
-            .unwrap()
-            .iter()
-            .map(|t| t.as_str().unwrap().to_string())
-            .collect();
+            .map(|a| a.iter().map(|t| t.as_str().unwrap().to_string()).collect());
         let input = ScoreInput {
             ecosystem: eco(c["ecosystem"].as_str().unwrap()),
             name: c["name"].as_str(),
             features: Some(&feats),
-            tokens: Some(&tokens),
+            tokens: tokens.as_deref(),
         };
         let a = models.assess(&input);
         let s = &c["scores"];

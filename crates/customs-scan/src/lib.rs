@@ -715,7 +715,11 @@ impl<'a> Scanner<'a> {
             .or(meta.long_description_bytes)
             .unwrap_or(0);
         set("meta_readme_bytes", readme as f64);
-        if let Some(v) = &version {
+        // Version features come from the manifest only. The file name is not part of the
+        // package content (training archives are stored under content hashes, the proxy
+        // sees registry file names), so a feature derived from it would differ between
+        // training and serving for the same package.
+        if let Some(v) = meta.version.as_deref().filter(|v| !v.trim().is_empty()) {
             let (major, minor) = manifest::version_parts(v);
             set("meta_version_major", major.unwrap_or(0) as f64);
             set(

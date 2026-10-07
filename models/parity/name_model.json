@@ -1,0 +1,102 @@
+[
+ {
+  "ecosystem": "pypi",
+  "name": "requests",
+  "logit": -2.2618584489522853
+ },
+ {
+  "ecosystem": "pypi",
+  "name": "reqeusts",
+  "logit": 5.845581301134269
+ },
+ {
+  "ecosystem": "pypi",
+  "name": "numpy-utils-pro",
+  "logit": -1.2456094639803816
+ },
+ {
+  "ecosystem": "pypi",
+  "name": "@types/node",
+  "logit": 0.679751996363807
+ },
+ {
+  "ecosystem": "pypi",
+  "name": "@typs/node",
+  "logit": 1.2624390455366257
+ },
+ {
+  "ecosystem": "pypi",
+  "name": "left-pad",
+  "logit": -1.0278830728691855
+ },
+ {
+  "ecosystem": "pypi",
+  "name": "lodahs",
+  "logit": -3.3459990364641907
+ },
+ {
+  "ecosystem": "pypi",
+  "name": "colorama2",
+  "logit": 7.240875274190234
+ },
+ {
+  "ecosystem": "pypi",
+  "name": "python-dateutil",
+  "logit": -6.19532515781568
+ },
+ {
+  "ecosystem": "pypi",
+  "name": "discord.js-selfbot-v14",
+  "logit": 3.409683356771896
+ },
+ {
+  "ecosystem": "npm",
+  "name": "requests",
+  "logit": 0.7483376965822088
+ },
+ {
+  "ecosystem": "npm",
+  "name": "reqeusts",
+  "logit": 2.2118041409960156
+ },
+ {
+  "ecosystem": "npm",
+  "name": "numpy-utils-pro",
+  "logit": -2.70619795515079
+ },
+ {
+  "ecosystem": "npm",
+  "name": "@types/node",
+  "logit": -13.346747325019697
+ },
+ {
+  "ecosystem": "npm",
+  "name": "@typs/node",
+  "logit": -6.9823631416375935
+ },
+ {
+  "ecosystem": "npm",
+  "name": "left-pad",
+  "logit": -1.7816039961907046
+ },
+ {
+  "ecosystem": "npm",
+  "name": "lodahs",
+  "logit": 0.4533882695869006
+ },
+ {
+  "ecosystem": "npm",
+  "name": "colorama2",
+  "logit": 1.4481294220975183
+ },
+ {
+  "ecosystem": "npm",
+  "name": "python-dateutil",
+  "logit": -1.2681276139052287
+ },
+ {
+  "ecosystem": "npm",
+  "name": "discord.js-selfbot-v14",
+  "logit": 5.2444547020367915
+ }
+]

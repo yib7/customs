@@ -50,6 +50,10 @@ def _recall_fn(t):
     return lambda y, s: metrics.recall_at_threshold(y, s, t)
 
 
+def _roc_recall_fn(fpr):
+    return lambda y, s: metrics.recall_at_threshold(y, s, metrics.threshold_at_fpr(y, s, fpr))
+
+
 def _fpr_fn(t):
     return lambda y, s: metrics.fpr_at_threshold(y, s, t)
 
@@ -100,6 +104,11 @@ def run(scheme: str = SCHEME, with_guarddog: bool = True) -> dict:
         "recall_at_fpr_0_01": _ci(y, s, cl, _recall_fn(thr_ens["warn"])),
         "test_fpr_block": _ci(y, s, cl, _fpr_fn(thr_ens["block"])),
         "test_fpr_warn": _ci(y, s, cl, _fpr_fn(thr_ens["warn"])),
+        # Threshold-free: detection at exactly this FPR on the test ROC. Separates model
+        # quality from the noise of estimating a 0.1% threshold on ~2,000 validation
+        # packages (each bootstrap resample re-derives its own threshold).
+        "roc_recall_at_fpr_0_001": _ci(y, s, cl, _roc_recall_fn(FPR_BLOCK)),
+        "roc_recall_at_fpr_0_01": _ci(y, s, cl, _roc_recall_fn(FPR_WARN)),
         "brier": metrics.brier(y, s),
         "ece": metrics.expected_calibration_error(y, s),
     }

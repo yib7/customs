@@ -106,7 +106,7 @@
     "code_nn": null,
     "name": 5.449724931310018e-08
    },
-   "tokens": [],
+   "tokens": null,
    "weight_set": "missing:code_nn"
   },
   {
@@ -207,11 +207,11 @@
    "risk": 0.08564205746714437,
    "scores": {
     "code_gbdt": 0.028965244982652294,
-    "code_nn": null,
+    "code_nn": 0.5099819837738291,
     "name": 7.255753432724784e-05
    },
    "tokens": [],
-   "weight_set": "missing:code_nn"
+   "weight_set": "primary"
   },
   {
    "ecosystem": "npm",
@@ -313,7 +313,7 @@
     "code_nn": null,
     "name": 2.311040001224824e-06
    },
-   "tokens": [],
+   "tokens": null,
    "weight_set": "missing:code_nn"
   },
   {
@@ -411,11 +411,11 @@
    "risk": 0.08564205746714437,
    "scores": {
     "code_gbdt": null,
-    "code_nn": null,
+    "code_nn": 0.5099819837738291,
     "name": 0.0001928102730608361
    },
    "tokens": [],
-   "weight_set": "partial:code_gbdt+code_nn"
+   "weight_set": "partial:code_gbdt"
   },
   {
    "ecosystem": "npm",

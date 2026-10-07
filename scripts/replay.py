@@ -197,6 +197,8 @@ def main() -> None:
                 "label": r.label, "ecosystem": r.ecosystem, "status": status,
                 "decision": verdict.get("decision"), "risk": verdict.get("risk"),
                 "py_risk": r.ens_risk_temporal,
+                "scores": verdict.get("scores"),
+                "py_logits": [r.gbdt_logit_temporal, r.cnn_logit_temporal, r.name_logit],
             })
         elapsed = time.time() - t0
         res = pd.DataFrame(out)
@@ -221,6 +223,7 @@ def main() -> None:
             print(bad.head(10).to_string())
         print(json.dumps(summary, indent=1))
         (data / "work" / "replay.json").write_text(json.dumps(summary, indent=1))
+        res.to_json(data / "work" / "replay_rows.jsonl", orient="records", lines=True)
         if args.keep:
             print(f"firewall running at {proxy} (pid {server.pid}); Ctrl-C to stop")
             signal.pause()
