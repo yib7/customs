@@ -22,6 +22,66 @@ pub struct CommandRefs {
     pub scripts: Vec<String>,
 }
 
+/// Shell commands in gyp command expansions (`<!(cmd)` and `<!@(cmd)`) with the line each
+/// starts on. node-gyp runs them while it configures the build, so a `binding.gyp` that
+/// npm builds at install runs them at install. Parentheses inside a command nest, as gyp
+/// counts them.
+pub fn gyp_commands(text: &str) -> Vec<(String, u32)> {
+    const MAX_COMMANDS: usize = 32;
+    let mut out = Vec::new();
+    let mut pos = 0usize;
+    while out.len() < MAX_COMMANDS {
+        let Some(at) = text[pos..].find("<!").map(|i| pos + i) else {
+            break;
+        };
+        // Index of the opening parenthesis.
+        let open = match &text[at + 2..] {
+            t if t.starts_with('(') => at + 2,
+            t if t.starts_with("@(") => at + 3,
+            _ => {
+                pos = at + 2;
+                continue;
+            }
+        };
+        let mut depth = 0usize;
+        let mut close = None;
+        for (i, c) in text[open..].char_indices() {
+            match c {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = Some(open + i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(close) = close else {
+            break;
+        };
+        // The command sits in a JSON or Python string literal: undo its escapes.
+        let mut cmd = String::new();
+        let mut chars = text[open + 1..close].trim().chars();
+        while let Some(c) = chars.next() {
+            match (c, chars.clone().next()) {
+                ('\\', Some(n @ ('"' | '\'' | '\\'))) => {
+                    cmd.push(n);
+                    chars.next();
+                }
+                _ => cmd.push(c),
+            }
+        }
+        if !cmd.is_empty() {
+            let line = text[..at].matches('\n').count() as u32 + 1;
+            out.push((cmd, line));
+        }
+        pos = close + 1;
+    }
+    out
+}
+
 /// Yarn commands that are not script names (`yarn <script>` runs a script otherwise).
 const YARN_BUILTINS: [&str; 16] = [
     "add",
@@ -445,6 +505,32 @@ mod tests {
         assert_eq!(r.scripts, vec!["clean"]);
         let r = command_refs("bun ./postinstall.mjs || node ./postinstall.mjs");
         assert_eq!(r.files.len(), 2);
+    }
+
+    #[test]
+    fn gyp_command_expansions() {
+        let gyp = r#"{
+  "targets": [{
+    "include_dirs": ["<!(node -e \"require('nan')\")", "<!@(node -p \"require('a').include\")"],
+    "sources": ["<!(node index.js > /dev/null 2>&1 && echo stub.c)"],
+    "defines": ["<(module_name)", "<!(unterminated"]
+  }]
+}"#;
+        let cmds = gyp_commands(gyp);
+        assert_eq!(
+            cmds,
+            vec![
+                ("node -e \"require('nan')\"".to_string(), 3),
+                ("node -p \"require('a').include\"".to_string(), 3),
+                (
+                    "node index.js > /dev/null 2>&1 && echo stub.c".to_string(),
+                    4
+                ),
+            ]
+        );
+        let refs = command_refs(&cmds[2].0);
+        assert_eq!(refs.files, vec![("index.js".to_string(), Lang::Js)]);
+        assert!(gyp_commands("no expansions <(x)").is_empty());
     }
 
     #[test]

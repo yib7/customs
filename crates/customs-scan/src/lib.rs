@@ -479,6 +479,52 @@ impl<'a> Scanner<'a> {
         cands.iter().find_map(|c| self.add_inst_path(c, Some(lang)))
     }
 
+    /// Put a shell command that runs at install on the surface, with inline code it runs
+    /// and the package files it points at. Returns the package.json scripts it invokes.
+    fn add_install_command(
+        &mut self,
+        label: &str,
+        cmd: &str,
+        line: u32,
+        script_files: &mut Vec<usize>,
+    ) -> Vec<String> {
+        self.install_surface.push(label.to_string());
+        self.units.push(Unit {
+            label: label.to_string(),
+            text: cmd.to_string(),
+            lang: Lang::Shell,
+            line_offset: line.saturating_sub(1),
+            inst: true,
+        });
+        let refs = surface::command_refs(cmd);
+        for (code, lang) in refs.inline {
+            // `node -e "require('./postinstall')"` runs that file too.
+            let required = if lang == Lang::Js {
+                indicators::analyze(&code, Lang::Js).relative_imports
+            } else {
+                Vec::new()
+            };
+            self.units.push(Unit {
+                label: label.to_string(),
+                text: code,
+                lang,
+                line_offset: line.saturating_sub(1),
+                inst: true,
+            });
+            for spec in required {
+                if let Some(idx) = self.resolve_node(&spec, Lang::Js) {
+                    script_files.push(idx);
+                }
+            }
+        }
+        for (path, lang) in refs.files {
+            if let Some(idx) = self.resolve_node(&path, lang) {
+                script_files.push(idx);
+            }
+        }
+        refs.scripts
+    }
+
     fn npm_surface(&mut self) -> Option<Meta> {
         let pj_text = self.text_of("package.json")?;
         let meta = manifest::parse_package_json(&pj_text);
@@ -499,6 +545,7 @@ impl<'a> Scanner<'a> {
             .collect();
         queue.reverse();
         let mut visited: HashSet<String> = HashSet::new();
+        let mut runs_gyp = false;
         while let Some((name, depth)) = queue.pop() {
             if !visited.insert(name.clone()) || visited.len() > 16 {
                 continue;
@@ -515,44 +562,36 @@ impl<'a> Scanner<'a> {
             }
             let label = format!("package.json:scripts.{name}");
             let line = line_of_key(&pj_text, &name);
-            self.install_surface.push(label.clone());
-            self.units.push(Unit {
-                label: label.clone(),
-                text: cmd.to_string(),
-                lang: Lang::Shell,
-                line_offset: line.saturating_sub(1),
-                inst: true,
-            });
-            let refs = surface::command_refs(cmd);
-            for (code, lang) in refs.inline {
-                // `node -e "require('./postinstall')"` runs that file too.
-                let required = if lang == Lang::Js {
-                    indicators::analyze(&code, Lang::Js).relative_imports
-                } else {
-                    Vec::new()
-                };
-                self.units.push(Unit {
-                    label: label.clone(),
-                    text: code,
-                    lang,
-                    line_offset: line.saturating_sub(1),
-                    inst: true,
-                });
-                for spec in required {
-                    if let Some(idx) = self.resolve_node(&spec, Lang::Js) {
-                        script_files.push(idx);
-                    }
-                }
+            if cmd.contains("gyp") {
+                runs_gyp = true;
             }
-            for (path, lang) in refs.files {
-                if let Some(idx) = self.resolve_node(&path, lang) {
-                    script_files.push(idx);
-                }
-            }
+            let scripts_run = self.add_install_command(&label, cmd, line, &mut script_files);
             if depth < 3 {
-                for s in refs.scripts.into_iter().rev() {
+                for s in scripts_run.into_iter().rev() {
                     queue.push((s, depth + 1));
                 }
+            }
+        }
+        // npm runs `node-gyp rebuild` for a package with a root binding.gyp and no install
+        // hook of its own (unless `gypfile` is false), and node-gyp runs the commands in the
+        // file's `<!(...)` expansions while it configures the build.
+        let has_hook = |h: &str| scripts.is_some_and(|s| s.contains_key(h));
+        let gypfile = self.index.contains_key("binding.gyp")
+            && pj.get("gypfile").and_then(|v| v.as_bool()) != Some(false);
+        if gypfile && !has_hook("install") && !has_hook("preinstall") {
+            self.n_npm_install_scripts += 1;
+            runs_gyp = true;
+            self.add_install_command(
+                "package.json:scripts.install (implicit, binding.gyp)",
+                "node-gyp rebuild",
+                0,
+                &mut script_files,
+            );
+        }
+        if gypfile && runs_gyp {
+            let gyp = self.text_of("binding.gyp").unwrap_or_default();
+            for (cmd, line) in surface::gyp_commands(&gyp) {
+                self.add_install_command("binding.gyp", &cmd, line, &mut script_files);
             }
         }
         // Follow relative requires from script-referenced files, so moving the payload
