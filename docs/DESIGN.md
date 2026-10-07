@@ -216,13 +216,33 @@ the separate name model; registry signals live in the policy engine.
 
 ### 4.5 Name features (computed by `customs-model::name`)
 
-Given `(ecosystem, name)` and the shipped popular-package list for that ecosystem:
-`len`, `n_digits`, `n_hyphens`, `n_underscores`, `n_dots`, `min_edit_distance` (Damerau
-Levenshtein to the top-N popular names, excluding exact matches), `nearest_popular`,
-`is_popular`, `contains_popular_token` (a popular name appears as a hyphen/underscore token
-with extra tokens), `scope_squat` (npm scope differs from a popular scoped package),
-`char_ngram_score` (logistic model over hashed character 1 to 4 grams), `keyboard_typo`
-(edit is an adjacent-key substitution).
+Given `(ecosystem, name)` and the popular-package list for that ecosystem (one normalized
+name per line, most popular first):
+
+- normalize: PyPI lowercases and collapses runs of `-`, `_`, `.` to `-` (PEP 503); npm
+  lowercases and keeps the scope.
+- `bare(n)`: the part after the first `/` when `n` starts with `@` and contains `/`, else `n`.
+- `len`: Unicode characters of `bare`; `n_digits`: ASCII digits in `bare`; `n_hyphens`,
+  `n_underscores`, `n_dots`: counts of `-`, `_`, `.` in `bare`.
+- `has_scope`: the normalized name starts with `@`. `is_popular`: the normalized full name
+  is in the popular set.
+- `d`: minimum optimal string alignment distance (insert, delete, substitute, adjacent
+  transposition; no substring edited twice) between `bare(name)` and `bare(p)` over
+  Unicode characters, ignoring exact matches (distance 0); values above `max_distance`
+  become `max_distance + 1`, as does an empty list. `dist1`, `dist2`, `dist3` are `d == 1`,
+  `d == 2`, `d == 3` as 0/1. The nearest name (ties: the more popular one) is reported for
+  explanations.
+- `contains_popular_token`: tokens are `bare` split on `-`, `_`, `.` with empty tokens
+  dropped; `long_pop` is the set of `bare(p)` with at least 4 characters; 1 when there is
+  more than one token, `bare` is not in `long_pop`, and some token is.
+- `digit_suffix`: `bare` is non-empty and ends in an ASCII digit.
+- character n-grams: `s = "^" + normalized + "$"`; every window of `n` Unicode characters
+  for `n` in `ngram_min..=ngram_max`; FNV-1a 32-bit (offset `0x811C9DC5`, prime
+  `0x01000193`) over the window's UTF-8 bytes, modulo `n_buckets`; the set of distinct
+  buckets is used (each counts once). `char_ngram_score` is the n-gram part of the logit.
+
+Scoring one name against about 5,000 popular names takes well under a millisecond
+(length buckets, a character-histogram lower bound, and an early-exit banded DP).
 
 ### 4.6 Token stream (`tokens`, input of the code neural network)
 
@@ -285,61 +305,122 @@ or `{"archive": "<path>", "error": "<message>"}` when that archive fails.
 ## 5. Model artifacts (`models/`)
 
 All artifacts are JSON (small, diffable, and loadable without native dependencies).
+Float tensors `T` are `{"shape": [...], "data": "<base64 of little-endian f32, row-major>"}`.
+The server loads `models/manifest.json`; when it is absent it falls back to the untrained
+placeholders in `models/dev/` (marked `"untrained": true`). A component whose manifest
+entry is missing or null is not shipped.
 
 `models/manifest.json`
 ```json
 { "model_version": "2026.10.0", "feature_schema_version": 1,
   "code_gbdt": "code_gbdt.json", "name_model": "name_model.json",
   "code_nn": "code_nn.json", "ensemble": "ensemble.json",
-  "popular_names": { "pypi": "popular_pypi.txt", "npm": "popular_npm.txt" } }
+  "popular_names": { "pypi": "popular_pypi.txt", "npm": "popular_npm.txt" },
+  "metrics": "metrics.json", "untrained": false }
 ```
+`feature_schema_version` must equal the one `customs-scan` produces or loading fails.
 
 `code_gbdt.json`: tree ensemble in a format independent of LightGBM:
 ```json
 { "feature_names": ["inst_proc_exec", ...], "base_score": 0.0, "objective": "binary",
   "trees": [ { "nodes": [
-      { "split": 3, "threshold": 0.5, "left": 1, "right": 2, "default_left": true },
+      { "split": 3, "threshold": 0.5, "left": 1, "right": 2, "default_left": true, "value": 0.12 },
       { "leaf": -0.42 }, { "leaf": 1.31 } ] } ],
   "calibration": { "method": "isotonic", "x": [...], "y": [...] } }
 ```
-Inference: raw = base_score + sum of leaf values; a missing value or NaN follows
-`default_left`; comparisons are `value <= threshold` go left. Probability = sigmoid(raw),
-then calibrated by piecewise-linear interpolation over `(x, y)`. Contributions use the
-Saabas path method (difference in expected node value along the decision path), which
-needs per-node `value` (mean leaf output under that node); the exporter writes `value` on
-every split node.
+Inference: features are looked up by name in the scanner's feature map (a missing feature
+is NaN); raw = base_score + sum of leaf values; NaN follows `default_left`; `value <=
+threshold` goes left. Children must come after their parent in `nodes`. Probability =
+sigmoid(raw), then calibrated (when `calibration` is not null) by piecewise-linear
+interpolation over `(x, y)` with clamping at both ends. Saabas contributions: bias =
+base_score + sum of each tree's root `value` (or root leaf); at each split on the path,
+`contribution[split] += child_value - node.value` where `child_value` is the child's
+`leaf` or `value`. Bias plus contributions equals raw.
 
-`name_model.json`: logistic regression over the name features plus hashed character
-n-grams (`n_buckets`, `ngram_min`, `ngram_max`, `weights`, `bias`, hash = FNV-1a 32-bit of
-the UTF-8 n-gram with `^`/`$` boundary marks, modulo `n_buckets`).
+`name_model.json` (format `customs-name-lr-v1`):
+```json
+{ "format": "customs-name-lr-v1",
+  "numeric_features": ["len","n_digits","n_hyphens","n_underscores","n_dots","has_scope",
+                       "is_popular","dist1","dist2","dist3","contains_popular_token","digit_suffix"],
+  "max_distance": 4, "ngram_min": 1, "ngram_max": 4, "n_buckets": 65536, "hash": "fnv1a32",
+  "ecosystems": { "pypi": { "popular": "popular_pypi.txt", "mean": [12 floats], "std": [12 floats],
+                            "numeric_weights": [12 floats],
+                            "ngram_weights": "<base64 f32 x n_buckets>", "bias": -3.1 },
+                  "npm": { ... } } }
+```
+Popular files are relative to `models/`. `logit = bias + sum_i ((x_i - mean_i) / std_i) *
+numeric_weights_i + sum over distinct buckets of ngram_weights[bucket]` (a `std` of 0 is
+treated as 1). Features are defined in 4.5. The model outputs the logit and an explanation
+("1 edit from popular package 'requests'", "wraps popular name 'requests' in extra words").
 
-`code_nn.json`: a small convolutional network over install-surface tokens:
-`vocab` (token to id, with `<unk>` = 1 and `<pad>` = 0), `max_len`, embedding matrix,
-conv layers (kernel sizes, weights, biases), ReLU, global max pool, dense layers. Weights
-stored as base64 little-endian float32 with shapes. The Rust implementation must match
-PyTorch output within 1e-4 on shipped parity fixtures (`models/parity/*.json`).
+`code_nn.json` (format `customs-code-cnn-v1`): a small convolutional network over the
+install-surface tokens (`ScanReport.tokens`, scanned with `tokens: true`):
+```json
+{ "format": "customs-code-cnn-v1", "max_len": 512, "vocab": { "<pad>": 0, "<unk>": 1, "os": 2, ... },
+  "embedding": T [V, D],
+  "convs": [ { "kernel": 3, "weight": T [C, D, k], "bias": T [C] }, ... ],
+  "dense": [ { "weight": T [out, in], "bias": T [out], "activation": "relu" | "none" }, ... ] }
+```
+Forward: ids = vocab lookup (unknown = 1) of the first `max_len` tokens; if fewer than
+`max(16, largest kernel)`, right-pad with 0 to that length; x = embedding rows (L, D); per
+conv `y[l][c] = bias[c] + sum_{d,j} w[c][d][j] * x[l+j][d]` for `l` in `0..L-k+1` (valid),
+ReLU, max over `l`; concatenate convs in order; dense layers in order with their activation;
+the single output is a logit (no sigmoid). An empty or absent token stream skips the CNN.
+The Rust implementation must match PyTorch output within 1e-4 on shipped parity fixtures
+(`models/parity/*.json`); `crates/customs-model/tests/gen_fixtures.py` is a numpy reference
+of every formula in this section, checked to 1e-5.
 
-`ensemble.json`: stacking weights over `(code_gbdt_logit, code_nn_logit, name_logit)` plus
-isotonic calibration of the final score, and decision thresholds chosen on the validation
-split: `{"warn": t1, "block": t2, "target_fpr_block": 0.001}`.
+`ensemble.json` (format `customs-ensemble-v1`):
+```json
+{ "format": "customs-ensemble-v1", "components": ["code_gbdt", "code_nn", "name"],
+  "weights": { "code_gbdt": 1.2, "code_nn": 0.6, "name": 0.8 }, "bias": -0.3,
+  "fallbacks": [ { "missing": ["code_nn"], "weights": {...}, "bias": -0.2 },
+                 { "missing": ["name"], "weights": {...}, "bias": -0.1 },
+                 { "missing": ["code_nn", "name"], "weights": {...}, "bias": 0.0 } ],
+  "calibration": { "method": "isotonic", "x": [...], "y": [...] },
+  "thresholds": { "warn": 0.42, "block": 0.91, "target_fpr_warn": 0.01, "target_fpr_block": 0.001 } }
+```
+Inputs are component logits (the uncalibrated gbdt raw score, the CNN logit, the name
+logit). A component is unavailable when its artifact is not shipped or its input is absent
+(no features, no tokens, no name). `z = bias + sum_c w_c * logit_c` over available
+components, using the fallback whose `missing` set equals the unavailable set (a fallback
+may carry its own `calibration`); when none matches, the primary weights are applied to
+the components that ran (`weight_set` `"partial:<missing>"`). `risk = isotonic(sigmoid(z))`;
+`risk >= block` blocks, `risk >= warn` warns. Verdict `scores` are per-component
+probabilities: the gbdt calibrated probability, sigmoid of the CNN and name logits.
+
+`metrics.json`: the evaluation summary served by `/api/model` (section 7).
 
 ## 6. Verdict
 
 ```json
 {
+  "id": 42, "ts": "2026-10-07T01:24:29.505Z",
   "ecosystem": "pypi", "name": "foo", "version": "1.0.0", "artifact": "foo-1.0.0.tar.gz",
   "sha256": "...",
   "decision": "allow" | "warn" | "block",
   "risk": 0.97,
+  "model_decision": "block",
+  "thresholds": { "warn": 0.5, "block": 0.9, "target_fpr_block": 0.001 },
   "scores": { "code_gbdt": 0.99, "code_nn": 0.93, "name": 0.71 },
   "policy_hits": [ { "rule": "min_age_days", "severity": "block", "detail": "published 2 hours ago (policy: 3 days)" } ],
   "reasons": [ { "feature": "inst_proc_exec", "value": 2, "contribution": 1.84, "label": "Runs shell commands at install time" } ],
   "evidence": [ { "indicator": "proc_exec", "file": "setup.py", "line": 12, "snippet": "os.system(\"curl ...\")" } ],
-  "scanned_ms": 14, "model_version": "2026.10.0", "cached": false
+  "install_surface": ["setup.py"], "scan_errors": [],
+  "scanned_ms": 14, "model_version": "2026.10.0", "cached": false, "mode": "enforce"
 }
 ```
-`decision` is the most severe of the model decision and every policy hit. In `monitor`
-mode the proxy records the verdict and serves the artifact anyway.
+`decision` is the most severe of the model decision and every policy hit, except that an
+allow-list entry makes it `allow` and a deny-list entry makes it `block` (deny wins over
+allow). `risk` and component scores are `null` when that part of the model could not run
+(for example a package that does not exist has only a name score). `thresholds` are the
+effective ones (policy overrides applied). Policy `severity` is `allow` for informational
+hits (`allow`, `not_scanned`), else `warn` or `block`. Rules: `deny`, `allow`,
+`block_nonexistent`, `min_age_days`, `block_install_scripts_from_new`, `scan_error`
+(scanner rejected the archive, warn), `not_scanned` (archive above the scan size limit).
+`reasons` mix model features (positive contributions to the stacked logit, largest first)
+and name signals (`name_dist1`, `name_contains_popular_token`, ...). In `monitor` mode the
+proxy records the verdict and serves the artifact anyway (`mode` says which applied).
 
 ## 7. HTTP interface of `customs serve`
 
@@ -347,27 +428,64 @@ Default bind `127.0.0.1:7878`.
 
 Registry proxy:
 - `GET /pypi/simple/` and `GET /pypi/simple/{project}/`: proxied PEP 503 HTML (and PEP 691
-  JSON when requested by Accept), with every file URL rewritten to `/pypi/files/{path}`.
-  A 404 upstream is recorded as a `nonexistent_package` event (slopsquat signal).
+  JSON when requested by Accept), with every file URL rewritten to `/pypi/files/{path}`
+  (absolute, built from the request `Host`). A 404 upstream is recorded as a
+  `nonexistent_package` event (slopsquat signal).
 - `GET /pypi/files/{path}`: fetches `https://files.pythonhosted.org/{path}`, scans, decides,
-  streams the archive or returns 403 with a plain-text explanation.
+  streams the archive or returns 403 with a plain-text explanation. The HTTP reason phrase
+  is `Blocked by Customs: <rule or reason>`, which pip prints. PEP 658 `*.metadata` files
+  pass through unscanned.
 - `GET /npm/{package}` (scoped: `/npm/@scope%2fname` and `/npm/@scope/name`): packument with
-  `dist.tarball` rewritten to `/npm/{package}/-/{file}.tgz`.
-- `GET /npm/{package}/-/{file}.tgz`: fetch, scan, decide, stream or 403.
+  `dist.tarball` rewritten to `/npm/{package}/-/{file}.tgz`. `/npm/{package}/{version}` is
+  also proxied. A 404 is recorded as `nonexistent_package`.
+- `GET /npm/{package}/-/{file}.tgz`: fetch, scan, decide, stream or 403 with
+  `{"error": "<explanation>"}` (npm prints `error`).
+- `/npm/-/...` (audit and other registry endpoints) passes through unchanged.
+- Artifact responses carry `x-customs-decision` and `x-customs-verdict` (verdict id).
 
-API (JSON):
-- `POST /api/check` `{ "ecosystem": "pypi", "name": "foo", "version": null }`: resolve
-  version (latest when null), apply policy, fetch, scan, return a verdict. Used by the hook
-  and the CLI.
-- `GET /api/events?limit=&before=`: install attempts, newest first.
+API (JSON). CORS allows only `http://localhost:5173` (the Vite dev server).
+- `POST /api/check` `{ "ecosystem": "pypi", "name": "foo", "version": null, "client": "cli" }`:
+  `version` is null (latest), an exact version, a range (`>=1,<2`, `~=1.4`, `^1.2`, npm
+  ranges), or an npm dist-tag; it resolves to the newest matching non-yanked version. The
+  server applies policy, fetches (PyPI prefers the sdist, then a pure wheel, then the
+  smallest wheel), scans, and returns a verdict. Errors: 400 bad input, 404
+  `{ "error", "code": "nonexistent_package", "verdict": {...} }` when the registry does not
+  know the name (the verdict carries the `block_nonexistent` decision), 422 no matching
+  version, 502 upstream failure; all as `{ "error": "..." }`.
+- `GET /api/events?limit=&before=&decision=&ecosystem=&kind=&q=`: a JSON array of events,
+  newest first. `before` is an event id (pagination), `q` a case-insensitive name substring.
   Event: `{ "id", "ts", "ecosystem", "name", "version", "client", "kind": "install" | "check" | "nonexistent_package", "decision", "risk", "verdict_id" }`.
-- `GET /api/events/stream`: Server-Sent Events, one `event: install` per new event.
-- `GET /api/verdicts/{id}`: full verdict.
-- `GET /api/stats`: totals by decision and ecosystem, blocks per day, top reasons.
-- `GET /api/policy`, `PUT /api/policy`: the active policy (see below).
-- `GET /api/model`: model manifest and headline evaluation metrics.
-- `GET /metrics`: Prometheus text format. `GET /healthz`.
-- `GET /` and static assets: the dashboard.
+  `ts` is RFC 3339 UTC with milliseconds.
+- `GET /api/events/stream`: Server-Sent Events, one `event: install` per new event of any
+  kind (`id:` is the event id, `data:` the event JSON); `event: lagged` if a slow client
+  missed events.
+- `GET /api/verdicts/{id}`: full verdict (section 6).
+- `GET /api/stats?days=30`: `{ "total", "by_decision": {allow, warn, block},
+  "by_ecosystem": { "pypi": {allow, warn, block}, "npm": {...} },
+  "by_kind": {install, check, nonexistent_package},
+  "blocks_per_day": [ { "date": "YYYY-MM-DD", "count" } ],
+  "top_reasons": [ { "feature", "label", "count" } ] }`. `blocks_per_day` has one entry per
+  day of the window, zeros included; `top_reasons` counts policy rules and the top model
+  reasons of warn and block verdicts.
+- `GET /api/policy`, `PUT /api/policy`: the active policy as JSON with the `customs.toml`
+  keys (thresholds are `"model"` or a number). `PUT` takes the full policy (omitted keys
+  take their defaults), validates, persists to the policy file, and returns it; invalid
+  input returns 400 `{ "error", "errors": [ { "field", "message" } ] }`.
+- `GET /api/model`: the contents of `metrics.json` (under `metrics`, or merged when the file
+  already has a `metrics` key) plus `model_version`, `feature_schema_version`, `untrained`,
+  `thresholds` (effective), `model_thresholds`, `manifest`, `models_dir`, and `components`
+  (`loaded` flags and sizes). `metrics` is null when no metrics file is shipped.
+- `GET /metrics`: Prometheus text format (`customs_http_requests_total{route,status}`,
+  `customs_verdicts_total{decision,ecosystem}`, `customs_events_total{kind}`,
+  `customs_cache_total{result}`, `customs_singleflight_joins_total`,
+  `customs_scan_duration_seconds`, `customs_upstream_fetch_duration_seconds{kind}`).
+  `GET /healthz`: `{ "status": "ok", "version", "model_version", "mode" }`.
+- `GET /` and static assets: the dashboard from `--ui-dir` (default `web/dist`), with
+  unknown non-API paths served `index.html`; a placeholder page when it is not built.
+
+Caching: archives are stored by sha256 under `<data-dir>/cache`, verdict inputs (scan and
+model output) in SQLite keyed by (ecosystem, name, version, sha256, model_version).
+Concurrent requests for the same artifact URL share one download and one scan.
 
 ## 8. Policy (`customs.toml`)
 
@@ -375,7 +493,8 @@ API (JSON):
 mode = "enforce"            # or "monitor"
 warn_threshold = "model"    # "model" uses ensemble.json thresholds, or a number
 block_threshold = "model"
-min_age_days = 3            # block versions published less recently (registry metadata)
+min_age_days = 3            # versions published less recently hit min_age_days; 0 disables
+min_age_severity = "block"  # or "warn"
 block_nonexistent = true    # requesting a name the registry does not know is recorded and denied in hooks
 block_install_scripts_from_new = true  # npm install scripts in packages younger than min_age_days
 allow = ["pypi:requests", "npm:react"]  # always allow (exact names)
@@ -386,17 +505,33 @@ pypi_files = "https://files.pythonhosted.org"
 pypi_json = "https://pypi.org/pypi"
 npm = "https://registry.npmjs.org"
 ```
+Age comes from registry metadata: PyPI `upload_time_iso_8601` of the specific file (else
+the earliest file of the release), npm `time[version]`. `min_age_severity = "warn"` makes
+young versions a warning, so that `block_install_scripts_from_new` is what blocks young npm
+packages with `preinstall`/`install`/`postinstall` scripts. List entries are
+`<ecosystem>:<name>` with an optional `@version` or `==version`; names are normalized. Deny
+beats allow; allow overrides the model and the other rules. `block_nonexistent = false`
+turns nonexistent names into warnings. Unknown keys and bad values are rejected with the
+key that holds them. Without `--config`, the server reads `./customs.toml`, then
+`<data-dir>/policy.toml`, and `PUT /api/policy` writes to the file it read (or
+`<data-dir>/policy.toml`).
 
 ## 9. Claude Code integration
 
 `customs hook claude-code` is a PreToolUse command hook for the `Bash` tool. It parses the
 command for package installs (`pip install`, `pip3 install`, `python -m pip install`,
 `uv pip install`, `uv add`, `poetry add`, `pipx install`, `npm install|i|add`,
-`pnpm add|install`, `yarn add`, `bun add`, `npx <pkg>`), resolves each requirement, calls the
+`pnpm add|install`, `yarn add`, `bun add`, `npx <pkg>`, `uvx <pkg>`), resolves each requirement, calls the
 running server's `/api/check` (or scans in-process when no server is running), and returns
 a PreToolUse decision: `deny` with an explanation when any package is blocked, `ask` when
 any is warned, nothing otherwise. Local paths, URLs, `-r requirements.txt` and editable
 installs are handled (requirements files are read and each line checked).
+
+Output is JSON on stdout with exit code 0:
+`{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny" | "ask", "permissionDecisionReason": "..."}}`.
+Specs that cannot be checked (git, URL, local path, custom index) produce `ask`; editable
+local paths are skipped. When Customs itself fails, the hook fails open (no decision,
+message on stderr) unless run with `--fail-closed`, which denies. Setup: `hooks/README.md`.
 
 ## 10. Evaluation protocol (python/customs_ml)
 

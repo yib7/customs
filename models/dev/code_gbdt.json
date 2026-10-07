@@ -1,0 +1,214 @@
+{
+ "feature_names": [
+  "inst_download_exec",
+  "inst_exfil_endpoint",
+  "inst_proc_exec",
+  "inst_network",
+  "inst_decode_obf",
+  "inst_dyn_code",
+  "inst_secret_paths",
+  "inst_env_access",
+  "inst_persistence",
+  "inst_obf_ident_ratio",
+  "inst_ip_url"
+ ],
+ "base_score": -3.0,
+ "objective": "binary",
+ "trees": [
+  {
+   "nodes": [
+    {
+     "split": 0,
+     "threshold": 0.5,
+     "left": 1,
+     "right": 2,
+     "default_left": true,
+     "value": 2.0
+    },
+    {
+     "leaf": 0.0
+    },
+    {
+     "leaf": 4.0
+    }
+   ]
+  },
+  {
+   "nodes": [
+    {
+     "split": 1,
+     "threshold": 0.5,
+     "left": 1,
+     "right": 2,
+     "default_left": true,
+     "value": 1.75
+    },
+    {
+     "leaf": 0.0
+    },
+    {
+     "leaf": 3.5
+    }
+   ]
+  },
+  {
+   "nodes": [
+    {
+     "split": 2,
+     "threshold": 0.5,
+     "left": 1,
+     "right": 2,
+     "default_left": true,
+     "value": 0.875
+    },
+    {
+     "leaf": 0.0
+    },
+    {
+     "split": 3,
+     "threshold": 0.5,
+     "left": 3,
+     "right": 4,
+     "default_left": true,
+     "value": 1.75
+    },
+    {
+     "leaf": 1.0
+    },
+    {
+     "leaf": 2.5
+    }
+   ]
+  },
+  {
+   "nodes": [
+    {
+     "split": 4,
+     "threshold": 0.5,
+     "left": 1,
+     "right": 2,
+     "default_left": true,
+     "value": 0.825
+    },
+    {
+     "leaf": 0.0
+    },
+    {
+     "split": 5,
+     "threshold": 0.5,
+     "left": 3,
+     "right": 4,
+     "default_left": true,
+     "value": 1.65
+    },
+    {
+     "leaf": 0.8
+    },
+    {
+     "leaf": 2.5
+    }
+   ]
+  },
+  {
+   "nodes": [
+    {
+     "split": 6,
+     "threshold": 0.5,
+     "left": 1,
+     "right": 2,
+     "default_left": true,
+     "value": 1.0
+    },
+    {
+     "leaf": 0.0
+    },
+    {
+     "leaf": 2.0
+    }
+   ]
+  },
+  {
+   "nodes": [
+    {
+     "split": 7,
+     "threshold": 0.5,
+     "left": 1,
+     "right": 2,
+     "default_left": true,
+     "value": 0.45
+    },
+    {
+     "leaf": 0.0
+    },
+    {
+     "split": 3,
+     "threshold": 0.5,
+     "left": 3,
+     "right": 4,
+     "default_left": true,
+     "value": 0.9
+    },
+    {
+     "leaf": 0.3
+    },
+    {
+     "leaf": 1.5
+    }
+   ]
+  },
+  {
+   "nodes": [
+    {
+     "split": 8,
+     "threshold": 0.5,
+     "left": 1,
+     "right": 2,
+     "default_left": true,
+     "value": 1.0
+    },
+    {
+     "leaf": 0.0
+    },
+    {
+     "leaf": 2.0
+    }
+   ]
+  },
+  {
+   "nodes": [
+    {
+     "split": 9,
+     "threshold": 0.2,
+     "left": 1,
+     "right": 2,
+     "default_left": true,
+     "value": 0.75
+    },
+    {
+     "leaf": 0.0
+    },
+    {
+     "leaf": 1.5
+    }
+   ]
+  },
+  {
+   "nodes": [
+    {
+     "split": 10,
+     "threshold": 0.5,
+     "left": 1,
+     "right": 2,
+     "default_left": true,
+     "value": 0.5
+    },
+    {
+     "leaf": 0.0
+    },
+    {
+     "leaf": 1.0
+    }
+   ]
+  }
+ ]
+}

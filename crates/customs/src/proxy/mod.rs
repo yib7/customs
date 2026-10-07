@@ -1,0 +1,209 @@
+//! Registry proxy routes (DESIGN.md section 7): index pages are rewritten so every
+//! artifact download comes back through Customs, and artifact downloads are scanned and
+//! either streamed or refused.
+
+pub mod npm;
+pub mod pypi;
+
+use axum::body::Body;
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::response::{IntoResponse, Response};
+use customs_model::Decision;
+use customs_scan::Ecosystem;
+use tokio_util::io::ReaderStream;
+
+use crate::config::Mode;
+use crate::engine::{EngineError, Outcome};
+use crate::util::ecosystem_str;
+use crate::verdict::Verdict;
+
+/// Base URL clients used to reach us, for absolute links in rewritten documents.
+pub fn proxy_base(headers: &HeaderMap) -> String {
+    let host = headers
+        .get("x-forwarded-host")
+        .or_else(|| headers.get(header::HOST))
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("127.0.0.1:7878");
+    let proto = headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .filter(|p| *p == "https" || *p == "http")
+        .unwrap_or("http");
+    format!("{proto}://{host}")
+}
+
+/// First token of the User-Agent (`pip/24.0`, `npm/10.9.4`), enough to tell clients apart.
+pub fn client_from_headers(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|ua| ua.split_whitespace().next())
+        .map(|s| s.chars().take(64).collect())
+}
+
+/// Plain-text explanation of a block, short enough to read in a terminal.
+pub fn block_message(v: &Verdict, base: &str) -> String {
+    let mut s = format!(
+        "Customs blocked {} package {}{}.\n",
+        ecosystem_str(v.ecosystem),
+        v.display_name(),
+        v.artifact
+            .as_deref()
+            .map(|a| format!(" ({a})"))
+            .unwrap_or_default()
+    );
+    for h in v
+        .policy_hits
+        .iter()
+        .filter(|h| h.severity >= Decision::Warn)
+    {
+        s.push_str(&format!("  - {}: {}\n", h.rule, h.detail));
+    }
+    if v.model_decision >= Decision::Warn {
+        if let Some(r) = v.risk {
+            s.push_str(&format!(
+                "  - model risk {:.2} (block threshold {:.2})\n",
+                r, v.thresholds.block
+            ));
+        }
+        for r in v.reasons.iter().take(3) {
+            s.push_str(&format!("    * {}\n", r.label));
+        }
+    }
+    if let Some(id) = v.id {
+        s.push_str(&format!("Details: {base}/api/verdicts/{id}\n"));
+    }
+    s
+}
+
+/// HTTP reason phrases must be visible ASCII; keep them short so pip prints one line.
+fn reason_phrase(v: &Verdict) -> String {
+    let text = format!("Blocked by Customs: {}", v.headline());
+    let mut out: String = text
+        .chars()
+        .map(|c| {
+            if c.is_ascii_graphic() || c == ' ' {
+                c
+            } else {
+                '?'
+            }
+        })
+        .collect();
+    if out.len() > 120 {
+        out.truncate(117);
+        out.push_str("...");
+    }
+    out
+}
+
+fn verdict_headers(resp: &mut Response, v: &Verdict) {
+    let h = resp.headers_mut();
+    h.insert(
+        "x-customs-decision",
+        HeaderValue::from_static(v.decision.as_str()),
+    );
+    if let Some(id) = v.id {
+        if let Ok(val) = HeaderValue::from_str(&id.to_string()) {
+            h.insert("x-customs-verdict", val);
+        }
+    }
+}
+
+/// Stream the cached artifact, or refuse it when the verdict blocks and we enforce.
+pub async fn artifact_response(eco: Ecosystem, out: Outcome, base: &str) -> Response {
+    let v = &out.verdict;
+    if v.decision == Decision::Block && v.mode == Mode::Enforce {
+        let msg = block_message(v, base);
+        let mut resp = match eco {
+            // npm prints `body.error` after the status line.
+            Ecosystem::Npm => (
+                StatusCode::FORBIDDEN,
+                [(header::CONTENT_TYPE, "application/json")],
+                serde_json::json!({ "error": msg.trim_end() }).to_string(),
+            )
+                .into_response(),
+            Ecosystem::Pypi => (
+                StatusCode::FORBIDDEN,
+                [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                msg,
+            )
+                .into_response(),
+        };
+        if let Ok(p) = hyper::ext::ReasonPhrase::try_from(reason_phrase(v).into_bytes()) {
+            resp.extensions_mut().insert(p);
+        }
+        verdict_headers(&mut resp, v);
+        return resp;
+    }
+    let Some(path) = &out.path else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "artifact missing from cache",
+        )
+            .into_response();
+    };
+    let file = match tokio::fs::File::open(path).await {
+        Ok(f) => f,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("cache read failed: {e}"),
+            )
+                .into_response()
+        }
+    };
+    let mut resp = Response::new(Body::from_stream(ReaderStream::new(file)));
+    let h = resp.headers_mut();
+    h.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/octet-stream"),
+    );
+    if let Ok(len) = HeaderValue::from_str(&out.size.to_string()) {
+        h.insert(header::CONTENT_LENGTH, len);
+    }
+    verdict_headers(&mut resp, v);
+    resp
+}
+
+/// Map an evaluation failure to a response the package manager can show.
+pub fn error_response(e: &EngineError) -> Response {
+    let status = match e {
+        EngineError::NotFound(_) => StatusCode::NOT_FOUND,
+        EngineError::Unresolvable(_) => StatusCode::UNPROCESSABLE_ENTITY,
+        EngineError::TooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
+        EngineError::Upstream(_) => StatusCode::BAD_GATEWAY,
+        EngineError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    if status.is_server_error() {
+        tracing::error!(error = %e, "artifact evaluation failed");
+    }
+    (status, format!("customs: {e}\n")).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn base_from_host() {
+        let mut h = HeaderMap::new();
+        h.insert(header::HOST, HeaderValue::from_static("localhost:9000"));
+        assert_eq!(proxy_base(&h), "http://localhost:9000");
+        h.insert("x-forwarded-proto", HeaderValue::from_static("https"));
+        h.insert(
+            "x-forwarded-host",
+            HeaderValue::from_static("customs.example"),
+        );
+        assert_eq!(proxy_base(&h), "https://customs.example");
+    }
+
+    #[test]
+    fn client_token() {
+        let mut h = HeaderMap::new();
+        h.insert(
+            header::USER_AGENT,
+            HeaderValue::from_static("pip/24.0 {\"ci\":null,\"cpu\":\"x86_64\"}"),
+        );
+        assert_eq!(client_from_headers(&h).as_deref(), Some("pip/24.0"));
+    }
+}

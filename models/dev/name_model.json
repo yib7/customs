@@ -1,0 +1,118 @@
+{
+ "format": "customs-name-lr-v1",
+ "numeric_features": [
+  "len",
+  "n_digits",
+  "n_hyphens",
+  "n_underscores",
+  "n_dots",
+  "has_scope",
+  "is_popular",
+  "dist1",
+  "dist2",
+  "dist3",
+  "contains_popular_token",
+  "digit_suffix"
+ ],
+ "max_distance": 4,
+ "ngram_min": 1,
+ "ngram_max": 4,
+ "n_buckets": 16,
+ "hash": "fnv1a32",
+ "ecosystems": {
+  "pypi": {
+   "mean": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "std": [
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0
+   ],
+   "numeric_weights": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    -8.0,
+    5.5,
+    3.5,
+    1.0,
+    2.0,
+    0.5
+   ],
+   "ngram_weights": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+   "bias": -4.0,
+   "popular": "popular_pypi.txt"
+  },
+  "npm": {
+   "mean": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "std": [
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0
+   ],
+   "numeric_weights": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    -8.0,
+    5.5,
+    3.5,
+    1.0,
+    2.0,
+    0.5
+   ],
+   "ngram_weights": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+   "bias": -4.0,
+   "popular": "popular_npm.txt"
+  }
+ }
+}

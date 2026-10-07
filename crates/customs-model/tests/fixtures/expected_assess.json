@@ -1,0 +1,511 @@
+{
+ "cases": [
+  {
+   "ecosystem": "pypi",
+   "features": {
+    "has_setup_py": 4.2,
+    "inst_decode_obf": 0.475,
+    "inst_download_exec": 3.482,
+    "inst_env_access": 0.244,
+    "inst_max_str_entropy": 3.822,
+    "meta_has_repo": 4.214,
+    "n_files": 3.5,
+    "unused_feature": 7.0
+   },
+   "name": "requests",
+   "risk": 0.08564205746714437,
+   "scores": {
+    "code_gbdt": 0.028965244982652294,
+    "code_nn": 0.6786446718158073,
+    "name": 0.033662497211464776
+   },
+   "tokens": [
+    "ID",
+    "b64decode",
+    "env",
+    "process",
+    "Buffer",
+    "env",
+    "unknown_b",
+    "system",
+    "subprocess",
+    "env",
+    ",",
+    "fetch",
+    ",",
+    "return",
+    "requests",
+    "fetch",
+    "child_process",
+    "requests",
+    "require",
+    "'"
+   ],
+   "weight_set": "primary"
+  },
+  {
+   "ecosystem": "pypi",
+   "features": {
+    "has_setup_py": 4.2,
+    "inst_decode_obf": 2.0,
+    "inst_env_access": 3.651,
+    "inst_max_str_entropy": 2.296,
+    "inst_network": 1.836,
+    "inst_proc_exec": 1.157,
+    "meta_has_repo": 2.0,
+    "n_files": 0.5,
+    "n_npm_install_scripts": 4.82
+   },
+   "name": "python-dateutil-ng",
+   "risk": 0.08564205746714437,
+   "scores": {
+    "code_gbdt": 0.028965244982652294,
+    "code_nn": 0.6160222837589173,
+    "name": 2.311040001224824e-06
+   },
+   "tokens": [
+    "subprocess",
+    "system",
+    "base64",
+    "base64",
+    "}",
+    "os",
+    "ID",
+    "http",
+    "import",
+    ",",
+    "unknown_b",
+    "{",
+    "fetch",
+    "NUM",
+    ")",
+    "Buffer",
+    ",",
+    "zzz",
+    "}",
+    ")"
+   ],
+   "weight_set": "primary"
+  },
+  {
+   "ecosystem": "pypi",
+   "features": {
+    "all_url": 2.0,
+    "inst_decode_obf": 0.0,
+    "inst_exfil_endpoint": 0.493,
+    "inst_max_str_entropy": 2.694,
+    "inst_network": 4.939,
+    "inst_proc_exec": 2.781,
+    "meta_has_repo": 2.0,
+    "n_files": 4.431
+   },
+   "name": "openai-helper-tools",
+   "risk": 0.08564205746714437,
+   "scores": {
+    "code_gbdt": 0.028965244982652294,
+    "code_nn": null,
+    "name": 5.449724931310018e-08
+   },
+   "tokens": [],
+   "weight_set": "missing:code_nn"
+  },
+  {
+   "ecosystem": "pypi",
+   "features": {},
+   "name": "scikit_learn",
+   "risk": 0.08564205746714437,
+   "scores": {
+    "code_gbdt": null,
+    "code_nn": 0.6040192867874217,
+    "name": 0.0003087754605743879
+   },
+   "tokens": [
+    "return",
+    "os",
+    "Buffer",
+    "'",
+    "zzz",
+    "fetch",
+    "=",
+    "exec",
+    ";",
+    "https",
+    ")",
+    "os",
+    "NUM",
+    "}",
+    "require",
+    "os",
+    "subprocess",
+    "requests",
+    "eval",
+    "https"
+   ],
+   "weight_set": "partial:code_gbdt"
+  },
+  {
+   "ecosystem": "npm",
+   "features": {
+    "all_url": 0.0,
+    "has_setup_py": 1.0,
+    "inst_decode_obf": 3.804,
+    "inst_download_exec": 1.0,
+    "inst_env_access": 2.705,
+    "inst_exfil_endpoint": 4.077,
+    "inst_max_str_entropy": 2.417,
+    "inst_network": 0.402,
+    "inst_proc_exec": 4.96,
+    "n_files": 4.2,
+    "n_npm_install_scripts": 2.814
+   },
+   "name": null,
+   "risk": 0.08564205746714437,
+   "scores": {
+    "code_gbdt": 0.03407080756894501,
+    "code_nn": 0.6176921347233125,
+    "name": null
+   },
+   "tokens": [
+    "import",
+    "eval",
+    ",",
+    "get",
+    "=",
+    "b64decode",
+    "import",
+    "}",
+    "ID",
+    "unknown_a",
+    "subprocess",
+    "b64decode",
+    "child_process",
+    "https",
+    ")",
+    "https",
+    "ID",
+    "env",
+    "https",
+    "Buffer"
+   ],
+   "weight_set": "missing:name"
+  },
+  {
+   "ecosystem": "npm",
+   "features": {
+    "all_url": 3.479,
+    "inst_decode_obf": 4.62,
+    "inst_download_exec": 4.172,
+    "inst_env_access": 1.0,
+    "inst_exfil_endpoint": 1.703,
+    "inst_max_str_entropy": 4.2,
+    "inst_network": 0.5,
+    "inst_proc_exec": 1.0,
+    "meta_has_repo": 4.886,
+    "n_npm_install_scripts": 3.029
+   },
+   "name": "@acme/react",
+   "risk": 0.08564205746714437,
+   "scores": {
+    "code_gbdt": 0.028965244982652294,
+    "code_nn": null,
+    "name": 7.255753432724784e-05
+   },
+   "tokens": [],
+   "weight_set": "missing:code_nn"
+  },
+  {
+   "ecosystem": "npm",
+   "features": {
+    "all_url": 1.639,
+    "has_setup_py": 4.2,
+    "inst_decode_obf": 2.87,
+    "inst_env_access": 0.0,
+    "inst_exfil_endpoint": 4.974,
+    "inst_network": 1.801,
+    "inst_proc_exec": 4.84,
+    "meta_has_repo": 2.95,
+    "n_files": 0.0,
+    "n_npm_install_scripts": 4.205,
+    "unused_feature": 7.0
+   },
+   "name": "@types/nodee",
+   "risk": 0.08564205746714437,
+   "scores": {
+    "code_gbdt": 0.028965244982652294,
+    "code_nn": 0.5864104515888823,
+    "name": 0.000171865705457065
+   },
+   "tokens": [
+    "def",
+    "https",
+    ".",
+    "NUM",
+    ".",
+    "base64",
+    "b64decode",
+    "requests",
+    "'",
+    "Buffer",
+    "os",
+    "unknown_a",
+    "process",
+    ")",
+    "process",
+    "base64",
+    "exec",
+    "https",
+    "subprocess",
+    ";"
+   ],
+   "weight_set": "primary"
+  },
+  {
+   "ecosystem": "pypi",
+   "features": {},
+   "name": "requests",
+   "risk": 0.08564205746714437,
+   "scores": {
+    "code_gbdt": null,
+    "code_nn": 0.6007273230419592,
+    "name": 0.033662497211464776
+   },
+   "tokens": [
+    "unknown_b",
+    "eval",
+    "http",
+    "NUM",
+    "import",
+    "os",
+    "import",
+    "zzz",
+    "subprocess",
+    "require",
+    "exec",
+    "base64",
+    "exec",
+    "http",
+    "unknown_a",
+    "unknown_b",
+    "subprocess",
+    "eval",
+    "\"",
+    "("
+   ],
+   "weight_set": "partial:code_gbdt"
+  },
+  {
+   "ecosystem": "pypi",
+   "features": {
+    "all_url": 1.298,
+    "has_setup_py": 4.524,
+    "inst_download_exec": 1.0,
+    "inst_env_access": 0.5,
+    "inst_max_str_entropy": 1.0,
+    "inst_network": 0.479,
+    "inst_proc_exec": 2.0,
+    "n_files": 2.0,
+    "n_npm_install_scripts": 1.53
+   },
+   "name": "python-dateutil-ng",
+   "risk": 0.08564205746714437,
+   "scores": {
+    "code_gbdt": 0.028965244982652294,
+    "code_nn": null,
+    "name": 2.311040001224824e-06
+   },
+   "tokens": [],
+   "weight_set": "missing:code_nn"
+  },
+  {
+   "ecosystem": "pypi",
+   "features": {
+    "all_url": 0.252,
+    "has_setup_py": 2.04,
+    "inst_decode_obf": 1.0,
+    "inst_download_exec": 2.125,
+    "inst_exfil_endpoint": 0.5,
+    "inst_max_str_entropy": 0.163,
+    "n_files": 4.154,
+    "n_npm_install_scripts": 4.585,
+    "unused_feature": 7.0
+   },
+   "name": null,
+   "risk": 0.08564205746714437,
+   "scores": {
+    "code_gbdt": 0.028965244982652294,
+    "code_nn": 0.6554278026859026,
+    "name": null
+   },
+   "tokens": [
+    "{",
+    "(",
+    "env",
+    "NUM",
+    "exec",
+    ",",
+    "env",
+    "NUM",
+    "requests",
+    "child_process",
+    "}",
+    "=",
+    ";",
+    "b64decode",
+    "STR",
+    "return",
+    "NUM",
+    "{",
+    ";",
+    "'"
+   ],
+   "weight_set": "missing:name"
+  },
+  {
+   "ecosystem": "pypi",
+   "features": {
+    "has_setup_py": 2.166,
+    "inst_download_exec": 0.5,
+    "inst_env_access": 4.398,
+    "inst_exfil_endpoint": 3.5,
+    "inst_max_str_entropy": 1.065,
+    "inst_network": 4.241,
+    "inst_proc_exec": 3.729,
+    "n_files": 2.24,
+    "n_npm_install_scripts": 3.5
+   },
+   "name": "scikit_learn",
+   "risk": 0.08564205746714437,
+   "scores": {
+    "code_gbdt": 0.23336475275762356,
+    "code_nn": 0.6183049040604095,
+    "name": 0.0003087754605743879
+   },
+   "tokens": [
+    "subprocess",
+    "env",
+    "unknown_a",
+    "}",
+    "zzz",
+    "(",
+    "https",
+    "fetch",
+    "b64decode",
+    "{",
+    "zzz",
+    "Buffer",
+    "fetch",
+    ";",
+    ")",
+    "b64decode",
+    "NUM",
+    "unknown_b",
+    "os",
+    ","
+   ],
+   "weight_set": "primary"
+  },
+  {
+   "ecosystem": "npm",
+   "features": {},
+   "name": "react",
+   "risk": 0.08564205746714437,
+   "scores": {
+    "code_gbdt": null,
+    "code_nn": null,
+    "name": 0.0001928102730608361
+   },
+   "tokens": [],
+   "weight_set": "partial:code_gbdt+code_nn"
+  },
+  {
+   "ecosystem": "npm",
+   "features": {
+    "all_url": 4.475,
+    "has_setup_py": 1.117,
+    "inst_download_exec": 3.45,
+    "inst_env_access": 3.895,
+    "inst_max_str_entropy": 1.536,
+    "inst_network": 0.834,
+    "inst_proc_exec": 2.914,
+    "meta_has_repo": 0.5,
+    "n_npm_install_scripts": 2.881,
+    "unused_feature": 7.0
+   },
+   "name": "@acme/react",
+   "risk": 0.08564205746714437,
+   "scores": {
+    "code_gbdt": 0.028965244982652294,
+    "code_nn": 0.5919874521341977,
+    "name": 7.255753432724784e-05
+   },
+   "tokens": [
+    "base64",
+    "unknown_a",
+    "=",
+    "get",
+    "http",
+    "process",
+    "env",
+    "system",
+    "return",
+    "def",
+    "eval",
+    "base64",
+    "zzz",
+    "os",
+    "requests",
+    "get",
+    "system",
+    ".",
+    "eval",
+    "="
+   ],
+   "weight_set": "primary"
+  },
+  {
+   "ecosystem": "npm",
+   "features": {
+    "all_url": 3.5,
+    "has_setup_py": 1.095,
+    "inst_decode_obf": 0.5,
+    "inst_env_access": 2.0,
+    "inst_exfil_endpoint": 4.363,
+    "inst_max_str_entropy": 4.893,
+    "inst_network": 1.628,
+    "inst_proc_exec": 0.5,
+    "n_npm_install_scripts": 0.287,
+    "unused_feature": 7.0
+   },
+   "name": "@types/nodee",
+   "risk": 0.08564205746714437,
+   "scores": {
+    "code_gbdt": 0.028965244982652294,
+    "code_nn": 0.6259085446994195,
+    "name": 0.000171865705457065
+   },
+   "tokens": [
+    "def",
+    "get",
+    "require",
+    "}",
+    "import",
+    "process",
+    "def",
+    "base64",
+    "child_process",
+    "def",
+    "=",
+    "requests",
+    ",",
+    "env",
+    "child_process",
+    "NUM",
+    "fetch",
+    "ID",
+    "eval",
+    "child_process"
+   ],
+   "weight_set": "primary"
+  }
+ ]
+}
