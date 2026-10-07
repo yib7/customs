@@ -36,10 +36,23 @@ def scanner_bin() -> str:
     return found
 
 
+SCAN_CHUNK = 4000
+
+
 def scan_paths(
     paths: list[str], tokens: bool = True, jobs: int | None = None, ecosystem: str | None = None
 ) -> list[dict]:
-    """Scan archives in parallel; returns one dict per input path, in order."""
+    """Scan archives in parallel; returns one dict per input path, in order.
+
+    Runs the scanner on chunks of ``SCAN_CHUNK`` paths, so the scanner's JSON output (token
+    streams make it about 40 KB per archive) never needs more than a bounded amount of
+    temporary disk.
+    """
+    if len(paths) > SCAN_CHUNK:
+        out: list[dict] = []
+        for i in range(0, len(paths), SCAN_CHUNK):
+            out += scan_paths(paths[i : i + SCAN_CHUNK], tokens, jobs, ecosystem)
+        return out
     with tempfile.TemporaryDirectory() as td:
         inp = Path(td) / "paths.txt"
         out = Path(td) / "out.jsonl"

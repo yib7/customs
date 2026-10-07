@@ -165,3 +165,22 @@ def test_dependency_rules():
     # Without lookups the rule is unknown; the first release has no history at all.
     assert he.history_rules(meta, "1.0.1")["young_dependency_added"] is None
     assert he.history_rules(meta, "1.0.0", lookup=DEPS.get)["young_dependency_added"] is False
+
+
+def test_archive_scripts_adds_npm_implicit_gyp_install(tmp_path):
+    def pack(name, scripts, gyp=True):
+        p = tmp_path / name
+        pj = json.dumps({"scripts": scripts}).encode()
+        with tarfile.open(p, "w:gz") as t:
+            files = [("package/package.json", pj)]
+            if gyp:
+                files.append(("package/binding.gyp", b"{}"))
+            for n, data in files:
+                info = tarfile.TarInfo(n)
+                info.size = len(data)
+                t.addfile(info, io.BytesIO(data))
+        return str(p)
+
+    assert he.archive_scripts(pack("a.tgz", {})) == [["install", "node-gyp rebuild"]]
+    assert he.archive_scripts(pack("b.tgz", {"preinstall": "x"})) == [["preinstall", "x"]]
+    assert he.archive_scripts(pack("c.tgz", {}, gyp=False)) == []

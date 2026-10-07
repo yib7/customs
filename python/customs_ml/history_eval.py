@@ -95,6 +95,15 @@ def _time(s: str) -> datetime:
 def _scripts(doc: dict) -> list[list[str]]:
     """``(script, command)`` pairs the way ``registry.rs`` reads them."""
     s = doc.get("scripts") if isinstance(doc.get("scripts"), dict) else {}
+    if (
+        doc.get("_binding_gyp")
+        and doc.get("gypfile") is not False
+        and "install" not in s
+        and "preinstall" not in s
+    ):
+        # npm publishes a package with a root binding.gyp and no install hook with
+        # `install: node-gyp rebuild` added, which is what the packument then shows.
+        s = {**s, "install": "node-gyp rebuild"}
     out = [
         [k, (s[k] if isinstance(s[k], str) else "")[:MAX_SCRIPT_CHARS]]
         for k in INSTALL_SCRIPTS
@@ -211,7 +220,11 @@ def archive_package_json(path: str) -> dict | None:
             if pj is None or pj.size > 4 << 20:
                 return None
             doc = json.loads(t.extractfile(pj).read())
-            return doc if isinstance(doc, dict) else None
+            if not isinstance(doc, dict):
+                return None
+            root = pj.name.rsplit("/", 1)[0]
+            doc["_binding_gyp"] = any(m.name == f"{root}/binding.gyp" for m in members)
+            return doc
     except (OSError, tarfile.TarError, ValueError, EOFError, AttributeError):
         return None
 
