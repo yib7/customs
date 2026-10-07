@@ -34,7 +34,7 @@ pub struct Contents {
     pub entries: Vec<Entry>,
     pub n_links: u64,
     pub n_unsafe_paths: u64,
-    /// The single top-level directory that was stripped (`package`, `foo-1.0`), if any.
+    /// Top-level directories that were stripped (`package`, `foo-1.0`), joined by `/`.
     pub stripped_prefix: Option<String>,
     pub errors: Vec<String>,
 }
@@ -110,10 +110,26 @@ pub fn normalize_path(raw: &str) -> Option<String> {
             c => parts.push(c),
         }
     }
+    collapse_doubled(&mut parts);
     if parts.is_empty() {
         None
     } else {
         Some(parts.join("/"))
+    }
+}
+
+/// Collapse a path whose trailing components repeat (`pkg/mod.py/pkg/mod.py` becomes
+/// `pkg/mod.py`). Some malware sample collections re-extract each file of a wheel into a
+/// directory named after it; normalizing here keeps training samples shaped like the
+/// archives seen in serving. Single-component repeats only collapse for file-like names,
+/// so a real `docs/docs` directory is left alone.
+fn collapse_doubled(parts: &mut Vec<&str>) {
+    let n = parts.len();
+    for k in 1..=n / 2 {
+        if parts[n - 2 * k..n - k] == parts[n - k..] && (k >= 2 || parts[n - 1].contains('.')) {
+            parts.truncate(n - k);
+            return;
+        }
     }
 }
 
@@ -452,29 +468,76 @@ fn read_zip(
     Ok(())
 }
 
-/// Strip a single top-level directory shared by every top-level entry (`foo-1.0/` in sdists,
-/// `package/` in npm tarballs). Wheels have at least the package and `.dist-info` at the
-/// root, so they are left alone.
+/// Files whose presence marks the package root.
+const ROOT_MARKERS: &[&str] = &[
+    "package.json",
+    "PKG-INFO",
+    "setup.py",
+    "setup.cfg",
+    "pyproject.toml",
+];
+const MAX_STRIP_LEVELS: usize = 16;
+
+/// A metadata file sitting next to the package directory (sample collections store a
+/// `package_info-*.json` there). It lies outside the package root, so it is dropped.
+fn is_sidecar(path: &str) -> bool {
+    !path.contains('/') && path != "package.json" && path.to_ascii_lowercase().ends_with(".json")
+}
+
+/// Strip top-level directories until the package root is reached: `foo-1.0/` in sdists,
+/// `package/` in npm tarballs, and the wrapper levels sample collections add
+/// (`tmp/tmpXXXX/foo/foo-1.0/`). A level is descended only when it holds exactly one
+/// directory and nothing else but sidecar JSON files, and stripping stops at a level that
+/// holds a manifest or a `.dist-info` directory, so wheels are left alone.
 fn strip_prefix(c: &mut Contents) {
-    let top: Vec<&Entry> = c.entries.iter().filter(|e| e.depth == 0).collect();
-    let Some(first) = top.first() else { return };
-    let Some((root, _)) = first.path.split_once('/') else {
-        return;
-    };
-    let root = root.to_string();
-    let all_under = top.iter().all(|e| {
-        e.path.len() > root.len() + 1
-            && e.path.starts_with(&root)
-            && e.path.as_bytes()[root.len()] == b'/'
-    });
-    if !all_under {
-        return;
+    let mut stripped: Vec<String> = Vec::new();
+    let mut dropped = 0usize;
+    for _ in 0..MAX_STRIP_LEVELS {
+        let top: Vec<&Entry> = c.entries.iter().filter(|e| e.depth == 0).collect();
+        let at_root = top.iter().any(|e| {
+            ROOT_MARKERS.contains(&e.path.as_str())
+                || e.path
+                    .split_once('/')
+                    .is_some_and(|(d, _)| d.ends_with(".dist-info"))
+        });
+        if at_root {
+            break;
+        }
+        let mut dirs = top
+            .iter()
+            .filter_map(|e| e.path.split_once('/').map(|(d, _)| d));
+        let Some(root) = dirs.next().map(str::to_string) else {
+            break;
+        };
+        let single_dir = dirs.all(|d| d == root);
+        let only_sidecars = top
+            .iter()
+            .all(|e| e.path.contains('/') || is_sidecar(&e.path));
+        if !single_dir || !only_sidecars {
+            break;
+        }
+        let before = c.entries.len();
+        c.entries.retain(|e| e.depth > 0 || !is_sidecar(&e.path));
+        dropped += before - c.entries.len();
+        let cut = root.len() + 1;
+        for e in c.entries.iter_mut() {
+            if e.path.len() > cut
+                && e.path.starts_with(&root)
+                && e.path.as_bytes()[root.len()] == b'/'
+            {
+                e.path = e.path[cut..].to_string();
+            }
+        }
+        stripped.push(root);
     }
-    let cut = root.len() + 1;
-    for e in c.entries.iter_mut() {
-        e.path = e.path[cut..].to_string();
+    if dropped > 0 {
+        c.errors.push(format!(
+            "{dropped} metadata file(s) outside the package root ignored"
+        ));
     }
-    c.stripped_prefix = Some(root);
+    if !stripped.is_empty() {
+        c.stripped_prefix = Some(stripped.join("/"));
+    }
 }
 
 #[cfg(test)]
@@ -490,6 +553,67 @@ mod tests {
         assert_eq!(normalize_path("C:\\x"), None);
         assert_eq!(normalize_path("a\\..\\b"), None);
         assert_eq!(normalize_path("./"), None);
+    }
+
+    #[test]
+    fn doubled_paths_collapse() {
+        assert_eq!(
+            normalize_path("t/pkg/mod.py/pkg/mod.py"),
+            Some("t/pkg/mod.py".into())
+        );
+        assert_eq!(
+            normalize_path("x.dist-info/WHEEL/x.dist-info/WHEEL"),
+            Some("x.dist-info/WHEEL".into())
+        );
+        assert_eq!(normalize_path("setup.py/setup.py"), Some("setup.py".into()));
+        assert_eq!(normalize_path("docs/docs"), Some("docs/docs".into()));
+        assert_eq!(normalize_path("a/b/c.py"), Some("a/b/c.py".into()));
+    }
+
+    fn entry(path: &str) -> Entry {
+        Entry {
+            path: path.into(),
+            size: 1,
+            data: vec![b'x'],
+            full: true,
+            depth: 0,
+        }
+    }
+
+    #[test]
+    fn strip_wrappers_and_sidecars() {
+        let mut c = Contents {
+            entries: vec![
+                entry("tmp/tmpx/foo/package_info-foo-1.0.json"),
+                entry("tmp/tmpx/foo/foo-1.0/PKG-INFO"),
+                entry("tmp/tmpx/foo/foo-1.0/foo/__init__.py"),
+            ],
+            ..Default::default()
+        };
+        strip_prefix(&mut c);
+        let paths: Vec<&str> = c.entries.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(paths, vec!["PKG-INFO", "foo/__init__.py"]);
+        assert_eq!(c.stripped_prefix.as_deref(), Some("tmp/tmpx/foo/foo-1.0"));
+
+        // Code next to the directory stops stripping.
+        let mut c = Contents {
+            entries: vec![entry("evil.py"), entry("pkg-1.0/setup.py")],
+            ..Default::default()
+        };
+        strip_prefix(&mut c);
+        assert_eq!(c.entries.len(), 2);
+        assert!(c.stripped_prefix.is_none());
+
+        // Wheels keep their layout.
+        let mut c = Contents {
+            entries: vec![
+                entry("foo/__init__.py"),
+                entry("foo-1.0.dist-info/METADATA"),
+            ],
+            ..Default::default()
+        };
+        strip_prefix(&mut c);
+        assert!(c.stripped_prefix.is_none());
     }
 
     #[test]

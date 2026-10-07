@@ -467,7 +467,7 @@ pub fn name_version_from_filename(filename: &str) -> (Option<String>, Option<Str
     let Some(stem_len) = stem_len else {
         return (None, None);
     };
-    let stem = &base[..stem_len];
+    let mut stem = &base[..stem_len];
     if lower.ends_with(".whl") {
         let mut parts = stem.split('-');
         return (
@@ -475,11 +475,32 @@ pub fn name_version_from_filename(filename: &str) -> (Option<String>, Option<Str
             parts.next().map(str::to_string),
         );
     }
-    // Versions start with a digit right after a hyphen; names may contain hyphens.
+    // Sample collections name files `YYYY-MM-DD-name-vX.Y`.
+    let sb = stem.as_bytes();
+    if sb.len() > 11
+        && sb[..10].iter().enumerate().all(|(i, b)| {
+            if i == 4 || i == 7 {
+                *b == b'-'
+            } else {
+                b.is_ascii_digit()
+            }
+        })
+        && sb[10] == b'-'
+    {
+        stem = &stem[11..];
+    }
+    // Versions start with a digit (or `v` and a digit) right after a hyphen; names may
+    // contain hyphens.
     let b = stem.as_bytes();
     for i in 0..b.len().saturating_sub(1) {
-        if b[i] == b'-' && b[i + 1].is_ascii_digit() {
+        if b[i] != b'-' {
+            continue;
+        }
+        if b[i + 1].is_ascii_digit() {
             return (Some(stem[..i].to_string()), Some(stem[i + 1..].to_string()));
+        }
+        if b[i + 1] == b'v' && b.get(i + 2).is_some_and(u8::is_ascii_digit) {
+            return (Some(stem[..i].to_string()), Some(stem[i + 2..].to_string()));
         }
     }
     (Some(stem.to_string()), None)
@@ -575,6 +596,10 @@ mod tests {
         assert_eq!(
             name_version_from_filename("left-pad-1.3.0.tgz"),
             (Some("left-pad".into()), Some("1.3.0".into()))
+        );
+        assert_eq!(
+            name_version_from_filename("2023-05-03-1337test-v1.2.zip"),
+            (Some("1337test".into()), Some("1.2".into()))
         );
     }
 }
