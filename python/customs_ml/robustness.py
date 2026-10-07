@@ -157,7 +157,9 @@ class Scorer:
         g = gbdt.predict_raw_exported(self.gbdt, X)
         c = np.array([cnn.numpy_forward(self.nn, r.get("tokens") or []) for r in reports])
         w = self.ens["weights"]
-        z = self.ens["bias"] + w["code_gbdt"] * g + w["code_nn"] * c + w["name"] * name_logits
+        b = self.ens.get("clip") or np.inf
+        g, c, n = (np.clip(x, -b, b) for x in (g, c, name_logits))
+        z = self.ens["bias"] + w["code_gbdt"] * g + w["code_nn"] * c + w["name"] * n
         return gbdt.apply_calibration(self.ens["calibration"], 1 / (1 + np.exp(-z)))
 
 

@@ -1,7 +1,11 @@
 //! Logistic stacking of the component logits (DESIGN.md section 5, `ensemble.json`,
 //! format `customs-ensemble-v1`).
 //!
-//! `risk = isotonic(sigmoid(bias + sum_c w_c * logit_c))` over the components that ran.
+//! `risk = calibrate(sigmoid(bias + sum_c w_c * clip(logit_c)))` over the components that
+//! ran, where `clip` bounds each logit to `[-clip, clip]` when the file sets `clip`. The
+//! bound keeps one overconfident component from deciding a package on its own: without
+//! it, a handful of benign validation packages with CNN logits near 20 set the block
+//! threshold far above where it transfers to new data.
 //! When a component cannot run for an input (no token stream for the CNN, no name, no
 //! features), the stacker uses the entry of `fallbacks` whose `missing` set equals the set
 //! of unavailable components; those weights were fitted for exactly that situation.
@@ -64,6 +68,9 @@ pub struct Ensemble {
     pub calibration: Option<Calibration>,
     #[serde(default)]
     pub thresholds: Thresholds,
+    /// Bound applied to every component logit before stacking, for all weight sets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clip: Option<f64>,
 }
 
 /// Per-component logits; `None` means the component did not run.
@@ -160,6 +167,14 @@ impl Ensemble {
                 c.validate(WHAT)?;
             }
         }
+        if let Some(c) = e.clip {
+            if !(c.is_finite() && c > 0.0) {
+                return Err(ModelError::invalid(
+                    WHAT,
+                    "clip must be finite and positive",
+                ));
+            }
+        }
         let t = e.thresholds;
         if !(0.0..=1.0).contains(&t.warn) || !(0.0..=1.0).contains(&t.block) || t.warn > t.block {
             return Err(ModelError::invalid(
@@ -180,6 +195,7 @@ impl Ensemble {
             fallbacks: Vec::new(),
             calibration: None,
             thresholds: Thresholds::default(),
+            clip: None,
         }
     }
 
@@ -200,6 +216,24 @@ impl Ensemble {
                 .unwrap_or(&self.weights)
         };
         ws.get(component).copied().unwrap_or(0.0)
+    }
+
+    /// A component logit as the stacker sees it.
+    pub fn clip_logit(&self, l: f64) -> f64 {
+        match self.clip {
+            Some(c) => l.clamp(-c, c),
+            None => l,
+        }
+    }
+
+    /// Factor that maps a raw logit to its clipped value, so per-feature contributions
+    /// shown as reasons still sum to what the stacker used.
+    pub fn clip_scale(&self, l: f64) -> f64 {
+        if l == 0.0 {
+            1.0
+        } else {
+            self.clip_logit(l) / l
+        }
     }
 
     /// Combine the available logits. `None` when no component ran.
@@ -233,7 +267,7 @@ impl Ensemble {
         let mut z = bias;
         for c in COMPONENTS {
             if let Some(l) = logits.get(c) {
-                z += weights.get(c).copied().unwrap_or(0.0) * l;
+                z += weights.get(c).copied().unwrap_or(0.0) * self.clip_logit(l);
             }
         }
         let raw = sigmoid(z);
@@ -303,6 +337,23 @@ mod tests {
         assert!((o.z - 0.0).abs() < 1e-12);
         assert!(e.combine(&Logits::default()).is_none());
         assert_eq!(e.thresholds.target_fpr_warn, Some(0.01));
+    }
+
+    #[test]
+    fn clip_bounds_each_logit() {
+        let mut e = ens();
+        e.clip = Some(3.0);
+        let l = Logits {
+            code_gbdt: Some(10.0),
+            code_nn: Some(-8.0),
+            name: Some(0.5),
+        };
+        let o = e.combine(&l).unwrap();
+        assert!((o.z - (-1.0 + 3.0 - 1.5 + 1.0)).abs() < 1e-12);
+        assert!((e.clip_scale(10.0) - 0.3).abs() < 1e-12);
+        assert_eq!(e.clip_scale(2.0), 1.0);
+        assert!(Ensemble::from_json(r#"{"weights": {}, "clip": 0.0}"#).is_err());
+        assert!(Ensemble::from_json(r#"{"weights": {}, "clip": 4.0}"#).is_ok());
     }
 
     #[test]

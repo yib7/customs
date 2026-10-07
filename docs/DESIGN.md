@@ -405,14 +405,16 @@ of every formula in this section, checked to 1e-5.
                  { "missing": ["name"], "weights": {...}, "bias": -0.1 },
                  { "missing": ["code_nn", "name"], "weights": {...}, "bias": 0.0 } ],
   "calibration": { "method": "isotonic", "x": [...], "y": [...] },
-  "thresholds": { "warn": 0.42, "block": 0.91, "target_fpr_warn": 0.01, "target_fpr_block": 0.001 } }
+  "thresholds": { "warn": 0.42, "block": 0.91, "target_fpr_warn": 0.01, "target_fpr_block": 0.001 },
+  "clip": 4.0 }
 ```
 Inputs are component logits (the uncalibrated gbdt raw score, the CNN logit, the name
 logit). A component is unavailable when its artifact is not shipped or its input is absent
 (no features, no tokens, no name). `z = bias + sum_c w_c * logit_c` over available
-components, using the fallback whose `missing` set equals the unavailable set (a fallback
+components, with each logit first bounded to `[-clip, clip]` when `clip` is set, using the
+fallback whose `missing` set equals the unavailable set (a fallback
 may carry its own `calibration`); when none matches, the primary weights are applied to
-the components that ran (`weight_set` `"partial:<missing>"`). `risk = isotonic(sigmoid(z))`;
+the components that ran (`weight_set` `"partial:<missing>"`). `risk = calibrate(sigmoid(z))`;
 `risk >= block` blocks, `risk >= warn` warns. Verdict `scores` are per-component
 probabilities: the gbdt calibrated probability, sigmoid of the CNN and name logits.
 
@@ -650,8 +652,16 @@ As implemented; results are in `docs/EVALUATION.md` and `models/metrics.json`.
 - **Weights.** 1/sqrt(cluster size), classes balanced within the split being fit.
 - **Models.** LightGBM (small grid on validation PR AUC), a PyTorch CNN over install-time
   tokens (early stopping on validation PR AUC), the name model, and a logistic stacker fit
-  on validation with 5-fold cluster-grouped cross-fitting; isotonic calibration and the
+  on validation with 5-fold cluster-grouped cross-fitting; Platt calibration and the
   warn and block thresholds (target FPR 1% and 0.1%) come from out-of-fold scores.
+- **Bounded stacking.** Component logits are clipped to `[-c, c]` before stacking, with `c`
+  chosen from {none, 16, 12, 8, 6, 4, 3, 2} by out-of-fold recall averaged over every
+  validation threshold up to 1% FPR. The block threshold sits at the 0.1% FPR point of
+  2,172 validation benign packages, so two or three of them set it. Unclipped, those were
+  packages the CNN scored with logits of 17 to 20, and the threshold came out far
+  stricter than intended: 0.024% FPR on test and 53% recall, against 71% at a true 0.1%.
+  The gap was found by comparing the realized test FPR with its target; the bound itself
+  is chosen on validation only.
 - **Metrics.** ROC AUC, PR AUC, detection rate and realized FPR at the frozen thresholds,
   Brier score and expected calibration error, all with 1,000-resample cluster-bootstrap
   95% CIs. Slices: ecosystem, novel versus seen campaigns, compromised libraries, benign

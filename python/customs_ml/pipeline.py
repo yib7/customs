@@ -295,6 +295,26 @@ def _component_matrix(df: pd.DataFrame, scheme: str) -> np.ndarray:
     return np.c_[df[f"gbdt_logit_{scheme}"], df[f"cnn_logit_{scheme}"], df["name_logit"]]
 
 
+# Candidate bounds on component logits (None: no bound). The stacker is linear in the
+# logits, so a component that is wildly overconfident on a few benign packages (the CNN
+# reaches logits near 20) sets the block threshold by itself; at a 0.1% target that
+# threshold rests on two or three validation negatives and does not transfer.
+CLIP_GRID = (None, 16.0, 12.0, 8.0, 6.0, 4.0, 3.0, 2.0)
+
+
+def clip_logits(Z: np.ndarray, clip: float | None) -> np.ndarray:
+    return Z if clip is None else np.clip(Z, -clip, clip)
+
+
+def partial_recall(y: np.ndarray, s: np.ndarray, max_fpr: float = FPR_WARN) -> float:
+    """Mean recall over every threshold that keeps the false positive rate at or below
+    ``max_fpr``: area under the low-FPR end of the ROC curve, rescaled to [0, 1]."""
+    neg = np.sort(s[y == 0])[::-1]
+    pos = s[y == 1]
+    k = max(1, int(max_fpr * len(neg)))
+    return float(np.mean([(pos > t).mean() for t in neg[:k]]))
+
+
 def _fit_stacker(Z: np.ndarray, y: np.ndarray, w: np.ndarray) -> LogisticRegression:
     clf = LogisticRegression(C=1.0, max_iter=1000)
     clf.fit(Z, y, sample_weight=w)
@@ -324,11 +344,20 @@ def stage_ensemble(scheme: str = SCHEME) -> None:
         )
         .to_numpy()
     )
-    oof = np.zeros(len(Zv))
-    for k in range(5):
-        m = folds == k
-        clf = _fit_stacker(Zv[~m], yv[~m], wv[~m])
-        oof[m] = clf.decision_function(Zv[m])
+
+    def out_of_fold(Zc: np.ndarray) -> np.ndarray:
+        oof = np.zeros(len(Zc))
+        for k in range(5):
+            m = folds == k
+            oof[m] = _fit_stacker(Zc[~m], yv[~m], wv[~m]).decision_function(Zc[m])
+        return oof
+
+    # The clip is chosen by out-of-fold partial recall on validation, never on test.
+    grid = {c: partial_recall(yv, out_of_fold(clip_logits(Zv, c))) for c in CLIP_GRID}
+    clip = max(grid, key=lambda c: grid[c])
+    log("stacker clip", clip, {str(c): round(v, 4) for c, v in grid.items()})
+    Z, Zv = clip_logits(Z, clip), clip_logits(Zv, clip)
+    oof = out_of_fold(Zv)
     final = _fit_stacker(Zv, yv, wv)
     p_oof = 1 / (1 + np.exp(-oof))
     cal = gbdt.fit_platt(oof, yv)
@@ -355,6 +384,8 @@ def stage_ensemble(scheme: str = SCHEME) -> None:
         "bias": float(final.intercept_[0]),
         "fallbacks": fallbacks,
         "calibration": cal,
+        "clip": clip,
+        "clip_selection": {str(c): v for c, v in grid.items()},
         "thresholds": {
             "warn": float(t_warn),
             "block": float(t_block),

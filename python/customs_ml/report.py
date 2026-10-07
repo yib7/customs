@@ -138,7 +138,16 @@ def render(scheme: str = SCHEME) -> str:
             f"Stacking weights on component logits: code GBDT {w['code_gbdt']:.2f}, code CNN "
             f"{w['code_nn']:.2f}, name {w['name']:.2f} (fit on validation with 5-fold "
             "cluster-grouped cross-fitting; calibration and thresholds use out-of-fold "
-            "scores).\n"
+            "scores)."
+            + (
+                f" Each component logit is clipped to [-{ens['clip']:g}, {ens['clip']:g}] "
+                "before stacking, the bound with the best out-of-fold recall up to 1% FPR on "
+                "validation. Without it, a few benign validation packages with extreme CNN "
+                "logits set the block threshold well past its 0.1% target."
+                if ens.get("clip")
+                else ""
+            )
+            + "\n"
         )
 
     gd = ev.get("guarddog") or {}
@@ -493,16 +502,20 @@ def render(scheme: str = SCHEME) -> str:
                 f"{gains[f] * 100:+.1f} points at {pct(float(f))}" for f in sorted(mf, key=float)
             )
             + f" FPR, on {rt['n_pos']} releases. Taking the maximum of two scores spends the "
-            "false positive budget on both, which costs most at the strictest rate"
+            "false positive budget on both"
             + (
-                f" ({pct(mf[lo]['base_recall'])} to {pct(mf[lo]['combined_recall'])} at "
-                f"{pct(float(lo))}, the block operating point)"
+                f", which costs recall at the block operating point ({pct(mf[lo]['base_recall'])}"
+                f" to {pct(mf[lo]['combined_recall'])} at {pct(float(lo))})"
                 if gains[lo] < 0
                 else ""
             )
-            + ". The diff model is therefore not part of the shipped decision: the gain at "
-            f"looser rates is a handful of releases out of {rt['n_pos']}, and the loss lands "
-            "on the decision that blocks.\n"
+            + ". The diff model is therefore not part of the shipped decision: "
+            + (
+                f"the gain at looser rates is a handful of releases out of {rt['n_pos']}, "
+                "and the loss lands on the decision that blocks.\n"
+                if max(gains.values()) > 0
+                else "the combination loses recall at every rate measured.\n"
+            )
         )
 
     live = _load("live_study.json")

@@ -263,7 +263,8 @@ impl Models {
 
         let mut reasons = Vec::new();
         if let Some((m, row, out)) = &gbdt {
-            let w = self.ensemble.weight_for(&logits, "code_gbdt");
+            let w =
+                self.ensemble.weight_for(&logits, "code_gbdt") * self.ensemble.clip_scale(out.raw);
             for c in m.top_positive(out, row, 8) {
                 reasons.push(Reason {
                     label: labels::label_or_name(&c.feature),
@@ -274,7 +275,7 @@ impl Models {
             }
         }
         if let Some(ns) = &name {
-            let w = self.ensemble.weight_for(&logits, "name");
+            let w = self.ensemble.weight_for(&logits, "name") * self.ensemble.clip_scale(ns.logit);
             // Prefer the human explanation (edit distance to a popular name, typo, scope)
             // when the name model leans malicious; otherwise report its largest term.
             let explained = ns

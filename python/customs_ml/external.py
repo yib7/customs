@@ -164,10 +164,11 @@ def code_only_risk(df: pd.DataFrame, ens: dict, scheme: str = "temporal") -> np.
     from . import gbdt
 
     fb = next(f for f in ens["fallbacks"] if f["missing"] == ["name"])
+    b = ens.get("clip") or np.inf
     z = (
         fb["bias"]
-        + fb["weights"]["code_gbdt"] * df[f"gbdt_logit_{scheme}"].to_numpy()
-        + fb["weights"]["code_nn"] * df[f"cnn_logit_{scheme}"].to_numpy()
+        + fb["weights"]["code_gbdt"] * np.clip(df[f"gbdt_logit_{scheme}"].to_numpy(), -b, b)
+        + fb["weights"]["code_nn"] * np.clip(df[f"cnn_logit_{scheme}"].to_numpy(), -b, b)
     )
     return gbdt.apply_calibration(ens["calibration"], 1 / (1 + np.exp(-z)))
 
