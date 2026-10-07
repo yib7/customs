@@ -693,6 +693,41 @@ impl<'a> Scanner<'a> {
                 )
             })
             .collect();
+        // Namespace packages (PEP 420) have no `__init__.py` of their own; importing one
+        // runs its subpackages' `__init__.py` instead (`mistralai.client`).
+        const NOT_PACKAGES: &[&str] = &[
+            "tests",
+            "test",
+            "docs",
+            "doc",
+            "examples",
+            "example",
+            "sources",
+            "scripts",
+            "benchmarks",
+        ];
+        const MAX_NAMESPACE_INITS: usize = 8;
+        let mut ns_inits: Vec<&str> = self
+            .index
+            .keys()
+            .copied()
+            .filter(|p| {
+                let parts: Vec<&str> = p.split('/').collect();
+                let (ns, sub) = match parts.as_slice() {
+                    [ns, sub, "__init__.py"] => (format!("{ns}/"), *sub),
+                    ["src", ns, sub, "__init__.py"] => (format!("src/{ns}/"), *sub),
+                    _ => return false,
+                };
+                let name = ns.trim_end_matches('/').rsplit('/').next().unwrap_or("");
+                !NOT_PACKAGES.contains(&name)
+                    && !NOT_PACKAGES.contains(&sub)
+                    && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                    && !self.index.contains_key(format!("{ns}__init__.py").as_str())
+            })
+            .collect();
+        ns_inits.sort_unstable();
+        ns_inits.truncate(MAX_NAMESPACE_INITS);
+        inits.extend(ns_inits);
         inits.sort_unstable();
         let mut pths: Vec<&str> = self
             .index

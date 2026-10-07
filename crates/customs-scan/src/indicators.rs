@@ -263,8 +263,14 @@ static STRING_RULES: LazyLock<RuleSet> = LazyLock::new(|| {
             NETWORK,
             r"(?i)\b(?:curl|wget)\b|invoke-restmethod|\bnslookup\b",
         ),
+        // Code inside a string that runs decoded data, as handed to `python -c` or
+        // `node -e`: both indicators on one line count as exec_decoded.
+        rule(DYN_CODE, EXEC_DECODED_IN_STRING),
+        rule(DECODE_OBF, EXEC_DECODED_IN_STRING),
     ])
 });
+
+const EXEC_DECODED_IN_STRING: &str = r#"\b(?:exec|eval|Function)\s*\(\s*[\w.$'"()\[\]]{0,80}?\b(?:b64decode|b32decode|b85decode|a85decode|decodebytes|decompress|unhexlify|fromhex|atob)\s*\(|\beval\s*\(\s*Buffer\.from\s*\("#;
 
 /// Additional rules for shell scripts and npm script commands, where every word is a command.
 static SHELL_RULES: LazyLock<RuleSet> = LazyLock::new(|| {
@@ -1016,6 +1022,19 @@ mod tests {
         );
         assert_eq!(fa.exec_decoded_lines, 0);
         assert_eq!(fa.hidden_ws_lines, 0);
+        // The same shape inside a string handed to `python -c` or `node -e`.
+        let fa = analyze(
+            "import subprocess, sys\nsubprocess.Popen([sys.executable, \"-c\", \"import base64; exec(base64.b64decode('aGk='))\"])\n",
+            Lang::Python,
+        );
+        assert_eq!(fa.exec_decoded_lines, 1);
+        let fa = analyze(
+            "node -e \"eval(Buffer.from(p, 'base64').toString())\"\n",
+            Lang::Shell,
+        );
+        assert_eq!(fa.counts[DECODE_OBF], 1);
+        let fa = analyze("s = 'call exec(...) after b64decode(x)'\n", Lang::Python);
+        assert_eq!(fa.exec_decoded_lines, 0);
         // Leading whitespace this deep pushes code off screen too; short runs never count.
         let fa = analyze(&format!("{}x = 1\n", " ".repeat(120)), Lang::Js);
         assert_eq!(fa.hidden_ws_lines, 1);

@@ -553,54 +553,57 @@ fn has_root_marker(c: &Contents) -> bool {
 
 /// When stripping stops above the package (the top level holds more than one directory,
 /// as in `foo/foo-1.0/setup.py` next to a `sources/` checkout), use the shallowest
-/// directory that holds a manifest as the root, if exactly one does. Files outside it keep
-/// their paths, so they are still scanned; they just cannot be mistaken for the package's
-/// own manifest or install hooks.
+/// directory that holds a manifest or an unpacked wheel's `.dist-info` as the root, if
+/// exactly one does. Files outside it keep their paths, so they are still scanned; they
+/// just cannot be mistaken for the package's own manifest or install hooks.
 fn reroot_nested(c: &mut Contents, stripped: &mut Vec<String>) {
     if has_root_marker(c) {
         return;
     }
-    let dirs: Vec<(usize, &str)> = c
-        .entries
-        .iter()
-        .filter(|e| e.depth == 0)
-        .filter_map(|e| {
-            let (dir, file) = e.path.rsplit_once('/')?;
-            ROOT_MARKERS
-                .contains(&file)
-                .then(|| (dir.matches('/').count(), dir))
-        })
-        .collect();
-    let Some(min) = dirs.iter().map(|(d, _)| *d).min() else {
+    // (depth, directory, holds a built distribution's own metadata)
+    let mut dirs: Vec<(usize, &str, bool)> = Vec::new();
+    for e in c.entries.iter().filter(|e| e.depth == 0) {
+        if let Some((dir, file)) = e.path.rsplit_once('/') {
+            if ROOT_MARKERS.contains(&file) {
+                let built = file == "PKG-INFO" || file == "package.json";
+                dirs.push((dir.matches('/').count(), dir, built));
+            }
+        }
+        // `<dir>/<name>.dist-info/...`: `<dir>` is an unpacked wheel.
+        let mut start = 0;
+        while let Some(i) = e.path[start..].find(".dist-info/") {
+            let end = start + i;
+            if let Some(slash) = e.path[..end].rfind('/') {
+                let dir = &e.path[..slash];
+                dirs.push((dir.matches('/').count(), dir, true));
+            }
+            start = end + ".dist-info/".len();
+        }
+    }
+    let Some(min) = dirs.iter().map(|(d, _, _)| *d).min() else {
         return;
     };
-    let mut cands: Vec<&str> = dirs
+    let mut cands: Vec<(&str, bool)> = dirs
         .iter()
-        .filter(|(d, _)| *d == min)
-        .map(|(_, p)| *p)
+        .filter(|(d, _, _)| *d == min)
+        .map(|(_, p, b)| (*p, *b))
         .collect();
     cands.sort_unstable();
     cands.dedup();
-    if cands.len() > 1 {
+    // A directory counts as built when any of its markers says so.
+    let mut roots: Vec<&str> = cands.iter().map(|(p, _)| *p).collect();
+    roots.dedup();
+    if roots.len() > 1 {
         // A built distribution next to a source checkout of the same project: prefer the
-        // directory with the distribution's own metadata (`PKG-INFO`, `package.json`).
-        let built: Vec<&str> = cands
-            .iter()
-            .copied()
-            .filter(|d| {
-                let has = |f: &str| {
-                    let want = format!("{d}/{f}");
-                    c.entries.iter().any(|e| e.depth == 0 && e.path == want)
-                };
-                has("PKG-INFO") || has("package.json")
-            })
-            .collect();
-        cands = built;
+        // directory with the distribution's own metadata (`PKG-INFO`, `package.json`, a
+        // wheel's `.dist-info`).
+        roots = cands.iter().filter(|(_, b)| *b).map(|(p, _)| *p).collect();
+        roots.dedup();
     }
-    if cands.len() != 1 || min + 1 > MAX_STRIP_LEVELS {
+    if roots.len() != 1 || min + 1 > MAX_STRIP_LEVELS {
         return;
     }
-    let root = cands[0].to_string();
+    let root = roots[0].to_string();
     let prefix = format!("{root}/");
     for e in c.entries.iter_mut().filter(|e| e.depth == 0) {
         if let Some(rest) = e.path.strip_prefix(&prefix) {
@@ -704,6 +707,30 @@ mod tests {
         };
         strip_prefix(&mut c);
         assert_eq!(c.stripped_prefix.as_deref(), Some("x/dist/pd-1.0"));
+
+        // An unpacked wheel next to a source checkout: the wheel wins, even though only
+        // the checkout has a manifest file.
+        let mut c = Contents {
+            entries: vec![
+                entry("dt-1.0/dt/dt/__init__.py"),
+                entry("dt-1.0/dt/dt-1.0.dist-info/METADATA"),
+                entry("dt-1.0/sources/dt/pyproject.toml"),
+                entry("dt-1.0/sources/dt/dt/__init__.py"),
+            ],
+            ..Default::default()
+        };
+        strip_prefix(&mut c);
+        let paths: Vec<&str> = c.entries.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec![
+                "dt/__init__.py",
+                "dt-1.0.dist-info/METADATA",
+                "sources/dt/pyproject.toml",
+                "sources/dt/dt/__init__.py"
+            ]
+        );
+        assert_eq!(c.stripped_prefix.as_deref(), Some("dt-1.0/dt"));
 
         // Two candidate roots at the same depth: ambiguous, left alone.
         let mut c = Contents {

@@ -505,3 +505,29 @@ fn behavior_concentrated_in_one_file() {
     assert_eq!(r.features["all_max_file_kinds"], 1.0);
     assert!(r.features["all_top_file_share"] < 0.5);
 }
+
+#[test]
+fn unpacked_wheel_next_to_a_checkout_and_namespace_packages() {
+    // The wheel is what installs; the checkout next to it is a clean copy of the source.
+    let bytes = tar_gz_files(&[
+        (
+            "ns-1.0/ns/ns/client/__init__.py",
+            "import urllib.request\nimport subprocess\n",
+        ),
+        ("ns-1.0/ns/ns/client/core.py", "x = 1\n"),
+        ("ns-1.0/ns/ns/tests/__init__.py", ""),
+        (
+            "ns-1.0/ns/ns-1.0.dist-info/METADATA",
+            "Name: ns\nVersion: 1.0\n",
+        ),
+        (
+            "ns-1.0/sources/ns/pyproject.toml",
+            "[project]\nname = \"ns\"\n",
+        ),
+        ("ns-1.0/sources/ns/src/ns/client/__init__.py", ""),
+    ]);
+    let r = scan(&bytes, "ns-1.0.tar.gz");
+    assert_eq!(r.install_surface, vec!["ns/client/__init__.py"]);
+    assert_eq!(r.features["inst_network"], 1.0);
+    assert_eq!(r.features["inst_proc_exec"], 1.0);
+}

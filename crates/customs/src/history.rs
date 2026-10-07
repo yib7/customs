@@ -22,7 +22,8 @@ use crate::resolve::{compare_versions, Pep440};
 /// How many earlier releases `publisher_changed` compares against.
 pub const RECENT_RELEASES: usize = 5;
 
-/// How much older the "settled" release `install_script_added` also compares against is.
+/// How much older the "settled" release is that `install_script_added` and the dependency
+/// rules also compare against, so a burst of releases cannot hide a change.
 pub const SETTLED_HOURS: i64 = 24;
 
 /// The registry facts of one release that the rules compare.
