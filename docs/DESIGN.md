@@ -686,7 +686,7 @@ packages:
 `install_script_added` blocks because it is both common in takeovers and rare in
 legitimate releases: 4 of 14,897, well under the 0.1% budget of the model's block
 threshold. On the compromised npm releases of the test period it raises the share blocked
-from 40% to at least 76%. Comparing with the settled release (the newest one at least 24
+from 44% to at least 78%. Comparing with the settled release (the newest one at least 24
 hours older) as well as the previous one matters here: attackers publish several malicious
 versions within hours, and against the previous release alone the second one shows no
 change. Before that comparison, and before an added root `binding.gyp` counted as an added
@@ -703,9 +703,9 @@ The two dependency rules cover takeovers whose payload arrives through a depende
 leaves nothing for the scanner in the package's own archive: the Mastra wave added
 `easy-day-js`, a package published the day before, the axios compromise added
 `plain-crypto-js`, and the TanStack wave added an optional dependency on a GitHub commit.
-Both compare with the settled release too. On the 54 test-period compromised npm releases
+Both compare with the settled release too. On the 51 test-period compromised npm releases
 the model lets through, they catch 28, and with every blocking rule the share blocked rises
-from 40% to between 95% and 98% (the range covers earlier releases that were unpublished
+from 44% to between 96% and 99% (the range covers earlier releases that were unpublished
 and whose facts are unknown), at a cost of 5 of 14,897 legitimate releases. A new dependency is exempt from
 `young_dependency_added` when it shares a maintainer or publisher with the package, since
 maintainers routinely publish new platform or sibling packages alongside a release. The

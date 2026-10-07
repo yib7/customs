@@ -14,11 +14,11 @@ are stopped before anything is downloaded.
 
 | | Customs | GuardDog 3.2 |
 |---|---:|---:|
-| ROC AUC | **0.972** | 0.837 |
-| Malware caught at GuardDog's own false-positive rate (18%) | **96.1%** | 79.4% |
-| Malware caught at GuardDog's `high_risk` false-positive rate (5%) | **87.3%** | 49.7% |
-| Malware flagged (warn) at a 0.7% false-positive rate | **79.2%** | |
-| Malware auto-blocked at a 0.07% false-positive rate | **66.5%** | |
+| ROC AUC | **0.971** | 0.837 |
+| Malware caught at GuardDog's own false-positive rate (18%) | **96.2%** | 79.4% |
+| Malware caught at GuardDog's `high_risk` false-positive rate (5%) | **88.2%** | 49.7% |
+| Malware flagged (warn) at a 0.9% false-positive rate | **80.9%** | |
+| Malware auto-blocked at a 0.09% false-positive rate | **68.0%** | |
 
 The Rust binary reproduces the offline evaluation exactly: replaying 706 held-out packages
 through the live proxy gave identical decisions to the Python pipeline (largest risk
@@ -123,16 +123,16 @@ new dependency that strangers published days before the release (`docs/DESIGN.md
 with the one before it and with the newest release at least a day older, so a burst of
 malicious versions published within hours cannot hide the change. Together they fired on 5
 of 14,897 legitimate releases and lift the share of test-period compromised npm releases
-blocked from 40% to at least 95%: of 17 groups of three or more releases (one npm scope or
+blocked from 44% to at least 96%: of 17 groups of three or more releases (one npm scope or
 name prefix each), 15 are blocked in full. The rest warn.
 
 ## Results
 
 | Test set (time split, malware found from 2026-02-13) | Value (95% CI) |
 |---|---|
-| ROC AUC | 0.972 (0.965 to 0.977) |
-| Flagged at the warn threshold (target FPR 1%) | 79.2% (76.0 to 82.5), realized FPR 0.69% |
-| Blocked at the block threshold (target FPR 0.1%) | 66.5% (62.5 to 70.3), realized FPR 0.07% |
+| ROC AUC | 0.971 (0.965 to 0.977) |
+| Flagged at the warn threshold (target FPR 1%) | 80.9% (77.9 to 83.8), realized FPR 0.92% |
+| Blocked at the block threshold (target FPR 0.1%) | 68.0% (64.1 to 71.7), realized FPR 0.09% |
 | Never-seen campaigns (no near-duplicate in training), ROC AUC | 0.971 |
 | Benign false positives at block, popular packages | 0 of 2,064 (top and mid tiers) |
 
@@ -144,13 +144,17 @@ training was augmented with disguised malware. Detection at the warn threshold:
 
 | Evasion | Used in augmentation | Before | After |
 |---|---|---:|---:|
-| none (clean) | | 80.0% | 77.5% |
-| starjacking (README, repo link and description copied from a real project) | yes | 57.9% | **73.9%** |
-| fake README and repository metadata | yes | 63.2% | **74.6%** |
-| payload buried inside a real library's source | yes | 68.0% | **77.9%** |
-| string literals split into concatenations | no | 78.0% | 76.4% |
-| install script moved behind an import | no | 79.9% | 77.5% |
-| payload wrapped in base64 + exec | no | 91.6% | 94.0% |
+| none (clean) | | 80.0% | 78.9% |
+| starjacking (README, repo link and description copied from a real project) | yes | 57.9% | **75.2%** |
+| fake README and repository metadata | yes | 63.2% | **77.8%** |
+| payload buried inside a real library's source | yes | 68.0% | **80.2%** |
+| string literals split into concatenations | no | 78.0% | 79.5% |
+| install script moved behind an import | no | 79.9% | 78.9% |
+| payload wrapped in base64 + exec | no | 91.6% | 93.5% |
+
+Splitting string literals (`'child_' + 'process'`) used to cost 4 points at block; the
+scanner now folds literals joined by `+` before any rule or the CNN sees them, and the
+split rewrite is blocked at 66.1% against 67.1% for the clean samples.
 
 **A second source.** The test sets above hold one collector's malware.
 [MalRegistry](https://github.com/lxyeternal/pypi_malregistry) (ASE 2023) was gathered by
@@ -160,7 +164,7 @@ campaign into a dev half and a held-out half that is never looked at or trained 
 | Held-out MalRegistry campaigns (2,174 archives, 660 clusters) | Before | After |
 |---|---:|---:|
 | Caught at a 0.5% false-positive rate (code only, no name model) | 37.4% | **48.7%** |
-| Warned or blocked, one sample per campaign | 59.2% | **83.0%** |
+| Warned or blocked, one sample per campaign | 59.2% | **84.4%** |
 
 *Before* is the model trained on one collector; *after* adds the dev half to training (the
 first row is a controlled retrain; the second is the shipped model). The gain grows with
@@ -168,15 +172,17 @@ the share of dev campaigns added (43.0% at a quarter, 46.1% at half). A round of
 fixes driven by dev-half error analysis, by contrast, helped the dev half and barely moved
 the held-out one, which is why the held-out half exists.
 
-Weighting each campaign equally, the shipped models catch 72.3% / 80.3% / 83.5% of held-out
+Weighting each campaign equally, the shipped models catch 68.4% / 81.7% / 83.9% of held-out
 campaigns at 0.1% / 0.5% / 1% false positives. Per-archive numbers are fragile here: one
 campaign is 901 near-identical archives (41% of the held-out half), so per-archive recall
-moves by 41 points whenever a retrain carries that one score across a threshold (at 0.5% it
-read 91.0% for the previous model and 76.0% for this one, while the campaign-weighted
-number moved from 81.0% to 80.3%).
+moves by 41 points whenever a retrain carries that one score across a threshold. At 0.5%
+it read 76.0% for the previous model and 50.0% for this one, while the campaign-weighted
+number moved from 80.3% to 81.7%. The scanner change behind this retrain leaves that
+campaign's features and token stream unchanged, so the swing is retrain noise: its code
+risk fell from 0.91 to 0.70 because the new CNN scores it near zero.
 
 **Known weak spots** (from the report): compromised releases of popular libraries (a
-payload inside thousands of lines of legitimate code, ROC AUC 0.901, 38% blocked) and very
+payload inside thousands of lines of legitimate code, ROC AUC 0.903, 42% blocked) and very
 large packages. Blocking of compromised releases rose from 31% to 46% once the scanner
 parsed `bun run index.js` correctly and followed hooks that call other scripts
 (`npm run setup`); retrains with different seeds block between 36% and 43% of them, so
@@ -212,7 +218,7 @@ methodology, is in [`docs/EVALUATION.md`](docs/EVALUATION.md).
   validation packages, and an earlier model's threshold landed at 0.02% FPR on test with
   10 points of recall lost. The cause was a few benign packages with extreme CNN logits;
   the stacker now bounds each component's logit, with the bound chosen on validation, and
-  the realized FPR sits at 0.07%.
+  the realized FPR sits at 0.07% to 0.09% across recent retrains.
 * **Red-teamed.** Held-out malware is rewritten with evasions and re-scanned; evasions used
   in augmentation are reported separately from unseen ones.
 * **Verified end to end.** `scripts/replay.py` serves held-out malware from a fake
