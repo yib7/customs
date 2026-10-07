@@ -9,6 +9,7 @@ pub mod client;
 pub mod config;
 pub mod engine;
 pub mod hook;
+pub mod mcp;
 pub mod metrics;
 pub mod policy;
 pub mod proxy;
