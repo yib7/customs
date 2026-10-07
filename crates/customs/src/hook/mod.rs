@@ -84,7 +84,7 @@ pub enum TargetResult {
     },
 }
 
-fn target_label(t: &Target) -> String {
+pub fn target_label(t: &Target) -> String {
     match t {
         Target::Package {
             ecosystem,
@@ -100,7 +100,8 @@ fn target_label(t: &Target) -> String {
     }
 }
 
-fn verdict_summary(v: &Verdict) -> String {
+/// Why a verdict came out the way it did, in one line.
+pub fn verdict_summary(v: &Verdict) -> String {
     let mut parts: Vec<String> = v
         .policy_hits
         .iter()
@@ -236,8 +237,23 @@ pub async fn evaluate(input: &str, opts: &HookOptions) -> anyhow::Result<Option<
     } else {
         None
     };
-    let checker = checker.as_ref();
-    let results: Vec<TargetResult> = stream::iter(targets.iter().cloned())
+    let results = check_targets(&targets, checker.as_ref(), "claude-code-hook").await;
+    for r in &results {
+        if let TargetResult::Failed { label, message } = r {
+            eprintln!("customs hook: checking {label} failed: {message}");
+        }
+    }
+    Ok(decide(&results, opts.fail_closed))
+}
+
+/// Check every target, a few at a time. `checker` may be `None` only when no target is a
+/// registry package. Results keep the order of `targets`.
+pub async fn check_targets(
+    targets: &[Target],
+    checker: Option<&Checker>,
+    client: &str,
+) -> Vec<TargetResult> {
+    stream::iter(targets.iter().cloned())
         .map(|t| async move {
             let label = target_label(&t);
             match t {
@@ -253,10 +269,7 @@ pub async fn evaluate(input: &str, opts: &HookOptions) -> anyhow::Result<Option<
                             message: "no checker".into(),
                         };
                     };
-                    match c
-                        .check(ecosystem, &name, version.as_deref(), "claude-code-hook")
-                        .await
-                    {
+                    match c.check(ecosystem, &name, version.as_deref(), client).await {
                         Ok(v) => TargetResult::Verdict {
                             label,
                             url: c.verdict_url(v.id),
@@ -266,7 +279,6 @@ pub async fn evaluate(input: &str, opts: &HookOptions) -> anyhow::Result<Option<
                             TargetResult::PackageError { label, message: m }
                         }
                         Err(CheckError::Infrastructure(m)) => {
-                            eprintln!("customs hook: checking {label} failed: {m}");
                             TargetResult::Failed { label, message: m }
                         }
                     }
@@ -275,8 +287,7 @@ pub async fn evaluate(input: &str, opts: &HookOptions) -> anyhow::Result<Option<
         })
         .buffered(8)
         .collect()
-        .await;
-    Ok(decide(&results, opts.fail_closed))
+        .await
 }
 
 /// Entry point: read stdin, print the decision. Always exits 0 (see module docs).

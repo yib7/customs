@@ -72,3 +72,45 @@ cannot be checked and produce `ask`.
 By default the hook fails open: if it cannot check a package it writes the reason to
 stderr and returns no decision, so a broken Customs setup does not stop your work. Use
 `--fail-closed` where an unchecked install is worse than a blocked command.
+
+# MCP server
+
+`customs mcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server over
+stdio. The hook above stops an install the agent already decided to run; the MCP tools let
+the agent ask before it proposes a package or a command at all. It works with any MCP
+client: Claude Code, Claude Desktop, Cursor, and others.
+
+| Tool | Use |
+|---|---|
+| `check_package` | Check one package (`ecosystem`, `name`, optional `version`) |
+| `check_install_command` | Check every package a shell command would install |
+| `explain_verdict` | Reasons and code evidence for a verdict id (needs `customs serve`) |
+| `scan_archive` | Scan a local archive file offline |
+
+A block is an ordinary answer; a tool reports an error only when the check itself failed.
+
+## Register it
+
+Claude Code:
+
+```sh
+claude mcp add customs -- customs mcp
+```
+
+Add `--scope user` (before `--`) to use it in every project, or `--scope project` to share
+it with the repository through `.mcp.json`. For other clients, merge
+[`mcp.json`](mcp.json) into their MCP configuration (Claude Desktop:
+`claude_desktop_config.json`; Cursor: `.cursor/mcp.json`):
+
+```json
+{ "mcpServers": { "customs": { "command": "customs", "args": ["mcp"] } } }
+```
+
+Run `/mcp` in Claude Code to confirm the server is connected.
+
+## MCP options
+
+`customs mcp` takes the same `--server`, `--config`, `--models` and `--data-dir` options as
+the hook (table above), with the same defaults: it asks a running `customs serve` when one
+answers and otherwise checks in-process. Pass them after `mcp`, for example
+`claude mcp add customs -- customs mcp --server http://10.0.0.5:7878`.

@@ -46,3 +46,5 @@ customs-model = { path = "../customs-model" }
 
 [dev-dependencies]
 tempfile.workspace = true
+tar.workspace = true
+flate2.workspace = true

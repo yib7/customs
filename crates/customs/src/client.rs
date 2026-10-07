@@ -78,7 +78,8 @@ pub enum Checker {
     Local(Arc<Engine>),
 }
 
-fn is_loopback(base: &str) -> bool {
+/// True when `base` names this machine, which a corporate HTTP proxy must not see.
+pub fn is_loopback(base: &str) -> bool {
     url::Url::parse(base)
         .ok()
         .and_then(|u| u.host_str().map(str::to_string))

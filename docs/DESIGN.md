@@ -43,7 +43,7 @@ learned detector, registry-metadata policy rules, and agent integration in one l
 | `crates/customs-scan` | Rust | Safe archive unpacking and static feature extraction. Library plus `customs-scan` CLI (batch JSONL mode for training). Single implementation of features used by training and serving, so there is no train/serve skew. |
 | `crates/customs-model` | Rust | Loads exported model artifacts and runs inference: gradient-boosted trees, the package-name model, and the code neural network. Produces calibrated risk plus per-feature contributions. |
 | `crates/customs-py` | Rust (PyO3) | Python bindings for `customs-scan` (`import customs_scan`), built with maturin. |
-| `crates/customs` | Rust | The `customs` binary: proxy server, policy engine, REST API, Claude Code hook, CLI. |
+| `crates/customs` | Rust | The `customs` binary: proxy server, policy engine, REST API, Claude Code hook, MCP server, CLI. |
 | `python/customs_ml` | Python | Dataset pipeline, dedup and splits, training (LightGBM, PyTorch), evaluation, baselines, export. |
 | `web/` | TypeScript, React | Dashboard, built by Vite and served by the proxy. |
 | `models/` | artifacts | Exported model files loaded by `customs-model`. |
@@ -569,6 +569,37 @@ Output is JSON on stdout with exit code 0:
 Specs that cannot be checked (git, URL, local path, custom index) produce `ask`; editable
 local paths are skipped. When Customs itself fails, the hook fails open (no decision,
 message on stderr) unless run with `--fail-closed`, which denies. Setup: `hooks/README.md`.
+
+### 9.1 MCP server
+
+`customs mcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server for any
+MCP client (Claude Code, Claude Desktop, Cursor). Where the hook stops an install the
+agent already decided to run, the MCP tools let the agent ask first, before it proposes a
+package or a command. Transport is the MCP stdio transport: JSON-RPC 2.0, one message per
+line on stdin and stdout, implemented by hand in `crates/customs/src/mcp.rs` with
+serde_json and tokio (no SDK). Supported: `initialize` (protocol `2025-06-18`, or the
+client's version when it is `2025-03-26` or `2024-11-05`), `ping`, `tools/list`,
+`tools/call`, and notifications, which never get a reply. Errors use the JSON-RPC codes
+-32700 (parse error), -32600 (invalid request), -32601 (unknown method) and -32602
+(unknown tool, or arguments that do not match the input schema). Requests run
+concurrently. Stdout carries protocol messages only; logs go to stderr.
+
+| Tool | Arguments | Does |
+|---|---|---|
+| `check_package` | `ecosystem` (`pypi`/`npm`), `name`, `version?` | Same path as `customs check`: summary text (decision, risk, top reasons, policy hits, nearest popular name for a typosquat or nonexistent name) plus the verdict as `structuredContent` |
+| `check_install_command` | `command`, `cwd?` | Parses the command with the hook parser (section 9), checks every target, returns a per-package table and the most severe decision |
+| `explain_verdict` | `id` | `GET /api/verdicts/{id}` on the server, rendered with reasons and evidence (file, line, snippet) |
+| `scan_archive` | `path`, `ecosystem?`, `name?` | Same as `customs scan`: offline, a throwaway engine, nothing stored |
+
+Checks go through the same `client::Checker` as `customs check` and the hook: the server at
+`--server` / `CUSTOMS_SERVER` when its `/healthz` answers, otherwise an in-process engine
+built from `--config`, `--models` and `--data-dir`. The checker is chosen on the first
+check and kept for the session, so verdict ids always refer to one store; when it is
+in-process, `explain_verdict` reads that store instead of the server. A block is a normal
+result (`isError: false`); `isError: true` means the check itself failed (registry or
+server unreachable, unreadable archive, unknown version). Evidence snippets are quoted
+from untrusted package code, so the text marks them as data and keeps each to one bounded
+line. Setup: `hooks/README.md`.
 
 ## 10. Evaluation protocol (python/customs_ml)
 

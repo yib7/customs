@@ -1,6 +1,7 @@
 //! Command-line interface.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -12,6 +13,7 @@ use crate::client::{Checker, LocalOptions};
 use crate::config::resolve_policy;
 use crate::engine::{default_scanner, load_models, Engine, EngineConfig, Limits};
 use crate::hook::{run_claude_code, HookOptions};
+use crate::mcp::{run_mcp, McpOptions};
 use crate::metrics::Metrics;
 use crate::server::{serve_on, shutdown_signal};
 use crate::util::{ecosystem_str, parse_ecosystem};
@@ -45,6 +47,8 @@ pub enum Command {
     Scan(ScanArgs),
     /// Print shell exports that route pip, uv, and npm through the proxy.
     Env(EnvArgs),
+    /// Model Context Protocol server on stdio, so agents can check packages before installing.
+    Mcp(McpArgs),
     /// Agent integrations.
     Hook {
         #[command(subcommand)]
@@ -125,6 +129,15 @@ pub struct AuditArgs {
     #[arg(long, default_value_t = 8, value_parser = clap::value_parser!(u16).range(1..=256))]
     pub jobs: u16,
     /// Server to ask; when unreachable the checks run in-process.
+    #[arg(long, default_value = DEFAULT_SERVER, env = "CUSTOMS_SERVER")]
+    pub server: String,
+    #[command(flatten)]
+    pub local: LocalArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct McpArgs {
+    /// Server to ask; when unreachable, checks run in-process.
     #[arg(long, default_value = DEFAULT_SERVER, env = "CUSTOMS_SERVER")]
     pub server: String,
     #[command(flatten)]
@@ -222,6 +235,11 @@ pub async fn run(cli: Cli) -> i32 {
         })
         .await),
         Command::Scan(a) => scan(a),
+        Command::Mcp(a) => Ok(run_mcp(McpOptions {
+            server: a.server,
+            local: a.local.options(),
+        })
+        .await),
         Command::Env(a) => {
             print!("{}", env_exports(&a.server, a.shell));
             Ok(0)
@@ -340,43 +358,68 @@ pub fn exit_code(d: Decision) -> i32 {
 }
 
 fn scan(a: ScanArgs) -> anyhow::Result<i32> {
-    let bytes = std::fs::read(&a.archive)
-        .map_err(|e| anyhow::anyhow!("reading {}: {e}", a.archive.display()))?;
-    let filename = a
-        .archive
-        .file_name()
-        .and_then(|f| f.to_str())
-        .unwrap_or("archive")
-        .to_string();
-    let eco = match a.ecosystem {
-        Some(EcoArg::Pypi) => Ecosystem::Pypi,
-        Some(EcoArg::Npm) => Ecosystem::Npm,
-        None => customs_scan::guess_ecosystem(&filename).ok_or_else(|| {
-            anyhow::anyhow!("cannot tell the ecosystem of {filename}; pass --ecosystem")
-        })?,
-    };
-    // Offline: an in-memory engine with no network use, in a throwaway data dir.
-    let tmp = std::env::temp_dir().join(format!("customs-scan-{}", std::process::id()));
-    let (policy, source) =
-        resolve_policy(a.config.as_deref(), &tmp).map_err(|e| anyhow::anyhow!("{e}"))?;
-    let engine = Engine::new(EngineConfig {
-        data_dir: tmp.clone(),
-        models: load_models(a.models.as_deref())?,
-        policy,
-        policy_path: source.path,
-        scanner: default_scanner(),
-        limits: Limits::default(),
-        metrics: Arc::new(Metrics::new()),
-    })?;
-    let v = engine.scan_local(&bytes, &filename, eco, a.name.as_deref());
-    drop(engine);
-    let _ = std::fs::remove_dir_all(&tmp);
+    let eco = a.ecosystem.map(|e| match e {
+        EcoArg::Pypi => Ecosystem::Pypi,
+        EcoArg::Npm => Ecosystem::Npm,
+    });
+    let v = scan_file(
+        &a.archive,
+        eco,
+        a.name.as_deref(),
+        a.config.as_deref(),
+        a.models.as_deref(),
+    )?;
     if a.json {
         println!("{}", serde_json::to_string_pretty(&v)?);
     } else {
         print!("{}", pretty(&v, None, "offline scan"));
     }
     Ok(exit_code(v.decision))
+}
+
+/// Scan a local archive offline (`customs scan`, the MCP `scan_archive` tool). The
+/// ecosystem is guessed from the file name when not given.
+pub fn scan_file(
+    archive: &Path,
+    eco: Option<Ecosystem>,
+    name: Option<&str>,
+    config: Option<&Path>,
+    models: Option<&Path>,
+) -> anyhow::Result<Verdict> {
+    static SCANS: AtomicU64 = AtomicU64::new(0);
+    let bytes = std::fs::read(archive)
+        .map_err(|e| anyhow::anyhow!("reading {}: {e}", archive.display()))?;
+    let filename = archive
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or("archive")
+        .to_string();
+    let eco = match eco {
+        Some(e) => e,
+        None => customs_scan::guess_ecosystem(&filename).ok_or_else(|| {
+            anyhow::anyhow!("cannot tell the ecosystem of {filename}; pass --ecosystem")
+        })?,
+    };
+    // Offline: an in-memory engine with no network use, in a throwaway data dir.
+    let tmp = std::env::temp_dir().join(format!(
+        "customs-scan-{}-{}",
+        std::process::id(),
+        SCANS.fetch_add(1, Ordering::Relaxed)
+    ));
+    let (policy, source) = resolve_policy(config, &tmp).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let engine = Engine::new(EngineConfig {
+        data_dir: tmp.clone(),
+        models: load_models(models)?,
+        policy,
+        policy_path: source.path,
+        scanner: default_scanner(),
+        limits: Limits::default(),
+        metrics: Arc::new(Metrics::new()),
+    })?;
+    let v = engine.scan_local(&bytes, &filename, eco, name);
+    drop(engine);
+    let _ = std::fs::remove_dir_all(&tmp);
+    Ok(v)
 }
 
 /// Human-readable verdict.
@@ -557,6 +600,10 @@ mod tests {
             (Format::Text, FailOn::Block, 8)
         );
         assert!(Cli::try_parse_from(["customs", "audit", "--jobs", "0"]).is_err());
+        let c = Cli::try_parse_from(["customs", "mcp", "--server", "http://h:1"]).unwrap();
+        assert!(
+            matches!(c.command, Command::Mcp(McpArgs { ref server, .. }) if server == "http://h:1")
+        );
         let c = Cli::try_parse_from(["customs", "serve", "--bind", "0.0.0.0:9000"]).unwrap();
         assert!(
             matches!(c.command, Command::Serve(ServeArgs { ref bind, .. }) if bind == "0.0.0.0:9000")
