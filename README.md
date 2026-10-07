@@ -116,11 +116,12 @@ customs audit -r --format sarif -o customs.sarif      # see docs/github-action.m
 
 **Release history rules.** Account takeovers show up in registry metadata before anyone
 reads the code. The policy engine compares each release with the ones before it and flags
-npm provenance disappearing, an install script appearing or changing, a new publisher, or
-a project waking up after a year of silence (`docs/DESIGN.md`, section 8). An added install
-script blocks by default: it fired on at least 38% of compromised npm releases and on 3 of
-14,895 legitimate ones, and it lifts the share of test-period compromised npm releases
-blocked from 41% to at least 55%. The rest warn.
+npm provenance disappearing, an install script appearing or changing, a new publisher, a
+project waking up after a year of silence, a new dependency fetched from git or a URL, or a
+new dependency that strangers published days before the release (`docs/DESIGN.md`, section
+8). The install script and dependency rules block by default: together they fired on 4 of
+14,897 legitimate releases, and they lift the share of test-period compromised npm releases
+blocked from 41% to at least 70%. The rest warn.
 
 ## Results
 

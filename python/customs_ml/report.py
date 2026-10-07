@@ -644,7 +644,8 @@ def render(scheme: str = SCHEME) -> str:
         add("## Release history rules on compromised npm releases\n")
         add(
             "The proxy's release history rules (`provenance_dropped`, `install_script_added`, "
-            "`publisher_changed`, `dormant_revival`, `version_anomaly`) read registry metadata, "
+            "`publisher_changed`, `dormant_revival`, `version_anomaly`, "
+            "`nonregistry_dependency_added`, `young_dependency_added`) read registry metadata, "
             "not code, so they can catch hijacked releases the model scores low. "
             "`python -m customs_ml.history_eval` replays them on every compromised npm "
             f"release in the corpus with an earlier release ({hc['n_releases']} releases of "
@@ -652,9 +653,12 @@ def render(scheme: str = SCHEME) -> str:
             f"{hist['benign_window_years']:g} years of {hb['n_packages']} benign npm packages "
             f"from the corpus ({hb['n_releases']:,} releases). Most compromised versions were "
             f"unpublished ({hc['n_releases'] - hc['n_listed']} of {hc['n_releases']}): their "
-            "publish time survives and their install scripts come from the archive, but "
+            "publish time survives and their install scripts and dependencies come from the "
+            "archive, but "
             "whether they carried provenance and who published them is gone, so those two "
-            "rules give a range (unknown counted as silent, then as firing).\n"
+            "rules give a range (unknown counted as silent, then as firing). The dependency "
+            "rules compare with the previous release's dependencies, which are gone too when "
+            "that release was itself unpublished, so they give a range as well.\n"
         )
         add(
             "| Rule | Default | Compromised releases | Benign releases | Benign packages "
@@ -666,6 +670,8 @@ def render(scheme: str = SCHEME) -> str:
             "publisher_changed": "warn",
             "dormant_revival": "warn",
             "version_anomaly": "off",
+            "nonregistry_dependency_added": "block",
+            "young_dependency_added": "block",
         }
 
         def rng(r):
@@ -692,10 +698,15 @@ def render(scheme: str = SCHEME) -> str:
                 f"{pct(u['model_or_rules_low'])} to {pct(u['model_or_rules_high'])} |"
             )
             add(
-                f"| Blocked (`install_script_added` at block) | {pct(u['model_block'])} | "
+                f"| Blocked, `install_script_added` only | {pct(u['model_block'])} | "
                 f"{pct(u['block_with_install_rule_low'])} to "
                 f"{pct(u['block_with_install_rule_high'])} |"
             )
+            if "block_with_rules_low" in u:
+                add(
+                    f"| Blocked, every blocking rule | {pct(u['model_block'])} | "
+                    f"{pct(u['block_with_rules_low'])} to {pct(u['block_with_rules_high'])} |"
+                )
         isa = hb["rules"]["install_script_added"]
         add(
             f"\n`install_script_added` is the rule that earns its place: it fired on "
@@ -715,6 +726,32 @@ def render(scheme: str = SCHEME) -> str:
             "themselves, because the attacker published through the project's own CI. A "
             "takeover by stolen token drops provenance; a takeover of the build does not.\n"
         )
+        nr = hb["rules"].get("nonregistry_dependency_added")
+        yd = hb["rules"].get("young_dependency_added")
+        if nr and yd and u and "dependency_rules_on_missed" in u:
+            add(
+                "The two dependency rules target waves whose payload arrives through a "
+                "dependency, not the package's own files, so the scanner sees nothing in the "
+                "archive: a new `optionalDependencies` entry pointing at a GitHub commit, or a "
+                "new dependency on a package the attacker published days earlier. "
+                "`nonregistry_dependency_added` fires when a git, URL or file dependency is new "
+                "or changed since the previous release; `young_dependency_added` fires when a "
+                "new dependency is not on the registry, or was first published less than 7 "
+                "days before the release by someone who maintains or publishes none of the "
+                "package's releases (a maintainer's own new platform package is routine). They "
+                f"fired on {rng(hc['rules']['nonregistry_dependency_added'])} and "
+                f"{rng(hc['rules']['young_dependency_added'])} of compromised releases, and on "
+                f"{nr['fired']} and {yd['fired']} of {hb['n_releases']:,} legitimate ones. Of "
+                f"the {u['missed_by_model']} test-period compromised releases the model lets "
+                f"through, they catch {u['dependency_rules_on_missed']}"
+                + (
+                    ". "
+                    if u["dependency_rules_on_missed_strict"] == u["dependency_rules_on_missed"]
+                    else f" ({u['dependency_rules_on_missed_strict']} without counting "
+                    "dependencies that are gone from the registry today). "
+                )
+                + "Both block by default.\n"
+            )
         par = _load("history_parity.json")
         if par:
             add(

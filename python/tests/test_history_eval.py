@@ -105,3 +105,63 @@ def test_archive_scripts(tmp_path):
         info.size = len(pj)
         t.addfile(info, io.BytesIO(pj))
     assert he.archive_scripts(str(p)) == [["postinstall", "node a.js"]]
+
+
+def test_nonregistry_specs_match_the_rust_helper():
+    for s in ("github:a/b#1", "git+https://x/y.git", "https://x/y.tgz", "file:../a", "a/b#main"):
+        assert he.is_nonregistry_spec(s), s
+    for s in ("^1.2.3", "latest", "npm:other@1", "@scope/pkg", "1.x || 2.x", "a/b/c"):
+        assert not he.is_nonregistry_spec(s), s
+
+
+def _dep_meta():
+    doc = {
+        "maintainers": [{"name": "alice"}],
+        "time": {
+            "created": "2020-01-01T00:00:00Z",
+            "1.0.0": "2023-12-01T00:00:00Z",
+            "1.0.1": "2024-01-02T00:00:00Z",
+        },
+        "versions": {
+            "1.0.0": {"_npmUser": {"name": "alice"}, "dependencies": {"plain": "^1.0.0"}},
+            "1.0.1": {
+                "_npmUser": {"name": "alice"},
+                "dependencies": {"plain": "^1.0.0", "lure": "^0.0.1", "own-new": "1.0.0"},
+                "optionalDependencies": {"@x/setup": "github:evil/payload#abc", "plain": "2"},
+            },
+        },
+    }
+    return he.slim(doc)
+
+
+DEPS = {
+    "lure": {"created": "2024-01-01T00:00:00Z", "people": ["mallory"]},
+    "own-new": {"created": "2024-01-01T00:00:00Z", "people": ["alice"]},
+}
+
+
+def test_dependency_rules():
+    meta = _dep_meta()
+    assert meta["people"] == ["alice"]
+    # dependencies win over optionalDependencies for the same name.
+    assert ["plain", "^1.0.0"] in meta["versions"]["1.0.1"]["deps"]
+    hits = he.history_rules(meta, "1.0.1", lookup=lambda d: DEPS.get(d, {}), name="pkg")
+    assert hits["nonregistry_dependency_added"] is True
+    assert hits["young_dependency_added"] is True
+    added = he.added_dependencies(meta, "pkg", meta["versions"]["1.0.1"], meta["versions"]["1.0.0"])
+    assert added == ["lure", "own-new"]
+    young, failed = he.young_dependencies(meta, "1.0.1", added, lambda d: DEPS[d])
+    assert young == [("lure", "young")] and not failed
+    # Old enough, missing, or a failed lookup.
+    old = {"lure": {"created": "2023-01-01T00:00:00Z", "people": []}, "own-new": DEPS["own-new"]}
+    assert not he.history_rules(meta, "1.0.1", lookup=old.get, name="pkg")["young_dependency_added"]
+    gone = {"lure": {"missing": True}, "own-new": DEPS["own-new"]}
+    assert he.history_rules(meta, "1.0.1", lookup=gone.get, name="pkg")["young_dependency_added"]
+    failed = {"lure": {}, "own-new": DEPS["own-new"]}
+    assert (
+        he.history_rules(meta, "1.0.1", lookup=failed.get, name="pkg")["young_dependency_added"]
+        is None
+    )
+    # Without lookups the rule is unknown; the first release has no history at all.
+    assert he.history_rules(meta, "1.0.1")["young_dependency_added"] is None
+    assert he.history_rules(meta, "1.0.0", lookup=DEPS.get)["young_dependency_added"] is False

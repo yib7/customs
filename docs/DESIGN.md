@@ -610,9 +610,11 @@ packages:
 | `publisher_changed` | warn | unknown (same) | 1.06% |
 | `dormant_revival` | warn | 16% | 0.50% |
 | `version_anomaly` | off | 3% | 0.09% |
+| `nonregistry_dependency_added` | block | 4% to 40% (unknown where the previous release was unpublished) | 0 of 14,897 |
+| `young_dependency_added` | block | 6% to 42% (same) | 1 of 14,897 |
 
 `install_script_added` blocks because it is both common in takeovers and rare in
-legitimate releases: 3 of 14,895, well under the 0.1% budget of the model's block
+legitimate releases: 3 of 14,897, well under the 0.1% budget of the model's block
 threshold. On the compromised npm releases of the test period it raises the share blocked
 from 41% to at least 55%. The others warn (and `version_anomaly`, which fires on releases
 the model already flags, is off); the model still judges the archive itself, and `block` is
@@ -620,7 +622,19 @@ available for teams that would rather review such releases first. Provenance is 
 evidence than it looks: an attacker who takes over the project's CI publishes with valid
 provenance, and 2 of the 3 still-listed compromised releases that followed an attested
 release carry it. The Python replay of the rules matches `customs check` on 105 of 105
-sampled releases. The npm rules
+sampled releases.
+
+The two dependency rules cover takeovers whose payload arrives through a dependency, which
+leaves nothing for the scanner in the package's own archive: the Mastra wave added
+`easy-day-js`, a package published the day before, the axios compromise added
+`plain-crypto-js`, and the TanStack wave added an optional dependency on a GitHub commit.
+On the 70 test-period compromised npm releases the model lets through, they catch 24, and
+with them the share blocked rises from 41% to at least 70%. A new dependency is exempt from
+`young_dependency_added` when it shares a maintainer or publisher with the package, since
+maintainers routinely publish new platform or sibling packages alongside a release. The
+proxy fetches the packuments of at most 20 added dependencies per release, concurrently and
+through its metadata cache, and only while the rule is on; a failed lookup skips that
+dependency. The npm rules
 read the full packument; PyPI's JSON API names neither uploaders nor attestations, so
 `provenance_dropped` and `publisher_changed` are npm only (PEP 740 attestations through
 PyPI's Integrity API are future work, since they cost a request per file). For PyPI
