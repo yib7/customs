@@ -110,6 +110,11 @@ export interface Stats {
 
 export type Threshold = 'model' | number;
 export type PolicyMode = 'enforce' | 'monitor';
+/** Severity of a rule that can be switched off (the release history rules). */
+export type RuleSeverity = 'off' | 'warn' | 'block';
+
+/** Policy keys of the release history rules. */
+export type HistoryRule = 'provenance_dropped' | 'install_script_added' | 'publisher_changed' | 'dormant_revival' | 'version_anomaly';
 
 export interface Policy {
   mode: PolicyMode;
@@ -118,6 +123,12 @@ export interface Policy {
   min_age_days: number;
   block_nonexistent: boolean;
   block_install_scripts_from_new: boolean;
+  provenance_dropped: RuleSeverity;
+  install_script_added: RuleSeverity;
+  publisher_changed: RuleSeverity;
+  dormant_revival: RuleSeverity;
+  dormant_days: number;
+  version_anomaly: RuleSeverity;
   allow: string[];
   deny: string[];
   upstream: Record<string, string>;

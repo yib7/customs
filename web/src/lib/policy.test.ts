@@ -9,6 +9,12 @@ const POLICY: Policy = {
   min_age_days: 3,
   block_nonexistent: true,
   block_install_scripts_from_new: true,
+  provenance_dropped: 'warn',
+  install_script_added: 'warn',
+  publisher_changed: 'warn',
+  dormant_revival: 'warn',
+  dormant_days: 365,
+  version_anomaly: 'off',
   allow: ['pypi:requests', 'npm:react'],
   deny: ['npm:event-stream@3.3.6'],
   upstream: {},
@@ -41,6 +47,12 @@ describe('validateDraft', () => {
       min_age_days: 3,
       block_nonexistent: true,
       block_install_scripts_from_new: true,
+      provenance_dropped: 'warn',
+      install_script_added: 'warn',
+      publisher_changed: 'warn',
+      dormant_revival: 'warn',
+      dormant_days: 365,
+      version_anomaly: 'off',
       allow: ['pypi:requests', 'npm:react'],
       deny: ['npm:event-stream@3.3.6'],
     });
@@ -62,6 +74,19 @@ describe('validateDraft', () => {
     expect(validateDraft({ ...d, minAgeDays: '2.5' }).errors.min_age_days).toBeDefined();
     expect(validateDraft({ ...d, minAgeDays: '99999' }).errors.min_age_days).toMatch(/at most/);
     expect(validateDraft({ ...d, minAgeDays: '0' }).policy?.min_age_days).toBe(0);
+  });
+
+  it('validates the dormancy period and passes rule severities through', () => {
+    const d = policyToDraft(POLICY);
+    expect(validateDraft({ ...d, dormantDays: '0' }).errors.dormant_days).toMatch(/1 to 3650/);
+    expect(validateDraft({ ...d, dormantDays: '3651' }).errors.dormant_days).toBeDefined();
+    expect(validateDraft({ ...d, dormantDays: 'soon' }).errors.dormant_days).toBeDefined();
+    const r = validateDraft({
+      ...d,
+      dormantDays: ' 730 ',
+      history: { ...d.history, provenance_dropped: 'block', version_anomaly: 'warn' },
+    });
+    expect(r.policy).toMatchObject({ dormant_days: 730, provenance_dropped: 'block', version_anomaly: 'warn', publisher_changed: 'warn' });
   });
 
   it('rejects an entry on both lists', () => {

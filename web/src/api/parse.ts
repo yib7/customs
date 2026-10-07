@@ -18,6 +18,7 @@ import type {
   PolicyHit,
   PolicyMode,
   Reason,
+  RuleSeverity,
   Scores,
   Stats,
   Threshold,
@@ -327,6 +328,10 @@ function parseMode(v: unknown): PolicyMode {
   return v === 'monitor' ? 'monitor' : 'enforce';
 }
 
+function parseRuleSeverity(v: unknown, fallback: RuleSeverity): RuleSeverity {
+  return v === 'off' || v === 'warn' || v === 'block' ? v : fallback;
+}
+
 export function parsePolicy(v: unknown): Policy {
   const r = isRecord(v) && isRecord(v.policy) ? v.policy : asRecord(v);
   const upstreamRaw = asRecord(r.upstream);
@@ -335,6 +340,7 @@ export function parsePolicy(v: unknown): Policy {
     if (typeof val === 'string') upstream[k] = val;
   }
   const minAge = asNumber(r.min_age_days);
+  const dormantDays = asNumber(r.dormant_days);
   return {
     mode: parseMode(r.mode),
     warn_threshold: parseThreshold(r.warn_threshold),
@@ -342,6 +348,12 @@ export function parsePolicy(v: unknown): Policy {
     min_age_days: minAge === null ? 0 : minAge,
     block_nonexistent: asBool(r.block_nonexistent, true),
     block_install_scripts_from_new: asBool(r.block_install_scripts_from_new, true),
+    provenance_dropped: parseRuleSeverity(r.provenance_dropped, 'warn'),
+    install_script_added: parseRuleSeverity(r.install_script_added, 'warn'),
+    publisher_changed: parseRuleSeverity(r.publisher_changed, 'warn'),
+    dormant_revival: parseRuleSeverity(r.dormant_revival, 'warn'),
+    dormant_days: dormantDays === null ? 365 : dormantDays,
+    version_anomaly: parseRuleSeverity(r.version_anomaly, 'off'),
     allow: asStringArray(r.allow),
     deny: asStringArray(r.deny),
     upstream,

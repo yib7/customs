@@ -169,6 +169,10 @@ describe('parsePolicy', () => {
       min_age_days: 3,
       block_nonexistent: false,
       block_install_scripts_from_new: true,
+      provenance_dropped: 'block',
+      install_script_added: 'off',
+      publisher_changed: 'sometimes',
+      dormant_days: 730,
       allow: ['pypi:requests', 5],
       deny: ['npm:event-stream@3.3.6'],
       upstream: { npm: 'https://registry.npmjs.org', bad: 1 },
@@ -180,6 +184,12 @@ describe('parsePolicy', () => {
       min_age_days: 3,
       block_nonexistent: false,
       block_install_scripts_from_new: true,
+      provenance_dropped: 'block',
+      install_script_added: 'off',
+      publisher_changed: 'warn',
+      dormant_revival: 'warn',
+      dormant_days: 730,
+      version_anomaly: 'off',
       allow: ['pypi:requests'],
       deny: ['npm:event-stream@3.3.6'],
       upstream: { npm: 'https://registry.npmjs.org' },
@@ -191,6 +201,9 @@ describe('parsePolicy', () => {
     expect(p.mode).toBe('enforce');
     expect(p.warn_threshold).toBe('model');
     expect(p.allow).toEqual([]);
+    expect(p.provenance_dropped).toBe('warn');
+    expect(p.version_anomaly).toBe('off');
+    expect(p.dormant_days).toBe(365);
   });
 });
 

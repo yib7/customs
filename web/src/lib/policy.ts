@@ -1,10 +1,20 @@
-import type { Policy } from '../api/types';
+import type { HistoryRule, Policy, RuleSeverity } from '../api/types';
+
+/** Release history rules, in the order the policy page shows them. */
+export const HISTORY_RULES: readonly HistoryRule[] = [
+  'provenance_dropped',
+  'install_script_added',
+  'publisher_changed',
+  'dormant_revival',
+  'version_anomaly',
+];
 
 export type PolicyField =
   | 'mode'
   | 'warn_threshold'
   | 'block_threshold'
   | 'min_age_days'
+  | 'dormant_days'
   | 'allow'
   | 'deny';
 
@@ -20,6 +30,8 @@ export interface PolicyDraft {
   minAgeDays: string;
   block_nonexistent: boolean;
   block_install_scripts_from_new: boolean;
+  history: Record<HistoryRule, RuleSeverity>;
+  dormantDays: string;
   allow: string[];
   deny: string[];
 }
@@ -50,6 +62,14 @@ export function policyToDraft(p: Policy): PolicyDraft {
     minAgeDays: String(p.min_age_days),
     block_nonexistent: p.block_nonexistent,
     block_install_scripts_from_new: p.block_install_scripts_from_new,
+    history: {
+      provenance_dropped: p.provenance_dropped,
+      install_script_added: p.install_script_added,
+      publisher_changed: p.publisher_changed,
+      dormant_revival: p.dormant_revival,
+      version_anomaly: p.version_anomaly,
+    },
+    dormantDays: String(p.dormant_days),
     allow: [...p.allow],
     deny: [...p.deny],
   };
@@ -91,6 +111,12 @@ export function validateDraft(d: PolicyDraft): DraftResult {
   if (!/^\d+$/.test(ageText) || !Number.isInteger(age)) errors.min_age_days = 'Enter a whole number of days (0 disables the rule).';
   else if (age > 3650) errors.min_age_days = 'Use at most 3650 days.';
 
+  const dormantText = d.dormantDays.trim();
+  const dormant = Number(dormantText);
+  if (!/^\d+$/.test(dormantText) || dormant < 1 || dormant > 3650) {
+    errors.dormant_days = 'Enter a whole number of days from 1 to 3650.';
+  }
+
   const badAllow = d.allow.find((e) => validateListEntry(e) !== null);
   if (badAllow !== undefined) errors.allow = `Invalid entry: ${badAllow.slice(0, 80)}`;
   const badDeny = d.deny.find((e) => validateListEntry(e) !== null);
@@ -111,6 +137,8 @@ export function validateDraft(d: PolicyDraft): DraftResult {
       min_age_days: age,
       block_nonexistent: d.block_nonexistent,
       block_install_scripts_from_new: d.block_install_scripts_from_new,
+      ...d.history,
+      dormant_days: dormant,
       allow: d.allow.map((e) => e.trim()),
       deny: d.deny.map((e) => e.trim()),
     },

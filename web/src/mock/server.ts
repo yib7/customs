@@ -190,6 +190,16 @@ export class MockServer {
       // validation errors can be exercised.
       errors.push({ field: 'min_age_days', message: 'min_age_days must be at most 365 (server limit)' });
     }
+    for (const f of ['provenance_dropped', 'install_script_added', 'publisher_changed', 'dormant_revival', 'version_anomaly'] as const) {
+      const v = body[f];
+      if (v !== undefined && v !== 'off' && v !== 'warn' && v !== 'block') {
+        errors.push({ field: f, message: `${f} must be "off", "warn" or "block"` });
+      }
+    }
+    const dormant = body.dormant_days;
+    if (dormant !== undefined && (typeof dormant !== 'number' || !Number.isInteger(dormant) || dormant < 1 || dormant > 3650)) {
+      errors.push({ field: 'dormant_days', message: 'dormant_days must be between 1 and 3650' });
+    }
     for (const f of ['allow', 'deny'] as const) {
       const list = body[f];
       if (!Array.isArray(list) || list.some((x) => typeof x !== 'string' || !ENTRY.test(x))) {

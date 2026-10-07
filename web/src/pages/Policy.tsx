@@ -1,12 +1,20 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { ApiError, api } from '../api/client';
-import type { ModelInfo, Policy } from '../api/types';
+import type { HistoryRule, ModelInfo, Policy, RuleSeverity } from '../api/types';
 import { ChipInput } from '../components/ChipInput';
 import { IconCheck } from '../components/Icons';
 import { btn, errorMessage, inputCls } from '../components/styles';
 import { Card, ErrorBox, Loading, PageHeader } from '../components/ui';
 import { safeLabel } from '../lib/format';
-import { policyToDraft, validateDraft, validateListEntry, type PolicyDraft, type PolicyErrors, type PolicyField } from '../lib/policy';
+import {
+  HISTORY_RULES,
+  policyToDraft,
+  validateDraft,
+  validateListEntry,
+  type PolicyDraft,
+  type PolicyErrors,
+  type PolicyField,
+} from '../lib/policy';
 import { useTitle } from '../lib/useTitle';
 
 function Switch({
@@ -44,6 +52,71 @@ function Switch({
         />
       </span>
     </label>
+  );
+}
+
+const HISTORY_RULE_TEXT: Record<HistoryRule, { label: string; description: string }> = {
+  provenance_dropped: {
+    label: 'Provenance dropped',
+    description: 'npm: this version has no provenance attestation, but the previous release had one.',
+  },
+  install_script_added: {
+    label: 'Install script added',
+    description: 'npm: this version adds an install script or changes its command.',
+  },
+  publisher_changed: {
+    label: 'New publisher',
+    description: 'npm: published by an account that published none of the previous five releases.',
+  },
+  dormant_revival: {
+    label: 'Dormant package revived',
+    description: 'The previous release is older than the dormancy period below.',
+  },
+  version_anomaly: {
+    label: 'Unusual version jump',
+    description: 'More than one major version up, or a release on an old major line that had gone quiet. Noisy, so off by default.',
+  },
+};
+
+const SEVERITY_LABELS: Record<RuleSeverity, string> = { off: 'Off', warn: 'Warn', block: 'Block' };
+
+function SeverityField({
+  id,
+  label,
+  description,
+  value,
+  onChange,
+}: {
+  id: string;
+  label: string;
+  description: string;
+  value: RuleSeverity;
+  onChange: (v: RuleSeverity) => void;
+}) {
+  return (
+    <div className="flex items-start justify-between gap-4 py-3">
+      <span className="min-w-0">
+        <label htmlFor={id} className="block text-sm font-medium text-ink">
+          {label}
+        </label>
+        <span className="block text-xs text-muted">{description}</span>
+      </span>
+      <select
+        id={id}
+        className={`${inputCls} w-28 shrink-0 pr-8`}
+        value={value}
+        onChange={(e) => {
+          const v = e.target.value;
+          if (v === 'off' || v === 'warn' || v === 'block') onChange(v);
+        }}
+      >
+        {(['off', 'warn', 'block'] as const).map((s) => (
+          <option key={s} value={s}>
+            {SEVERITY_LABELS[s]}
+          </option>
+        ))}
+      </select>
+    </div>
   );
 }
 
@@ -149,7 +222,7 @@ function PolicyForm({
     if (!errors[f as PolicyField]) errors[f as PolicyField] = msg;
   }
   const unknownServerErrors = Object.entries(serverErrors).filter(
-    ([f]) => !['mode', 'warn_threshold', 'block_threshold', 'min_age_days', 'allow', 'deny'].includes(f),
+    ([f]) => !['mode', 'warn_threshold', 'block_threshold', 'min_age_days', 'dormant_days', 'allow', 'deny'].includes(f),
   );
 
   const set = <K extends keyof PolicyDraft>(k: K, v: PolicyDraft[K], field?: PolicyField) => {
@@ -314,6 +387,42 @@ function PolicyForm({
             label="Block install scripts from new packages"
             description="Refuse npm packages with install scripts when they are younger than the minimum age."
           />
+        </div>
+      </Card>
+
+      <Card
+        id="release-history"
+        title="Release history"
+        description="Compare a version with the releases before it to catch compromised releases of established packages. These heuristics also fire on legitimate changes (new CI, new maintainers), so they warn by default and the model still judges the code."
+      >
+        <div className="divide-y divide-line">
+          {HISTORY_RULES.map((rule) => (
+            <SeverityField
+              key={rule}
+              id={`rule-${rule}`}
+              label={HISTORY_RULE_TEXT[rule].label}
+              description={HISTORY_RULE_TEXT[rule].description}
+              value={draft.history[rule]}
+              onChange={(v) => set('history', { ...draft.history, [rule]: v })}
+            />
+          ))}
+        </div>
+        <div className="mt-3 max-w-xs border-t border-line pt-3">
+          <label htmlFor="dormant-days" className="text-sm font-medium text-ink">
+            Dormancy period (days)
+          </label>
+          <p className="text-xs text-muted">A release this long after the previous one counts as a revival.</p>
+          <input
+            id="dormant-days"
+            type="text"
+            inputMode="numeric"
+            className={`${inputCls} mt-2 w-28 font-mono`}
+            value={draft.dormantDays}
+            onChange={(e) => set('dormantDays', e.target.value, 'dormant_days')}
+            aria-invalid={errors.dormant_days ? true : undefined}
+            aria-describedby={errors.dormant_days ? 'dormant-days-error' : undefined}
+          />
+          <FieldError id="dormant-days-error">{errors.dormant_days}</FieldError>
         </div>
       </Card>
 

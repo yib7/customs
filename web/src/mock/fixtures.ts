@@ -466,6 +466,12 @@ export const INITIAL_POLICY = {
   min_age_days: 3,
   block_nonexistent: true,
   block_install_scripts_from_new: true,
+  provenance_dropped: 'warn',
+  install_script_added: 'warn',
+  publisher_changed: 'warn',
+  dormant_revival: 'warn',
+  dormant_days: 365,
+  version_anomaly: 'off',
   allow: ['pypi:requests', 'npm:react'],
   deny: ['npm:event-stream@3.3.6'],
   upstream: {
