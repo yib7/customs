@@ -267,6 +267,13 @@ are read in memory, and no sample is stored in this repository (only numeric fea
 trained models and aggregate metrics). Datadog's dataset is Apache-2.0; OSSF
 malicious-packages is Apache-2.0.
 
+The scanner itself faces attacker-chosen bytes, so it is fuzzed: a structure-aware
+mutation fuzzer (`cargo run --release -p customs-scan --example fuzz`) mutates real corpus
+archives at the byte, tar-header and file-content levels. It found two code paths that made
+a scan super-linear (one input took 8 minutes); after the fixes, 514K mutated archives in 20
+minutes produced no panic and no slow scan, and corpus scanning got 4.2x faster. Details
+in [DESIGN.md section 4.8](docs/DESIGN.md#48-hostile-inputs).
+
 ## License
 
 MIT

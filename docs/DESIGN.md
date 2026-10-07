@@ -373,6 +373,39 @@ CLI batch mode (`customs-scan batch --input paths.txt --output out.jsonl [--toke
 [--jobs N]`) writes one line per input path in input order: the report plus a `path` field,
 or `{"archive": "<path>", "error": "<message>"}` when that archive fails.
 
+### 4.8 Hostile inputs
+
+The scanner parses attacker-chosen bytes inside the proxy's request path: a panic fails an
+install and a slow input holds a blocking thread. `crates/customs-scan/examples/fuzz.rs` is
+a structure-aware mutation fuzzer on stable Rust. It takes real corpus archives as seeds
+and mutates them at three levels: raw bytes (the container parsers), tar header fields
+inside a recompressed gzip (paths, sizes, entry types, link names), and file contents
+inside a rebuilt tar.gz, where it also adds the files that switch on install surfaces
+(`binding.gyp`, `setup.py`, `.pth`, a `.dist-info/`, a `sources/` checkout). Content
+mutations splice tokens that sit on parser decision points (quotes, comment openers,
+`<!(`, `exec(`, invalid UTF-8) and repeat one up to 200,000 times. Every input runs under
+`catch_unwind`; a panic, or a scan slower than 2 s and four times its seed's own time, is
+saved for replay. `examples/scale.rs` then times one file holding a token repeated at
+doubling counts: a ratio near 2 per row is linear, near 4 is quadratic.
+
+The repetition mutation found two slow paths, both since fixed:
+
+- Line numbers for matches inside a string literal were computed by counting newlines from
+  the start of the string for each match. A 780 KB string holding 55K copies of
+  `~/.ssh/id_rsa` took 115 s, and a larger one 8 minutes. Each string now builds a
+  line index once, on its first match.
+- A Unicode `\b` stops the regex crate's lazy DFA at the first non-ASCII byte, which falls
+  back to an engine about 100x slower. One accented character in a long string literal or
+  shell script cost about 1 s per MB (7 s for one 7.6 MB line). Indicator rules now
+  compile with ASCII word boundaries. On 6,000 random corpus archives the features are
+  identical for 5,997, and the batch ran 4.2x faster (50 to 213 archives a second). The
+  other 3 are malware that gain hits where an indicator word touches CJK text
+  (`获取whoami失败`): CJK characters count as word characters under Unicode rules, so
+  `\b` never matched there.
+
+After the fixes, 514K mutated inputs in 20 minutes on 4 threads produced no panic and no
+slow scan.
+
 ## 5. Model artifacts (`models/`)
 
 All artifacts are JSON (small, diffable, and loadable without native dependencies).

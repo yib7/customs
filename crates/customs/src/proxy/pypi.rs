@@ -51,8 +51,9 @@ impl Rewriter<'_> {
 
     pub fn rewrite_html(&self, body: &str, page_url: &Url) -> String {
         static HREF: OnceLock<Regex> = OnceLock::new();
-        let re =
-            HREF.get_or_init(|| Regex::new(r#"(?i)(\bhref\s*=\s*)(["'])([^"']*)(["'])"#).unwrap());
+        let re = HREF.get_or_init(|| {
+            Regex::new(r#"(?i)((?-u:\b)href\s*=\s*)(["'])([^"']*)(["'])"#).unwrap()
+        });
         re.replace_all(body, |c: &regex::Captures<'_>| {
             let href = &c[3];
             // Hrefs in HTML may carry entity-encoded ampersands; decode only for resolution.

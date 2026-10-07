@@ -8,6 +8,7 @@
 
 use crate::lexer::{lex, strip_shell_comments, Lang, TokKind, Token};
 use regex::{Regex, RegexSet};
+use std::cell::OnceCell;
 use std::sync::LazyLock;
 
 /// Indicator families, in schema order. Index positions are used throughout this module.
@@ -165,10 +166,17 @@ fn not_dev_null(hay: &str, start: usize, _end: usize) -> bool {
         .starts_with("/dev/null")
 }
 
+/// Compile a rule with ASCII word boundaries. A Unicode `\b` makes the regex crate's
+/// lazy DFA give up at the first non-ASCII byte and fall back to an engine about 100x
+/// slower, so one accented character in a megabyte string literal cost a second per MB.
+fn compile(pat: &str) -> Regex {
+    Regex::new(&pat.replace(r"\b", r"(?-u:\b)")).expect("valid indicator regex")
+}
+
 fn rule(ind: usize, pat: &str) -> StrRule {
     StrRule {
         ind,
-        re: Regex::new(pat).expect("valid indicator regex"),
+        re: compile(pat),
         keep: always,
     }
 }
@@ -176,7 +184,7 @@ fn rule(ind: usize, pat: &str) -> StrRule {
 fn rule_f(ind: usize, pat: &str, keep: fn(&str, usize, usize) -> bool) -> StrRule {
     StrRule {
         ind,
-        re: Regex::new(pat).expect("valid indicator regex"),
+        re: compile(pat),
         keep,
     }
 }
@@ -443,13 +451,13 @@ fn analyze_code(toks: &[Token<'_>], lang: Lang, fa: &mut FileAnalysis) {
         match t.kind {
             TokKind::Str => {
                 string_stats(fa, t.text);
-                let base = t.line;
-                let s = t.text;
-                let line_of = |off: usize| {
-                    base + s.as_bytes()[..off].iter().filter(|&&b| b == b'\n').count() as u32
-                };
-                STRING_RULES.apply(s, fa, &line_of);
-                if WALLET_ADDRESS.is_match(s.trim()) {
+                // Built on the first match only: most strings match no rule. Counting
+                // newlines per match instead is quadratic in a long string with many hits.
+                let idx = OnceCell::new();
+                let line_of =
+                    |off: usize| t.line - 1 + idx.get_or_init(|| LineIndex::new(t.text)).line(off);
+                STRING_RULES.apply(t.text, fa, &line_of);
+                if WALLET_ADDRESS.is_match(t.text.trim()) {
                     fa.hit(CRYPTO_WALLET, t.line);
                 }
             }
@@ -1005,6 +1013,36 @@ mod tests {
             assert_eq!((g.level, g.module.as_str()), (level, module));
             assert_eq!(g.names, names);
         }
+    }
+
+    #[test]
+    fn many_hits_in_one_long_string_stay_linear() {
+        // Fuzzer finding: a 780 KB string literal holding 55K secret paths took 115 s,
+        // because every match counted newlines from the start of the string.
+        let body = "~/.ssh/id_rsa ".repeat(40_000);
+        let src = format!("x = 1\ny = '{body}'\n");
+        let t = std::time::Instant::now();
+        let fa = analyze(&src, Lang::Python);
+        assert!(t.elapsed().as_secs() < 20, "took {:?}", t.elapsed());
+        assert!(fa.counts[SECRET_PATHS] >= 40_000);
+        assert_eq!(fa.hits.first(), Some(&(SECRET_PATHS, 2)));
+        // Line numbers still count the newlines inside the string.
+        let fa = analyze("a = 1\nb = '''x\n\ny ~/.aws/credentials'''\n", Lang::Python);
+        assert_eq!(fa.hits, vec![(SECRET_PATHS, 4)]);
+    }
+
+    #[test]
+    fn rules_use_ascii_word_boundaries() {
+        // A Unicode \b sends the regex crate to a slow engine on any non-ASCII input.
+        for set in [&*STRING_RULES, &*SHELL_RULES] {
+            for r in &set.rules {
+                let pat = r.re.as_str().replace(r"(?-u:\b)", "");
+                assert!(!pat.contains(r"\b"), "Unicode word boundary in {pat}");
+            }
+        }
+        // Keywords next to non-ASCII text still match.
+        let fa = analyze("x = '\u{e9}t\u{e9} whoami \u{1f4a9}'\n", Lang::Python);
+        assert_eq!(fa.counts[RECON], 1);
     }
 
     #[test]
