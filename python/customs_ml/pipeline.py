@@ -278,8 +278,9 @@ def _fit_stacker(Z: np.ndarray, y: np.ndarray, w: np.ndarray) -> LogisticRegress
 def stage_ensemble(scheme: str = SCHEME) -> None:
     """Stack component logits on the validation split with cluster-grouped cross-fitting.
 
-    Out-of-fold stacked scores on validation are used to fit the isotonic calibration and
-    to pick thresholds, so neither is tuned on scores the stacker was fit to.
+    Out-of-fold stacked scores on validation are used to fit the calibration (Platt, see
+    gbdt.fit_platt) and to pick thresholds, so neither is tuned on scores the stacker was
+    fit to.
     """
     df = load_table()
     split = df[f"split_{scheme}"]
@@ -304,7 +305,7 @@ def stage_ensemble(scheme: str = SCHEME) -> None:
         oof[m] = clf.decision_function(Zv[m])
     final = _fit_stacker(Zv, yv, wv)
     p_oof = 1 / (1 + np.exp(-oof))
-    cal = gbdt.fit_isotonic(oof, yv)
+    cal = gbdt.fit_platt(oof, yv)
     risk_oof = gbdt.apply_calibration(cal, p_oof)
     t_warn = metrics.threshold_at_fpr(yv, risk_oof, FPR_WARN)
     t_block = metrics.threshold_at_fpr(yv, risk_oof, FPR_BLOCK)

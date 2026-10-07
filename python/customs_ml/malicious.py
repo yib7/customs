@@ -55,6 +55,18 @@ class Sample:
     error: str = ""
 
 
+def decode_name(ecosystem: str, name: str) -> str:
+    """Datadog stores a scoped npm package ``@scope/name`` in a directory ``@scope@name``.
+
+    Left encoded, every scoped malicious name would contain a second ``@`` that no benign
+    name has: a label leak through the name model.
+    """
+    if ecosystem == "npm" and name.startswith("@") and "/" not in name and "@" in name[1:]:
+        scope, _, rest = name[1:].partition("@")
+        return f"@{scope}/{rest}"
+    return name
+
+
 def parse_sample_path(rel: str) -> Sample | None:
     m = SAMPLE_RE.search(rel)
     if not m:
@@ -62,7 +74,7 @@ def parse_sample_path(rel: str) -> Sample | None:
     return Sample(
         ecosystem=m["eco"],
         kind=m["kind"],
-        name=m["name"],
+        name=decode_name(m["eco"], m["name"]),
         version=m["version"],
         discovered=m["date"],
         source=rel,

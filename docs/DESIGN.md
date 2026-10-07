@@ -535,20 +535,40 @@ message on stderr) unless run with `--fail-closed`, which denies. Setup: `hooks/
 
 ## 10. Evaluation protocol (python/customs_ml)
 
-- Data: Datadog malicious-software-packages-dataset (real npm and PyPI samples), OSSF
-  malicious-packages (names, for the name model), benign archives downloaded from PyPI and
-  npm (popular packages plus a long-tail sample reached through dependency crawling and
-  recent uploads), filtered against the OSSF list.
-- Dedup: malware campaigns publish hundreds of near-identical packages. Samples are
-  clustered by MinHash over install-surface token shingles; splits are by cluster so no
-  campaign appears in both train and test.
-- Splits: a temporal split (train on samples first seen before a cutoff, test after) is the
-  headline; a cluster-grouped random split is reported alongside.
-- Metrics: ROC AUC, PR AUC, recall at FPR 0.1% and 1%, calibration (Brier, reliability
-  curve), bootstrap 95% CIs. Stratified by ecosystem and by package size so a size shortcut
-  cannot hide.
-- Baseline: Datadog GuardDog run on the same test archives; compared at matched FPR.
-- Robustness: semantics-preserving obfuscation transforms applied to held-out malicious
-  samples (identifier renaming, string splitting and concatenation, base64 wrapping of
-  payloads, moving code from install scripts into imported modules); report recall drop.
-- Results are written to `docs/EVALUATION.md` and `models/metrics.json`.
+As implemented; results are in `docs/EVALUATION.md` and `models/metrics.json`.
+
+- **Data.** Datadog malicious-software-packages-dataset (real npm and PyPI samples, capped
+  per discovery date so one worm cannot dominate), OSSF malicious-packages (names, for the
+  name model and to filter the benign set), and benign archives downloaded from PyPI and
+  npm in three popularity tiers: top (most downloaded), mid (further down the popularity
+  lists), and tail (uniform draws from the PyPI index, npm keyword search and dependency
+  crawling), tail packages at least 90 days old.
+- **Canonicalization.** Both classes are repacked into the same deterministic tarball
+  layout before scanning (`malicious.canonicalize`), so packaging cannot leak the label.
+- **Dedup.** MinHash (128 permutations) over install-surface token 5-grams with LSH (16
+  bands of 8 rows), confirmed at estimated Jaccard 0.7; short documents group only with
+  exact copies and empty ones stay singletons.
+- **Splits.** Temporal (headline): malware by discovery date, 70/10/20 quantiles; benign at
+  random by cluster in the same proportions. Cluster-grouped random split as a reference.
+  The name model only learns from OSSF names reported before the validation cutoff, and
+  never from a name present in the code dataset.
+- **Weights.** 1/sqrt(cluster size), classes balanced within the split being fit.
+- **Models.** LightGBM (small grid on validation PR AUC), a PyTorch CNN over install-time
+  tokens (early stopping on validation PR AUC), the name model, and a logistic stacker fit
+  on validation with 5-fold cluster-grouped cross-fitting; isotonic calibration and the
+  warn and block thresholds (target FPR 1% and 0.1%) come from out-of-fold scores.
+- **Metrics.** ROC AUC, PR AUC, detection rate and realized FPR at the frozen thresholds,
+  Brier score and expected calibration error, all with 1,000-resample cluster-bootstrap
+  95% CIs. Slices: ecosystem, novel versus seen campaigns, compromised libraries, benign
+  popularity tiers, and benign-tercile size strata.
+- **Baseline.** GuardDog 3.2 on a fixed random sample of the test set (1,500 per class),
+  compared at its own operating points (any finding, `high_risk`) with a paired cluster
+  bootstrap.
+- **Ablation.** The tree model retrained on behavior features only (no manifest metadata,
+  sizes, or file counts).
+- **Robustness and augmentation.** Text-level evasions applied to held-out malware and
+  re-scored: string splitting, base64 wrapping, burial in a real library, install-surface
+  indirection, metadata mimicry, starjacking. The augmentation stage then adds starjacked
+  and buried copies of training malware (benign training donors only) and everything is
+  retrained; the report shows before and after, separating evasion families used in
+  training from unseen ones.

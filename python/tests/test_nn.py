@@ -48,3 +48,22 @@ def test_training_learns_a_trivial_signal():
         X[:200], y[:200], np.ones(200), X[200:], y[200:], len(vocab), cfg, log=lambda *_: None
     )
     assert hist[-1]["val_pr_auc"] > 0.95 or max(h["val_pr_auc"] for h in hist) > 0.95
+
+
+def test_batched_scores_equal_single_document_scores():
+    rng = np.random.default_rng(2)
+    toks = ["os", "system", "(", "<str>", ")", "import", "exec", "x", "=", "<num>"]
+    # Lengths straddle MIN_LEN so batches mix padded and unpadded documents.
+    docs = [[toks[i] for i in rng.integers(0, len(toks), n)] for n in (3, 15, 16, 40, 200, 7)]
+    cfg = cnn.Config(max_len=256, emb_dim=8, channels=6, hidden=5, kernels=(3, 9), min_df=1)
+    vocab = cnn.build_vocab(docs, cfg)
+    torch.manual_seed(1)
+    model = cnn.CodeCNN(len(vocab), cfg).eval()
+    # Non-zero conv biases make padding windows score high if they leak into the max.
+    with torch.no_grad():
+        for c in model.convs:
+            c.bias.fill_(0.5)
+    exported = cnn.export(model, vocab, cfg)
+    batched = cnn.predict_logits(model, cnn.encode(docs, vocab, cfg.max_len), batch=6)
+    for d, b in zip(docs, batched, strict=True):
+        assert abs(cnn.numpy_forward(exported, d) - b) < 1e-4

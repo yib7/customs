@@ -279,7 +279,7 @@ def render(scheme: str = SCHEME) -> str:
     add("## Calibration\n")
     add("![Calibration](figures/calibration.png)\n")
     add(
-        "Risk is calibrated (isotonic regression on out-of-fold validation scores) at the "
+        "Risk is calibrated (Platt scaling on out-of-fold validation scores) at the "
         "class balance of the evaluation data, roughly even. In the wild malware is far "
         "rarer, so treat the risk as a ranking with frozen thresholds rather than as the "
         "literal probability that a random package from the registry is malicious.\n"

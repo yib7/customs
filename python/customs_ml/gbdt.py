@@ -84,6 +84,26 @@ def fit_isotonic(raw: np.ndarray, y: np.ndarray, w: np.ndarray | None = None) ->
     }
 
 
+def fit_platt(raw: np.ndarray, y: np.ndarray, w: np.ndarray | None = None) -> dict:
+    """Platt scaling, written as dense piecewise-linear knots over sigmoid(raw).
+
+    Isotonic regression is a step function: at the top of the score range it ties many
+    packages into one plateau, so a strict threshold (0.1% FPR) has to sit above the whole
+    plateau and throws away detections. Platt scaling is strictly increasing, so ranking
+    is preserved and thresholds are as fine-grained as the scores. Encoding it as knots
+    keeps the artifact format (and the Rust interpolation code) unchanged.
+    """
+    from sklearn.linear_model import LogisticRegression
+
+    lr = LogisticRegression(C=1e6, max_iter=1000)
+    lr.fit(raw.reshape(-1, 1), y, sample_weight=w)
+    a, b = float(lr.coef_[0, 0]), float(lr.intercept_[0])
+    z = np.linspace(-16.0, 16.0, 641)
+    x = 1.0 / (1.0 + np.exp(-z))
+    yk = 1.0 / (1.0 + np.exp(-(a * z + b)))
+    return {"method": "platt", "a": a, "b": b, "x": x.tolist(), "y": yk.tolist()}
+
+
 def apply_calibration(cal: dict, p: np.ndarray) -> np.ndarray:
     return np.interp(p, np.asarray(cal["x"]), np.asarray(cal["y"]))
 

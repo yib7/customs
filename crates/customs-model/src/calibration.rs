@@ -1,9 +1,11 @@
-//! Isotonic calibration applied as a piecewise-linear map.
+//! Probability calibration applied as a piecewise-linear map.
 //!
-//! The exporter writes the breakpoints of a fitted isotonic regression (`x` ascending, `y`
-//! non-decreasing). Between breakpoints we interpolate linearly so the map is continuous,
-//! and outside the fitted range we clamp to the end values, which is what scikit-learn's
-//! `IsotonicRegression(out_of_bounds="clip")` followed by `np.interp` produces.
+//! The exporter writes knots (`x` ascending, `y` non-decreasing): the breakpoints of an
+//! isotonic regression (`method: "isotonic"`, used for the tree model's own score), or a
+//! dense sampling of a Platt curve (`method: "platt"`, used for the ensemble because it is
+//! strictly increasing, so strict thresholds do not land on tied plateaus). Either way we
+//! interpolate linearly between knots and clamp outside them, which is what `np.interp`
+//! does on the Python side.
 
 use serde::{Deserialize, Serialize};
 
@@ -24,7 +26,7 @@ fn default_method() -> String {
 impl Calibration {
     /// Check the invariants the interpolation relies on.
     pub fn validate(&self, what: &str) -> Result<(), ModelError> {
-        if self.method != "isotonic" {
+        if self.method != "isotonic" && self.method != "platt" {
             return Err(ModelError::invalid(
                 what,
                 format!("unsupported calibration method '{}'", self.method),
@@ -114,10 +116,16 @@ mod tests {
         };
         assert!(c.validate("t").is_err());
         let c = Calibration {
-            method: "platt".into(),
+            method: "spline".into(),
             x: vec![0.1],
             y: vec![0.0],
         };
         assert!(c.validate("t").is_err());
+        let c = Calibration {
+            method: "platt".into(),
+            x: vec![0.1, 0.9],
+            y: vec![0.2, 0.8],
+        };
+        assert!(c.validate("t").is_ok());
     }
 }

@@ -25,6 +25,8 @@ import torch
 from torch import nn
 
 PAD, UNK = 0, 1
+# Documents shorter than this are right-padded to it (also in the Rust forward pass).
+MIN_LEN = 16
 
 
 @dataclass
@@ -83,7 +85,19 @@ class CodeCNN(nn.Module):
 
     def forward(self, ids: torch.Tensor) -> torch.Tensor:
         x = self.emb(ids).transpose(1, 2)  # (B, D, L)
-        pooled = [torch.relu(c(x)).amax(dim=2) for c in self.convs]
+        # A document scored alone is padded to MIN_LEN (or the widest kernel) and no
+        # further; in a batch it is padded to the longest member. Windows that exist only
+        # because of that extra batch padding are masked out (set to 0 after ReLU, which
+        # cannot change a max over non-negative values), so a score never depends on what
+        # else was in the batch and matches the single-document forward pass in Rust.
+        eff = (ids != PAD).sum(dim=1).clamp(min=MIN_LEN)  # (B,)
+        pooled = []
+        for c in self.convs:
+            y = torch.relu(c(x))  # (B, C, L - k + 1)
+            k = c.kernel_size[0]
+            pos = torch.arange(y.shape[2], device=y.device)
+            valid = pos[None, :] <= (torch.maximum(eff, torch.tensor(k)) - k)[:, None]
+            pooled.append((y * valid[:, None, :]).amax(dim=2))
         h = self.drop(torch.cat(pooled, dim=1))
         h = self.drop(torch.relu(self.fc1(h)))
         return self.fc2(h).squeeze(1)
@@ -164,7 +178,7 @@ def _length_buckets(lengths: np.ndarray, batch_size: int, rng: np.random.Generat
     return batches
 
 
-def _trim(xb: torch.Tensor, min_len: int = 16) -> torch.Tensor:
+def _trim(xb: torch.Tensor, min_len: int = MIN_LEN) -> torch.Tensor:
     nz = (xb != PAD).any(dim=0).nonzero()
     end = int(nz.max()) + 1 if len(nz) else 0
     return xb[:, : max(end, min_len)]
@@ -228,8 +242,8 @@ def numpy_forward(exported: dict, tokens: Sequence[str]) -> float:
     ids = [vocab.get(t, UNK) for t in tokens[: exported["max_len"]]]
     emb = arr(exported["embedding"])
     max_k = max(c["kernel"] for c in exported["convs"])
-    # Mirror _trim: sequences shorter than 16 are right-padded with <pad> to 16.
-    ids = ids + [PAD] * max(0, max(16, max_k) - len(ids))
+    # Sequences shorter than MIN_LEN are right-padded with <pad> to MIN_LEN.
+    ids = ids + [PAD] * max(0, max(MIN_LEN, max_k) - len(ids))
     x = emb[ids].astype(np.float32)  # (L, D)
     pooled = []
     for c in exported["convs"]:
