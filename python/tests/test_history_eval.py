@@ -184,3 +184,37 @@ def test_archive_scripts_adds_npm_implicit_gyp_install(tmp_path):
     assert he.archive_scripts(pack("a.tgz", {})) == [["install", "node-gyp rebuild"]]
     assert he.archive_scripts(pack("b.tgz", {"preinstall": "x"})) == [["preinstall", "x"]]
     assert he.archive_scripts(pack("c.tgz", {}, gyp=False)) == []
+
+
+def test_install_script_added_sees_through_a_burst():
+    rows = [
+        ("1.0.0", "2025-01-01T00:00:00Z", "a", False, {}),
+        ("1.0.1", "2025-02-01T10:00:00Z", "a", False, {"postinstall": "node x.js"}),
+        ("1.0.2", "2025-02-01T12:00:00Z", "a", False, {"postinstall": "node x.js"}),
+        ("1.0.3", "2025-02-03T12:00:00Z", "a", False, {"postinstall": "node x.js"}),
+    ]
+    meta = _meta(rows)
+    assert he.history_rules(meta, "1.0.1")["install_script_added"] is True
+    assert he.history_rules(meta, "1.0.2")["install_script_added"] is True
+    assert he.history_rules(meta, "1.0.3")["install_script_added"] is False
+    # The burst's first release unpublished: the settled baseline still decides.
+    del meta["versions"]["1.0.1"]
+    assert he.history_rules(meta, "1.0.2")["install_script_added"] is True
+
+
+def test_dependency_rules_see_through_a_burst():
+    doc = _dep_meta()
+    doc["time"]["1.0.2"] = "2024-01-02T03:00:00Z"
+    doc["versions"]["1.0.2"] = {
+        **doc["versions"]["1.0.1"],
+        "deps": list(doc["versions"]["1.0.1"]["deps"]),
+    }
+    # 1.0.2 repeats 1.0.1 three hours later; the settled release is still 1.0.0.
+    hits = he.history_rules(doc, "1.0.2", lookup=lambda d: DEPS.get(d, {}), name="pkg")
+    assert hits["nonregistry_dependency_added"] is True
+    assert hits["young_dependency_added"] is True
+    # A day later 1.0.1 is the settled release and nothing is new.
+    doc["time"]["1.0.2"] = "2024-01-04T00:00:00Z"
+    hits = he.history_rules(doc, "1.0.2", lookup=lambda d: DEPS.get(d, {}), name="pkg")
+    assert hits["nonregistry_dependency_added"] is False
+    assert hits["young_dependency_added"] is False

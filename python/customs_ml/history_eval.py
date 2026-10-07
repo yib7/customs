@@ -66,6 +66,7 @@ BLOCKING = ("install_script_added", "nonregistry_dependency_added", "young_depen
 INSTALL_SCRIPTS = ("preinstall", "install", "postinstall")
 RECENT_RELEASES = 5
 DORMANT_DAYS = 365
+SETTLED_HOURS = 24  # history.rs SETTLED_HOURS
 MAX_SCRIPT_CHARS = 512  # registry.rs MAX_SCRIPT_CHARS
 MAX_DEPENDENCIES = 400  # registry.rs MAX_DEPENDENCIES
 MAX_SPEC_CHARS = 256  # registry.rs MAX_SPEC_CHARS
@@ -307,6 +308,45 @@ def young_dependencies(
     return hits, failed
 
 
+def _settled(earlier: list[tuple[datetime, str]], t0: datetime) -> str | None:
+    """The newest earlier release at least ``SETTLED_HOURS`` older than ``t0``."""
+    return next((v for t, v in earlier if t0 - t >= timedelta(hours=SETTLED_HOURS)), None)
+
+
+def _any3(vals) -> bool | None:
+    """True when any value is True, else None when any is unknown, else False."""
+    vals = list(vals)
+    return True if True in vals else (None if None in vals else False)
+
+
+def _added_union(meta: dict, name: str, cur: dict, bases: list) -> tuple[list[str], bool]:
+    """Registry dependencies of ``cur`` missing from any known base, and whether every base
+    and ``cur``'s own dependencies are known."""
+    if cur.get("deps") is None:
+        return [], False
+    added = sorted(
+        {d for b in bases if b is not None for d in added_dependencies(meta, name, cur, b)}
+    )
+    return added, all(b is not None for b in bases)
+
+
+def _install_change(cur: list | None, base: dict | None) -> bool | None:
+    """Whether an install script of ``cur`` is new or changed since ``base``'s."""
+    if cur is None or (base is None and cur):
+        return None
+    if base is None:
+        return False
+    before = dict(map(tuple, base["install"]))
+    for script, cmd in cur:
+        if script in before:
+            b = before[script]
+            if b and cmd and b != cmd:
+                return True
+        elif not (cmd == "" and base["install"]):
+            return True
+    return False
+
+
 def history_rules(
     meta: dict,
     version: str,
@@ -343,34 +383,35 @@ def history_rules(
             out["provenance_dropped"] = None
         elif prev["attested"]:
             out["provenance_dropped"] = None if cur["attested"] is None else not cur["attested"]
-        # install_script_added
-        if cur["install"] is None or (prev is None and cur["install"]):
-            out["install_script_added"] = None
-        elif prev is not None:
-            before = dict(map(tuple, prev["install"]))
-            for script, cmd in cur["install"]:
-                if script in before:
-                    b = before[script]
-                    if b and cmd and b != cmd:
-                        out["install_script_added"] = True
-                elif not (cmd == "" and prev["install"]):
-                    out["install_script_added"] = True
-        # nonregistry_dependency_added, young_dependency_added
+        # install_script_added and the dependency rules compare with the previous release
+        # and, when it is a different one, the newest release at least SETTLED_HOURS older.
+        bases = [pv]
+        settled = _settled(earlier, t0)
+        if settled is not None and settled != pv:
+            bases.append(settled)
+        out["install_script_added"] = _any3(
+            _install_change(cur["install"], facts(b)) for b in bases
+        )
         deps = cur.get("deps")
-        if prev is None or deps is None:
-            out["nonregistry_dependency_added"] = None
+        out["nonregistry_dependency_added"] = _any3(
+            None
+            if deps is None or facts(b) is None
+            else any(
+                is_nonregistry_spec(spec) and dict(map(tuple, facts(b)["deps"])).get(n) != spec
+                for n, spec in deps
+            )
+            for b in bases
+        )
+        added, known = _added_union(meta, name, cur, [facts(b) for b in bases])
+        if added and lookup is None:
             out["young_dependency_added"] = None
         else:
-            before = dict(map(tuple, prev["deps"]))
-            out["nonregistry_dependency_added"] = any(
-                is_nonregistry_spec(spec) and before.get(n) != spec for n, spec in deps
+            hits, failed = (
+                young_dependencies(meta, version, added, lookup) if added else ([], False)
             )
-            added = added_dependencies(meta, name, cur, prev)
-            if added and lookup is None:
-                out["young_dependency_added"] = None
-            elif added:
-                hits, failed = young_dependencies(meta, version, added, lookup)
-                out["young_dependency_added"] = True if hits else (None if failed else False)
+            out["young_dependency_added"] = (
+                True if hits else (None if failed or not known else False)
+            )
         # dormant_revival
         out["dormant_revival"] = (t0 - pt) > timedelta(days=dormant_days)
     # publisher_changed: the publishers of the five most recent earlier releases.
@@ -456,10 +497,9 @@ def compromised(df: pd.DataFrame, cache: Path, thr: dict, scheme: str) -> dict:
         if hits is None or not earlier:
             continue
         prev_facts = meta["versions"].get(earlier[0][1])
-        young = []
-        if prev_facts is not None and cur["deps"] is not None:
-            added = added_dependencies(meta, r.name, cur, prev_facts)
-            young = young_dependencies(meta, v, added, lookup)[0]
+        bases = {earlier[0][1], _settled(earlier, _time(meta["time"][v]))} - {None}
+        added, _ = _added_union(meta, r.name, cur, [meta["versions"].get(b) for b in bases])
+        young = young_dependencies(meta, v, added, lookup)[0] if added else []
         res.append(
             {
                 "name": r.name,

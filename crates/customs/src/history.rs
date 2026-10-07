@@ -22,6 +22,9 @@ use crate::resolve::{compare_versions, Pep440};
 /// How many earlier releases `publisher_changed` compares against.
 pub const RECENT_RELEASES: usize = 5;
 
+/// How much older the "settled" release `install_script_added` also compares against is.
+pub const SETTLED_HOURS: i64 = 24;
+
 /// The registry facts of one release that the rules compare.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ReleaseFacts {
@@ -121,6 +124,9 @@ pub struct ReleaseHistory {
     pub current: ReleaseFacts,
     /// The most recently published earlier release.
     pub previous: Option<ReleaseFacts>,
+    /// The most recently published release at least [`SETTLED_HOURS`] older: the version a
+    /// user had before a burst of releases.
+    pub settled: Option<ReleaseFacts>,
     /// Distinct publishers of the up to [`RECENT_RELEASES`] most recent earlier releases,
     /// newest first. Releases without a known publisher are skipped.
     pub recent_publishers: Vec<String>,
@@ -132,7 +138,8 @@ pub struct ReleaseHistory {
     pub line_previous: Option<VersionRef>,
     /// npm: maintainers and publishers of the package itself.
     pub people: Vec<String>,
-    /// npm: registry dependencies new since the previous release, sorted by name.
+    /// npm: registry dependencies new since the previous release or since the settled one,
+    /// sorted by name.
     pub added_dependencies: Vec<AddedDependency>,
 }
 
@@ -201,6 +208,14 @@ pub fn release_history(meta: &PackageMeta, version: &str) -> Option<ReleaseHisto
             .find(|v| major(eco, &v.version) == Some(m))
             .and_then(|v| version_ref(eco, v))
     });
+    let settled = earlier
+        .iter()
+        .find(|v| {
+            v.published
+                .is_some_and(|t| cur_time - t >= chrono::Duration::hours(SETTLED_HOURS))
+        })
+        .copied();
+    let lacks = |v: &VersionMeta, n: &String| !v.dependencies.iter().any(|(p, _)| p == n);
     let added_dependencies = match earlier.first() {
         Some(prev) => {
             let mut added: Vec<AddedDependency> = cur
@@ -209,7 +224,7 @@ pub fn release_history(meta: &PackageMeta, version: &str) -> Option<ReleaseHisto
                 .filter(|(n, s)| {
                     n != &meta.name
                         && !is_nonregistry_spec(s)
-                        && !prev.dependencies.iter().any(|(p, _)| p == n)
+                        && (lacks(prev, n) || settled.is_some_and(|v| lacks(v, n)))
                 })
                 .map(|(n, s)| AddedDependency {
                     name: n.clone(),
@@ -225,6 +240,7 @@ pub fn release_history(meta: &PackageMeta, version: &str) -> Option<ReleaseHisto
     Some(ReleaseHistory {
         current: ReleaseFacts::of(cur),
         previous: earlier.first().map(|v| ReleaseFacts::of(v)),
+        settled: settled.map(ReleaseFacts::of),
         people: meta.people.clone(),
         added_dependencies,
         recent_publishers,

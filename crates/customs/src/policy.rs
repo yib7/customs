@@ -11,7 +11,7 @@ use customs_model::{Decision, Thresholds};
 use customs_scan::Ecosystem;
 
 use crate::config::{Policy, RuleSeverity, Threshold};
-use crate::history::{is_nonregistry_spec, ReleaseHistory};
+use crate::history::{is_nonregistry_spec, ReleaseFacts, ReleaseHistory};
 use crate::util::{human_duration, normalize_name, registry_name};
 use crate::verdict::PolicyHit;
 
@@ -149,6 +149,32 @@ pub fn evaluate(policy: &Policy, ctx: &PolicyContext<'_>) -> PolicyOutcome {
 /// Longest install script command shown in a hit.
 const SHOWN_COMMAND_CHARS: usize = 120;
 
+/// Install scripts of `cur` that are new or changed since `base`, described for a detail.
+fn install_changes(cur: &ReleaseFacts, base: &ReleaseFacts, note: &str) -> Vec<String> {
+    cur.install_commands
+        .iter()
+        .filter_map(|(script, cmd)| {
+            let before = base.install_commands.iter().find(|(s, _)| s == script);
+            let what = match before {
+                // An empty command means only `hasInstallScript` was known.
+                Some((_, b)) if !b.is_empty() && !cmd.is_empty() && b != cmd => "changed",
+                Some(_) => return None,
+                None if cmd.is_empty() && !base.install_commands.is_empty() => return None,
+                None => "added",
+            };
+            Some(if cmd.is_empty() {
+                format!("{script} {what} since {}{note}", base.version)
+            } else {
+                format!(
+                    "{script} {what} since {}{note}: {}",
+                    base.version,
+                    shown_command(cmd)
+                )
+            })
+        })
+        .collect()
+}
+
 fn shown_command(cmd: &str) -> String {
     let clean: String = cmd
         .chars()
@@ -196,29 +222,15 @@ pub fn history_hits(policy: &Policy, eco: Ecosystem, h: &ReleaseHistory) -> Vec<
             );
         }
         if npm {
-            let changes: Vec<String> = cur
-                .install_commands
-                .iter()
-                .filter_map(|(script, cmd)| {
-                    let before = prev.install_commands.iter().find(|(s, _)| s == script);
-                    let what = match before {
-                        // An empty command means only `hasInstallScript` was known.
-                        Some((_, b)) if !b.is_empty() && !cmd.is_empty() && b != cmd => "changed",
-                        Some(_) => return None,
-                        None if cmd.is_empty() && !prev.install_commands.is_empty() => return None,
-                        None => "added",
-                    };
-                    Some(if cmd.is_empty() {
-                        format!("{script} {what} since {}", prev.version)
-                    } else {
-                        format!(
-                            "{script} {what} since {}: {}",
-                            prev.version,
-                            shown_command(cmd)
-                        )
-                    })
-                })
-                .collect();
+            // Against the previous release, and when that shows nothing, against the newest
+            // release at least a day older: attackers often publish several malicious
+            // versions within hours, each one unchanged from the last.
+            let mut changes = install_changes(cur, prev, "");
+            if changes.is_empty() {
+                if let Some(s) = h.settled.as_ref().filter(|s| s.version != prev.version) {
+                    changes = install_changes(cur, s, " (the newest release a day or more older)");
+                }
+            }
             if !changes.is_empty() {
                 hit(
                     "install_script_added",
@@ -226,25 +238,32 @@ pub fn history_hits(policy: &Policy, eco: Ecosystem, h: &ReleaseHistory) -> Vec<
                     changes.join("; "),
                 );
             }
-            let off_registry: Vec<String> = cur
-                .dependencies
-                .iter()
-                .filter(|(n, s)| {
-                    is_nonregistry_spec(s)
-                        && !prev.dependencies.iter().any(|(p, q)| p == n && q == s)
-                })
-                .map(|(n, s)| format!("{n} -> {}", shown_command(s)))
-                .collect();
-            if !off_registry.is_empty() {
-                hit(
-                    "nonregistry_dependency_added",
-                    policy.nonregistry_dependency_added,
-                    format!(
-                        "dependency fetched outside the registry, new since {}: {}",
-                        prev.version,
-                        off_registry.join("; ")
-                    ),
-                );
+            // New or changed since the previous release, or else since the settled one.
+            let settled = h.settled.as_ref().filter(|s| s.version != prev.version);
+            for (base, note) in std::iter::once((prev, ""))
+                .chain(settled.map(|s| (s, " (the newest release a day or more older)")))
+            {
+                let off_registry: Vec<String> = cur
+                    .dependencies
+                    .iter()
+                    .filter(|(n, s)| {
+                        is_nonregistry_spec(s)
+                            && !base.dependencies.iter().any(|(p, q)| p == n && q == s)
+                    })
+                    .map(|(n, s)| format!("{n} -> {}", shown_command(s)))
+                    .collect();
+                if !off_registry.is_empty() {
+                    hit(
+                        "nonregistry_dependency_added",
+                        policy.nonregistry_dependency_added,
+                        format!(
+                            "dependency fetched outside the registry, new since {}{note}: {}",
+                            base.version,
+                            off_registry.join("; ")
+                        ),
+                    );
+                    break;
+                }
             }
         }
         if let (Some(c), Some(p)) = (cur.published, prev.published) {
@@ -630,6 +649,41 @@ mod tests {
     }
 
     #[test]
+    fn install_script_added_sees_through_a_burst_of_releases() {
+        // The attacker publishes three versions within hours; each later one matches the
+        // one before it, but not the release users had the day before.
+        let m = npm(&[
+            ("1.0.0", "2025-01-01T00:00:00Z", doc(None, false, json!({}))),
+            (
+                "1.0.1",
+                "2025-02-01T10:00:00Z",
+                doc(None, false, json!({"postinstall": "node x.js"})),
+            ),
+            (
+                "1.0.2",
+                "2025-02-01T12:00:00Z",
+                doc(None, false, json!({"postinstall": "node x.js"})),
+            ),
+            (
+                "1.0.3",
+                "2025-02-03T12:00:00Z",
+                doc(None, false, json!({"postinstall": "node x.js"})),
+            ),
+        ]);
+        let p = Policy::default();
+        assert_eq!(
+            history_for(&p, &m, "1.0.1")[0].detail,
+            "postinstall added since 1.0.0: node x.js"
+        );
+        assert_eq!(
+            history_for(&p, &m, "1.0.2")[0].detail,
+            "postinstall added since 1.0.0 (the newest release a day or more older): node x.js"
+        );
+        // Two days later the script has been there for a day: settled.
+        assert!(history_for(&p, &m, "1.0.3").is_empty());
+    }
+
+    #[test]
     fn install_script_added() {
         let long = format!("node -e \"{}\"", "x".repeat(300));
         let m = npm(&[
@@ -875,6 +929,30 @@ mod tests {
             hits[0].detail.contains("setup -> github:x/y#abc"),
             "{}",
             hits[0].detail
+        );
+        // A second release two hours later still differs from the release a day older.
+        let m = npm(&[
+            (
+                "1.0.0",
+                "2025-01-01T00:00:00Z",
+                with_deps(json!({"a": "^1"})),
+            ),
+            (
+                "1.0.1",
+                "2025-01-05T10:00:00Z",
+                with_deps(json!({"a": "^1", "setup": "github:x/y#abc"})),
+            ),
+            (
+                "1.0.2",
+                "2025-01-05T12:00:00Z",
+                with_deps(json!({"a": "^1", "setup": "github:x/y#abc"})),
+            ),
+        ]);
+        let hits = history_for(&p, &m, "1.0.2");
+        assert_eq!(
+            hits[0].detail,
+            "dependency fetched outside the registry, new since 1.0.0 (the newest release a \
+             day or more older): setup -> github:x/y#abc"
         );
     }
 
