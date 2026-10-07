@@ -9,6 +9,7 @@
 //! memory under the caps in [`ScanOptions`], and code is only lexed.
 
 mod archive;
+mod delta;
 mod indicators;
 mod lexer;
 mod manifest;
@@ -23,6 +24,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+pub use delta::{new_lines, DeltaStats};
 pub use indicators::INDICATORS as INDICATOR_NAMES;
 
 /// Version of the feature schema emitted by this crate.
@@ -77,6 +79,9 @@ pub struct ScanOptions {
     pub max_nesting_depth: u32,
     /// Cap on the token stream length.
     pub max_tokens: usize,
+    /// Read every entry in full, not only source and text files (release deltas compare
+    /// file contents line by line).
+    pub read_all: bool,
 }
 
 impl Default for ScanOptions {
@@ -90,6 +95,7 @@ impl Default for ScanOptions {
             max_compression_ratio: 250.0,
             max_nesting_depth: 1,
             max_tokens: 4096,
+            read_all: false,
         }
     }
 }
@@ -262,6 +268,36 @@ pub fn scan_archive(
             ))
         })?;
     Ok(Scanner::new(&contents, eco, opts).run(filename, sha256))
+}
+
+/// A scan of what changed between two releases of one package (see the `delta` module).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeltaScan {
+    pub stats: DeltaStats,
+    pub report: ScanReport,
+}
+
+/// Scan only the part of `cur` that is new relative to `prev` (the previous release).
+///
+/// Both archives are read under the same caps as [`scan_archive`]. The report describes
+/// the delta: new files, the new lines of changed files, and the root manifests.
+pub fn scan_delta(
+    prev: &[u8],
+    cur: &[u8],
+    filename: &str,
+    ecosystem: Ecosystem,
+    opts: &ScanOptions,
+) -> Result<DeltaScan, ScanError> {
+    let read = ScanOptions {
+        read_all: true,
+        ..opts.clone()
+    };
+    let prev_c = archive::read_archive(prev, &read)?;
+    let cur_c = archive::read_archive(cur, &read)?;
+    let (d, stats) = delta::delta(&prev_c, &cur_c);
+    let sha256 = hex(&Sha256::digest(cur));
+    let report = Scanner::new(&d, ecosystem, opts).run(filename, sha256);
+    Ok(DeltaScan { stats, report })
 }
 
 fn hex(bytes: &[u8]) -> String {

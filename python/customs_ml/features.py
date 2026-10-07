@@ -36,7 +36,9 @@ def scanner_bin() -> str:
     return found
 
 
-def scan_paths(paths: list[str], tokens: bool = True, jobs: int | None = None) -> list[dict]:
+def scan_paths(
+    paths: list[str], tokens: bool = True, jobs: int | None = None, ecosystem: str | None = None
+) -> list[dict]:
     """Scan archives in parallel; returns one dict per input path, in order."""
     with tempfile.TemporaryDirectory() as td:
         inp = Path(td) / "paths.txt"
@@ -47,6 +49,8 @@ def scan_paths(paths: list[str], tokens: bool = True, jobs: int | None = None) -
             cmd.append("--tokens")
         if jobs:
             cmd += ["--jobs", str(jobs)]
+        if ecosystem:
+            cmd += ["--ecosystem", ecosystem]
         subprocess.run(cmd, check=True)
         # split("\n"), not splitlines(): scanner output can contain U+2028 and friends.
         return [json.loads(line) for line in out.read_text(encoding="utf-8").split("\n") if line]

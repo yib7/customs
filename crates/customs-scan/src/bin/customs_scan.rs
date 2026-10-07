@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use customs_scan::{feature_names, scan_path, Ecosystem, ScanOptions};
+use customs_scan::{feature_names, scan_delta, scan_path, Ecosystem, ScanOptions};
 use rayon::prelude::*;
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, BufWriter, Write};
@@ -49,6 +49,19 @@ enum Cmd {
         /// Worker threads (defaults to the number of CPUs).
         #[arg(long)]
         jobs: Option<usize>,
+    },
+    /// Scan what changed between two releases (new files and new lines only).
+    Delta {
+        /// The previous release's archive.
+        #[arg(long)]
+        prev: PathBuf,
+        /// The release being checked.
+        #[arg(long)]
+        cur: PathBuf,
+        #[arg(long, value_parser = parse_eco)]
+        ecosystem: Ecosystem,
+        #[arg(long)]
+        tokens: bool,
     },
     /// Print the ordered feature name list, one per line.
     Features {
@@ -173,6 +186,25 @@ fn main() -> Result<()> {
                 ..Default::default()
             };
             batch(&input, &output, &opts, ecosystem, jobs)?;
+        }
+        Cmd::Delta {
+            prev,
+            cur,
+            ecosystem,
+            tokens,
+        } => {
+            let opts = ScanOptions {
+                tokens,
+                ..Default::default()
+            };
+            let read =
+                |p: &Path| std::fs::read(p).with_context(|| format!("reading {}", p.display()));
+            let name = cur
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let d = scan_delta(&read(&prev)?, &read(&cur)?, &name, ecosystem, &opts)?;
+            println!("{}", serde_json::to_string(&d)?);
         }
         Cmd::Features { json } => {
             let names = feature_names();

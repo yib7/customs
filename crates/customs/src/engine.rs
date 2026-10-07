@@ -52,6 +52,8 @@ pub struct Limits {
     pub max_scan_bytes: u64,
     /// `POST /api/check` does not download artifacts larger than this.
     pub max_check_bytes: u64,
+    /// The artifact cache is trimmed (least recently used first) when it grows past this.
+    pub max_cache_bytes: u64,
 }
 
 impl Default for Limits {
@@ -60,6 +62,7 @@ impl Default for Limits {
             max_download_bytes: 2 << 30,
             max_scan_bytes: 256 << 20,
             max_check_bytes: 64 << 20,
+            max_cache_bytes: 10 << 30,
         }
     }
 }
@@ -182,6 +185,8 @@ pub struct Engine {
     events: broadcast::Sender<Event>,
     inflight: Mutex<HashMap<String, Flight>>,
     tmp_counter: AtomicU64,
+    /// Bytes downloaded since the cache size was last checked.
+    cache_growth: AtomicU64,
 }
 
 const INSTALL_SCRIPT_NAMES: [&str; 3] = ["preinstall", "install", "postinstall"];
@@ -223,6 +228,8 @@ impl Engine {
             events,
             inflight: Mutex::new(HashMap::new()),
             tmp_counter: AtomicU64::new(0),
+            // Starting above the trigger makes the first download check the size.
+            cache_growth: AtomicU64::new(u64::MAX / 2),
         }))
     }
 
@@ -407,6 +414,7 @@ impl Engine {
         if let Some(row) = self.store.artifact_get(url).map_err(internal)? {
             let p = self.blob_path(&row.sha256);
             if p.exists() {
+                crate::cache::touch(&p);
                 self.metrics.cache("artifact_hit");
                 return Ok((p, row.sha256, row.size));
             }
@@ -444,7 +452,30 @@ impl Engine {
                 },
             )
             .map_err(internal)?;
+        self.maybe_trim_cache(dl.size);
         Ok((dest, dl.sha256, dl.size))
+    }
+
+    /// Check the cache size after every 1/16 of the cap has been downloaded.
+    fn maybe_trim_cache(&self, added: u64) {
+        let max = self.limits.max_cache_bytes;
+        let grown = self.cache_growth.fetch_add(added, Ordering::Relaxed) + added;
+        if grown < max / 16 {
+            return;
+        }
+        self.cache_growth.store(0, Ordering::Relaxed);
+        let dir = self.cache_dir.clone();
+        tokio::task::spawn_blocking(move || {
+            let e = crate::cache::evict(&dir, max, std::time::Duration::from_secs(600));
+            if e.files > 0 {
+                tracing::info!(
+                    files = e.files,
+                    freed_mb = e.bytes >> 20,
+                    remaining_mb = e.remaining_bytes >> 20,
+                    "trimmed artifact cache"
+                );
+            }
+        });
     }
 
     #[allow(clippy::too_many_arguments)]

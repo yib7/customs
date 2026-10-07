@@ -70,6 +70,9 @@ pub struct ServeArgs {
     /// Model directory (falls back to its dev/ placeholders).
     #[arg(long, env = "CUSTOMS_MODELS")]
     pub models: Option<PathBuf>,
+    /// Artifact cache size cap in MiB; least recently used archives are removed past it.
+    #[arg(long, default_value_t = 10240, env = "CUSTOMS_CACHE_MAX_MB")]
+    pub cache_max_mb: u64,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -282,7 +285,10 @@ async fn serve(a: ServeArgs) -> anyhow::Result<()> {
         policy,
         policy_path: source.path,
         scanner: default_scanner(),
-        limits: Limits::default(),
+        limits: Limits {
+            max_cache_bytes: a.cache_max_mb << 20,
+            ..Limits::default()
+        },
         metrics: Arc::new(Metrics::new()),
     })?;
     let listener = tokio::net::TcpListener::bind(&a.bind)

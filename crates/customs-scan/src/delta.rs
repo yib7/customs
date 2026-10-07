@@ -6,7 +6,8 @@
 //! * files whose bytes changed keep only their new lines (the lines left after removing,
 //!   as a multiset, every line of the old file), or the whole file when either side is
 //!   binary (a NUL byte in the first 8 KiB);
-//! * root manifests are always kept whole so the install surface can still be found;
+//! * root manifests (and a wheel's `*.dist-info/METADATA`) are always kept whole so the
+//!   install surface can still be found;
 //! * unchanged and removed files are dropped.
 
 use std::collections::HashMap;
@@ -23,6 +24,14 @@ const MANIFESTS: &[&str] = &[
     "package.json",
 ];
 const BINARY_SNIFF: usize = 8192;
+
+/// Root manifests, plus a wheel's `*.dist-info/METADATA` (a wheel has no root manifest).
+fn is_manifest(path: &str) -> bool {
+    MANIFESTS.contains(&path)
+        || path
+            .split_once('/')
+            .is_some_and(|(d, f)| d.ends_with(".dist-info") && f == "METADATA" && d.len() > 10)
+}
 
 /// Change-size statistics of a delta (the `p_` model features are derived from these).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -84,7 +93,7 @@ pub fn delta(prev: &Contents, cur: &Contents) -> (Contents, DeltaStats) {
     };
     let mut kept: Vec<Entry> = Vec::new();
     for e in &top {
-        let manifest = MANIFESTS.contains(&e.path.as_str());
+        let manifest = is_manifest(&e.path);
         match prev_index.get(e.path.as_str()) {
             None => {
                 stats.n_added += 1;

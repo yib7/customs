@@ -349,7 +349,7 @@ fn read_tar<R: Read>(
             continue;
         };
         let declared = entry.header().size().unwrap_or(0);
-        let full = wants_full(&path);
+        let full = opts.read_all || wants_full(&path);
         let (data, got_full) = match read_capped(&mut entry, full, opts.max_entry_bytes) {
             Ok(v) => v,
             Err(e) => {
@@ -425,7 +425,7 @@ fn read_zip(
         };
         let declared = f.size();
         let compressed = f.compressed_size();
-        let full = wants_full(&path);
+        let full = opts.read_all || wants_full(&path);
         let tripped = Rc::new(Cell::new(None));
         let mut guard = Guard {
             inner: &mut f,

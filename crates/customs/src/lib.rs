@@ -5,6 +5,7 @@
 
 pub mod api;
 pub mod audit;
+pub mod cache;
 pub mod cli;
 pub mod client;
 pub mod config;
