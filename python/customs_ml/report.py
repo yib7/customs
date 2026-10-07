@@ -834,10 +834,43 @@ def render(scheme: str = SCHEME) -> str:
             "\nROC AUC and recall at warn barely move between seeds. Everything at 0.1% "
             "FPR is a tail statistic: the block threshold rests on two or three of about "
             "2,000 benign validation packages, and the threshold-free row on four of 4,217 "
-            "benign test packages, so both move several points between retrains. A "
-            "difference at the block rate between two runs needs to exceed about 5 points "
-            "before it says anything about the model.\n"
+            "benign test packages, so both move several points between retrains: recall at "
+            f"block spans {100 * (sp['recall_block']['max'] - sp['recall_block']['min']):.1f} "
+            "points across these seeds, and a difference at the block rate between two runs "
+            "needs to exceed that before it says anything about the model. Training is "
+            "reproducible: the same seed in a fresh process (different string hash seed) "
+            "produces bit-identical tree and CNN outputs, after the CNN vocabulary stopped "
+            "breaking document-frequency ties by set order.\n"
         )
+        bag = _load("seed_bagging.json")
+        if bag:
+            add(
+                "Averaging the tree and CNN logits of several seeds before stacking (seed "
+                "bagging), over every subset of the seeds of each size:\n"
+            )
+            add(
+                "| Seeds averaged | Subsets | Recall at block (min to max) | FPR at block "
+                "(min to max) | Recall at warn | ROC AUC |\n|---:|---:|---:|---:|---:|---:|"
+            )
+            for k in sorted(bag, key=int):
+                b = bag[k]["spread"]
+                add(
+                    f"| {k} | {bag[k]['n']} | {pct(b['recall_block']['mean'])} "
+                    f"({pct(b['recall_block']['min'])} to {pct(b['recall_block']['max'])}) | "
+                    f"{pct(b['fpr_block']['mean'], 2)} ({pct(b['fpr_block']['min'], 2)} to "
+                    f"{pct(b['fpr_block']['max'], 2)}) | {pct(b['recall_warn']['mean'])} | "
+                    f"{b['roc_auc']['mean']:.3f} |"
+                )
+            one, full = bag["1"]["spread"], bag[max(bag, key=int)]["spread"]
+            add(
+                "\nBagging mostly steadies the block threshold: single seeds realize between "
+                f"{pct(one['fpr_block']['min'], 2)} and {pct(one['fpr_block']['max'], 2)} FPR "
+                f"at block, the full bag {pct(full['fpr_block']['mean'], 2)}, and recall at "
+                f"block moves from a {pct(one['recall_block']['mean'])} mean to "
+                f"{pct(full['recall_block']['mean'])}, inside the single-seed range. It costs "
+                "one tree model and one CNN per seed at serve time, so the shipped model "
+                "stays a single seed.\n"
+            )
         cmp_ = _load("model_compare.json")
         if cmp_:
             add(
