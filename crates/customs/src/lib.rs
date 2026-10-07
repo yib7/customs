@@ -4,6 +4,7 @@
 //! the server in-process with a stand-in scanner and a mock registry.
 
 pub mod api;
+pub mod audit;
 pub mod cli;
 pub mod client;
 pub mod config;
