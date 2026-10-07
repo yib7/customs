@@ -7,6 +7,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use customs_model::Decision;
 use customs_scan::Ecosystem;
 
+use crate::audit::{AuditOptions, FailOn, Format};
 use crate::client::{Checker, LocalOptions};
 use crate::config::resolve_policy;
 use crate::engine::{default_scanner, load_models, Engine, EngineConfig, Limits};
@@ -38,6 +39,8 @@ pub enum Command {
     Serve(ServeArgs),
     /// Check one package: `customs check pypi requests==2.32.3`, `customs check npm @scope/pkg@^1`.
     Check(CheckArgs),
+    /// Check every package pinned in lockfiles: `customs audit`, `customs audit -r --format sarif`.
+    Audit(AuditArgs),
     /// Scan a local archive offline and print the verdict.
     Scan(ScanArgs),
     /// Print shell exports that route pip, uv, and npm through the proxy.
@@ -97,6 +100,31 @@ pub struct CheckArgs {
     #[arg(long)]
     pub json: bool,
     /// Server to ask; when unreachable the check runs in-process.
+    #[arg(long, default_value = DEFAULT_SERVER, env = "CUSTOMS_SERVER")]
+    pub server: String,
+    #[command(flatten)]
+    pub local: LocalArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct AuditArgs {
+    /// Lockfiles, or directories to search for them (default: the current directory).
+    pub paths: Vec<PathBuf>,
+    /// Search directories recursively, skipping node_modules, .git, .venv and target.
+    #[arg(long, short)]
+    pub recursive: bool,
+    #[arg(long, value_enum, default_value_t)]
+    pub format: Format,
+    /// Write the report here instead of stdout.
+    #[arg(long, short)]
+    pub output: Option<PathBuf>,
+    /// Exit 1 when any package is at least this severe.
+    #[arg(long, value_enum, default_value_t)]
+    pub fail_on: FailOn,
+    /// Packages checked at once.
+    #[arg(long, default_value_t = 8, value_parser = clap::value_parser!(u16).range(1..=256))]
+    pub jobs: u16,
+    /// Server to ask; when unreachable the checks run in-process.
     #[arg(long, default_value = DEFAULT_SERVER, env = "CUSTOMS_SERVER")]
     pub server: String,
     #[command(flatten)]
@@ -182,6 +210,17 @@ pub async fn run(cli: Cli) -> i32 {
     let result = match cli.command {
         Command::Serve(a) => serve(a).await.map(|_| 0),
         Command::Check(a) => check(a).await,
+        Command::Audit(a) => Ok(crate::audit::run(AuditOptions {
+            paths: a.paths,
+            recursive: a.recursive,
+            format: a.format,
+            output: a.output,
+            fail_on: a.fail_on,
+            jobs: usize::from(a.jobs),
+            server: a.server,
+            local: a.local.options(),
+        })
+        .await),
         Command::Scan(a) => scan(a),
         Command::Env(a) => {
             print!("{}", env_exports(&a.server, a.shell));
@@ -488,6 +527,36 @@ mod tests {
             c.command,
             Command::Check(CheckArgs { package: None, .. })
         ));
+        let c = Cli::try_parse_from([
+            "customs",
+            "audit",
+            "a/uv.lock",
+            "b",
+            "--format",
+            "sarif",
+            "--fail-on",
+            "warn",
+            "--jobs",
+            "4",
+            "--recursive",
+        ])
+        .unwrap();
+        let Command::Audit(a) = c.command else {
+            panic!("expected audit");
+        };
+        assert_eq!(a.paths.len(), 2);
+        assert_eq!(
+            (a.format, a.fail_on, a.jobs, a.recursive),
+            (Format::Sarif, FailOn::Warn, 4, true)
+        );
+        let Command::Audit(a) = Cli::try_parse_from(["customs", "audit"]).unwrap().command else {
+            panic!("expected audit");
+        };
+        assert_eq!(
+            (a.format, a.fail_on, a.jobs),
+            (Format::Text, FailOn::Block, 8)
+        );
+        assert!(Cli::try_parse_from(["customs", "audit", "--jobs", "0"]).is_err());
         let c = Cli::try_parse_from(["customs", "serve", "--bind", "0.0.0.0:9000"]).unwrap();
         assert!(
             matches!(c.command, Command::Serve(ServeArgs { ref bind, .. }) if bind == "0.0.0.0:9000")

@@ -1,0 +1,138 @@
+name: Customs audit
+description: Check every dependency pinned in your lockfiles with the Customs malware classifier and policy, and report findings to GitHub code scanning.
+author: yib7
+branding:
+  icon: shield
+  color: blue
+
+inputs:
+  paths:
+    description: Lockfiles or directories to audit, separated by spaces or newlines.
+    required: false
+    default: "."
+  recursive:
+    description: Search directories recursively (skips node_modules, .git, .venv and target).
+    required: false
+    default: "false"
+  fail-on:
+    description: Fail the step when a package is at least this severe (block, warn, or never).
+    required: false
+    default: block
+  upload-sarif:
+    description: Upload the SARIF report to GitHub code scanning (needs `security-events write`).
+    required: false
+    default: "true"
+  sarif-file:
+    description: Where to write the SARIF report.
+    required: false
+    default: customs.sarif
+  config:
+    description: Policy file (customs.toml). Default ./customs.toml when present, else the built-in defaults.
+    required: false
+    default: ""
+  jobs:
+    description: Packages checked at once.
+    required: false
+    default: "8"
+  cache:
+    description: Cache the Customs binary and scan results between runs.
+    required: false
+    default: "true"
+
+outputs:
+  exit-code:
+    description: Exit code of `customs audit` (0 clean, 1 findings at or above fail-on, 2 error).
+    value: ${{ steps.audit.outputs.exit-code }}
+  sarif-file:
+    description: Path of the SARIF report.
+    value: ${{ inputs.sarif-file }}
+
+runs:
+  using: composite
+  steps:
+    - name: Fingerprint Customs sources
+      id: key
+      shell: bash
+      run: |
+        cd "$GITHUB_ACTION_PATH"
+        sum=$(find Cargo.toml Cargo.lock crates -type f \( -name '*.rs' -o -name 'Cargo.toml' -o -name 'Cargo.lock' \) -print0 \
+          | sort -z | xargs -0 sha256sum | sha256sum | cut -c1-16)
+        echo "bin=customs-bin-${RUNNER_OS}-${RUNNER_ARCH}-${sum}" >> "$GITHUB_OUTPUT"
+        echo "dir=${RUNNER_TEMP}/customs" >> "$GITHUB_OUTPUT"
+
+    - name: Restore Customs binary
+      id: bin-cache
+      if: inputs.cache == 'true'
+      uses: actions/cache@v4
+      with:
+        path: ${{ steps.key.outputs.dir }}/bin
+        key: ${{ steps.key.outputs.bin }}
+
+    - name: Build Customs
+      if: steps.bin-cache.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        # A faster build than the release profile's thin LTO; inference is the same.
+        CARGO_PROFILE_RELEASE_LTO: "false"
+        CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+      run: cargo install --path "$GITHUB_ACTION_PATH/crates/customs" --locked --root "${{ steps.key.outputs.dir }}"
+
+    - name: Restore scan cache
+      if: inputs.cache == 'true'
+      uses: actions/cache@v4
+      with:
+        # The verdict database (and its WAL); downloaded archives are not cached.
+        path: ${{ steps.key.outputs.dir }}/data/customs.db*
+        key: customs-data-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+        restore-keys: customs-data-${{ runner.os }}-
+
+    - name: Audit lockfiles
+      id: audit
+      shell: bash
+      env:
+        CUSTOMS_MODELS: ${{ github.action_path }}/models
+        CUSTOMS_DATA_DIR: ${{ steps.key.outputs.dir }}/data
+        INPUT_PATHS: ${{ inputs.paths }}
+        INPUT_RECURSIVE: ${{ inputs.recursive }}
+        INPUT_FAIL_ON: ${{ inputs.fail-on }}
+        INPUT_SARIF_FILE: ${{ inputs.sarif-file }}
+        INPUT_CONFIG: ${{ inputs.config }}
+        INPUT_JOBS: ${{ inputs.jobs }}
+      run: |
+        args=(audit --format sarif --output "$INPUT_SARIF_FILE" --fail-on "$INPUT_FAIL_ON" --jobs "$INPUT_JOBS"
+              --data-dir "$CUSTOMS_DATA_DIR")
+        if [ "$INPUT_RECURSIVE" = "true" ]; then args+=(--recursive); fi
+        if [ -n "$INPUT_CONFIG" ]; then args+=(--config "$INPUT_CONFIG"); fi
+        read -r -d '' -a paths <<< "$INPUT_PATHS" || true
+        set +e
+        "${{ steps.key.outputs.dir }}/bin/customs" "${args[@]}" "${paths[@]}"
+        code=$?
+        set -e
+        echo "exit-code=$code" >> "$GITHUB_OUTPUT"
+        if [ -f "$INPUT_SARIF_FILE" ]; then
+          echo "sarif=true" >> "$GITHUB_OUTPUT"
+          # A human-readable summary for the job log, from the same report.
+          jq -r '.runs[0].results[] | "\(.level | ascii_upcase)  \(.locations[0].physicalLocation.artifactLocation.uri):\(.locations[0].physicalLocation.region.startLine)  \(.message.text)"' \
+            "$INPUT_SARIF_FILE" || true
+        fi
+
+    - name: Upload SARIF
+      if: inputs.upload-sarif == 'true' && steps.audit.outputs.sarif == 'true'
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: ${{ inputs.sarif-file }}
+        category: customs
+
+    - name: Apply fail-on
+      if: steps.audit.outputs.exit-code != '0'
+      shell: bash
+      env:
+        CODE: ${{ steps.audit.outputs.exit-code }}
+        FAIL_ON: ${{ inputs.fail-on }}
+      run: |
+        if [ "$CODE" = "1" ]; then
+          echo "::error::Customs found packages at or above fail-on=$FAIL_ON; see the code scanning alerts or the log above."
+        else
+          echo "::error::customs audit failed (exit $CODE); see the log above."
+        fi
+        exit "$CODE"

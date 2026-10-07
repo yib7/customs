@@ -572,3 +572,45 @@ As implemented; results are in `docs/EVALUATION.md` and `models/metrics.json`.
   and buried copies of training malware (benign training donors only) and everything is
   retrained; the report shows before and after, separating evasion families used in
   training from unseen ones.
+
+## 11. Lockfile audit (`customs audit`)
+
+`customs audit [PATHS...]` checks every dependency a project pins, for CI and for reviewing
+a pull request before anything is installed. PATHS are lockfiles or directories
+(searched for known names; `--recursive` walks subdirectories, skipping `node_modules`,
+`.git`, `.venv` and `target`). Parsing is offline (`crates/customs/src/audit/`):
+
+| File | Pins taken from |
+|---|---|
+| `requirements*.txt` | `name==version` / `===` lines; `-r` includes relative to the file; markers, extras, `--hash` and `\` continuations handled |
+| `poetry.lock`, `uv.lock` | `[[package]]` `name` and `version` |
+| `Pipfile.lock` | `default` and `develop`, `"version": "==x"` |
+| `package-lock.json`, `npm-shrinkwrap.json` | v2/v3 `packages` (node_modules paths, nested and scoped, `name` for aliases); v1 `dependencies` tree |
+| `pnpm-lock.yaml` | `packages:` keys (v5 `/a/1.0.0`, v6 `/a@1.0.0(peer@1)`, v9 `a@1.0.0`), read line by line |
+| `yarn.lock` | classic and berry entry headers with `version` (berry `resolution` names the installed package) |
+
+Each pin keeps its file and 1-based line. Pins are deduplicated on (ecosystem, normalized
+name, version), keeping the first location. Entries that cannot be checked are listed as
+"not checked" with a reason: unpinned requirements, editable installs, URLs, VCS and local
+paths, and packages resolved from a registry other than PyPI, npm, Yarn's npm mirror or a
+loopback host (a Customs proxy). The project's own workspace packages (`editable`,
+`virtual`, `workspace:`, `link:`, `portal:`, npm `link: true`) and berry `patch:` entries
+(the unpatched entry is listed too) are skipped silently.
+
+Pins are checked through the same client as `customs check` (a running server, else
+in-process), `--jobs` (default 8) at a time; PyPI pins are sent as `==version` so a version
+the registry lacks is reported as unavailable instead of resolving to another one. The
+verdict cache makes repeated audits cheap.
+
+Exit codes: 1 when a package meets `--fail-on` (`block` by default, `warn`, or `never`; an
+unavailable version counts as warn), otherwise 2 when a check failed (network, server) or
+on usage and parse errors, otherwise 0. `--format text` prints a summary line and a table
+of non-allowed packages; `json` prints every result with its full verdict; `sarif` prints
+SARIF 2.1.0 with one run (driver `Customs`), rules `customs/model-block`,
+`customs/model-warn`, `customs/unavailable` and one per policy rule that appears
+(`customs/deny-list`, `customs/nonexistent-package`, `customs/min-age`,
+`customs/install-scripts-from-new-package`, `customs/scan-error`), and one result per warned
+or blocked package at its lockfile line (path relative to the working directory) with
+`partialFingerprints.customsPackage/v1 = <ecosystem>/<name>/<version>`, so GitHub keeps one
+alert per package version across runs. `action.yml` wraps this for GitHub Actions
+(`docs/github-action.md`).

@@ -692,7 +692,7 @@ fn editable(v: &str) -> Option<Target> {
     }
 }
 
-fn looks_like_url(s: &str) -> bool {
+pub(crate) fn looks_like_url(s: &str) -> bool {
     let l = s.to_ascii_lowercase();
     l.contains("://")
         || ["git+", "hg+", "svn+", "bzr+", "git@"]
@@ -704,7 +704,7 @@ const ARCHIVE_EXT: &[&str] = &[
     ".whl", ".tar.gz", ".tgz", ".zip", ".tar.bz2", ".tar.xz", ".tar",
 ];
 
-fn looks_like_path(s: &str) -> bool {
+pub(crate) fn looks_like_path(s: &str) -> bool {
     s == "."
         || s == ".."
         || s.starts_with("./")
@@ -1066,7 +1066,7 @@ fn npx_like(args: &[String], out: &mut Vec<Install>, tool: &str) {
     }
 }
 
-fn valid_npm_name(name: &str) -> bool {
+pub(crate) fn valid_npm_name(name: &str) -> bool {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
         Regex::new(r"^(@[A-Za-z0-9][A-Za-z0-9._~-]*/)?[A-Za-z0-9_~-][A-Za-z0-9._~-]*$").unwrap()
