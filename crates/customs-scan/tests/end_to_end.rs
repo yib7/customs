@@ -241,6 +241,44 @@ fn src_layout_and_cmdclass_targets() {
 }
 
 #[test]
+fn setup_time_imports_join_the_install_surface() {
+    let bytes = tar_gz_files(&[
+        (
+            "imp-1.0/setup.py",
+            "from setuptools import setup\nfrom imp.version import V\nfrom imp import _hooks\nsetup(name='imp')\n",
+        ),
+        // On the surface, but its imports lead into the library and are not followed.
+        ("imp-1.0/imp/__init__.py", "from .core import run\n"),
+        ("imp-1.0/imp/core.py", "import socket\n"),
+        ("imp-1.0/imp/_hooks.py", "from .util import helper\n"),
+        ("imp-1.0/imp/util/__init__.py", ""),
+        ("imp-1.0/imp/util/helper.py", "from ..net.client import go\n"),
+        ("imp-1.0/imp/net/client.py", "import os\nos.system('id')\n"),
+        ("imp-1.0/imp/version.py", "V = '1'\n"),
+        ("imp-1.0/imp/cli.py", "import subprocess\n"),
+    ]);
+    let r = scan(&bytes, "imp-1.0.tar.gz");
+    let mut surface = r.install_surface.clone();
+    surface.sort();
+    assert_eq!(
+        surface,
+        vec![
+            "imp/__init__.py",
+            "imp/_hooks.py",
+            "imp/net/client.py",
+            "imp/util/__init__.py",
+            "imp/util/helper.py",
+            "imp/version.py",
+            "setup.py",
+        ]
+    );
+    assert_eq!(r.features["inst_proc_exec"], 1.0);
+    assert_eq!(r.features["inst_network"], 0.0);
+    assert_eq!(r.features["all_network"], 1.0);
+    assert_eq!(r.features["all_proc_exec"], 2.0);
+}
+
+#[test]
 fn ecosystem_detection_by_content() {
     // npm content inside a PyPI-looking name.
     let r = scan(&benign_npm(), "tiny-demo-1.2.3.tar.gz");

@@ -99,6 +99,19 @@ Implementation details (`customs-scan`, schema 1):
   `src/`); an in-tree PEP 517 backend (`pyproject.toml` `build-system.backend-path`), which
   runs during the build; `<pkg>/__init__.py` and `src/<pkg>/__init__.py` for every directory
   one level below the root (or below `src/`), sorted; every `*.pth` file at any depth, sorted.
+  Then the package's own imports are followed from the setup-time files (`setup.py`,
+  cmdclass targets, an in-tree backend), three hops deep (at most 48 files): relative
+  imports (`from .core import run`, `from . import util`, `from ..x import y`) and absolute
+  imports whose top-level name is a package or module shipped in the archive (at the root
+  or under `src/`). An import adds the module file, the `__init__.py` of each enclosing
+  package, and imported names that are submodules, so a payload moved out of `setup.py`
+  into a helper module stays on the install surface. Imports inside an `__init__.py` or a
+  `.pth` file are not followed. A first version followed them too (importing a package
+  does run them), but in a benign package they lead into the library itself: the share of
+  benign PyPI packages with network code on the install surface rose from 2.3% to 18%, and
+  detection of novel MalRegistry malware at a 1% false positive rate fell from 50.0% to
+  45.3%. Imports of anything not in the archive (the standard library, dependencies) are
+  ignored.
   Wheels use the same rules (their root is site-packages).
 - npm install surface, in order: for each hook in the order `preinstall, install,
   postinstall, preprepare, prepare, postprepare`, the command string itself (a shell unit
@@ -178,7 +191,12 @@ length over 30 with high entropy, over all identifiers), `inst_nonascii_ratio`,
 
 Added in implementation (still schema 1): `inst_n_files` (number of install-surface units),
 `n_links` (symlink and hardlink entries skipped), `n_unsafe_paths` (absolute or `..` entries
-skipped).
+skipped). Added after the MalRegistry error analysis (section 10.1):
+`inst_hidden_ws_lines`/`all_hidden_ws_lines`, lines where code resumes after a run of 100 or
+more spaces or tabs (code pushed past the right edge of an editor or diff view; evidence
+snippets show such a line as `head [N blank columns] hidden code`), and
+`inst_exec_decoded`/`all_exec_decoded`, lines holding both a `dyn_code` and a `decode_obf`
+hit (`exec(b64decode(...))` on one line).
 
 Definitions: file counts include every regular file, nested-archive entries too
 (`n_js` counts `.js .mjs .cjs .ts`; `n_minified_js` only `.js .mjs .cjs`); `n_hidden` counts
@@ -190,9 +208,12 @@ literal (shell: quoted strings and words). `hex_escape_count` counts `\xNN`, `\u
 `\u{...}` in the raw text. "High entropy" for identifiers means above 4.3 bits per byte.
 Ratios are 0 when the denominator is 0.
 
-Feature order (`feature_names()`, 70 names): the 14 `inst_<indicator>` in table order, the
-14 `all_<indicator>`, then the 28 features above in the order listed, then `inst_n_files`,
-`n_links`, `n_unsafe_paths`, then the 11 manifest features in the order listed in 4.4.
+Feature order (`feature_names()`, 74 names): the 14 `inst_<indicator>` in table order, the
+14 `all_<indicator>`, then the 28 features above in the order listed, then
+`inst_hidden_ws_lines`, `all_hidden_ws_lines`, `inst_exec_decoded`, `all_exec_decoded`,
+`inst_n_files`, `n_links`, `n_unsafe_paths`, then the 11 manifest features in the order
+listed in 4.4. Models bind features by name, so adding features never breaks an older model
+file.
 
 ### 4.4 Manifest features
 
@@ -640,6 +661,39 @@ As implemented; results are in `docs/EVALUATION.md` and `models/metrics.json`.
   and buried copies of training malware (benign training donors only) and everything is
   retrained; the report shows before and after, separating evasion families used in
   training from unseen ones.
+
+### 10.1 Independent dataset (`customs_ml/external.py`)
+
+MalRegistry (lxyeternal/pypi_malregistry, ASE 2023) is a PyPI malware corpus collected by a
+different team. It is only scored, never trained on. Archives are fetched, canonicalized
+like the corpus, and scored by the shipped binary at its shipped thresholds. A sample is
+*novel* when its normalized name never appears in the training data and its token stream
+does not share a MinHash cluster with any training malware. Novel clusters are split in
+half by a hash of the cluster id: the **dev** half is for error analysis (and holds every
+cluster any sample of which was looked at), the **held-out** half is only ever reported.
+Rates are given per archive and per cluster (one sample each), since one campaign can
+contribute hundreds of copies.
+
+Dev-half error analysis drove three scanner changes: import following on the PyPI install
+surface (4.1), and the `hidden_ws_lines` and `exec_decoded` features (4.3). After a scanner
+change, `pipeline refresh` rescans the corpus (features and tokens) while keeping clusters
+and splits, and every model is retrained.
+
+### 10.2 Experiment: release diff model (`customs_ml/diff.py`, `customs-scan delta`)
+
+A compromised release of a popular library is the previous release plus a payload. The
+delta of a release keeps files added since the previous release whole, reduces changed
+files to their new lines (multiset line difference), keeps binaries and root manifests
+(plus a wheel's `*.dist-info/METADATA`) whole, and drops unchanged and removed files.
+Python and Rust build identical deltas (checked on real pairs). Training pairs: a benign
+release and its predecessor (negative), and the same pair with a training-split malware
+payload injected into the newer release (positive; npm: new postinstall file, appended to
+the entry point, or a shell install script; PyPI: appended to `setup.py`, appended to the
+top `__init__.py`, or a new imported module). Real compromised releases are test only.
+The diff model uses `all_` and structural features plus change-size features; `inst_`
+features are excluded because the install surface of a delta is not well defined.
+Thresholds come from benign validation pairs at FPR 0.5% and 0.1%. The comparison with the
+base model is made at matched false positive rates. It was not adopted (see the report).
 
 ## 11. Lockfile audit (`customs audit`)
 

@@ -52,6 +52,32 @@ def stage_table() -> None:
     df.to_parquet(work() / "dataset.parquet")
 
 
+def stage_refresh() -> None:
+    """Rescan every corpus archive and replace the feature columns and token streams.
+
+    For a scanner change after the corpus was built. Clusters and splits stay as they are,
+    so results remain comparable across scanner versions; retrain the models afterwards
+    (``augment gbdt ablation cnn ensemble evaluate export``). Augmented rows are dropped
+    (they have no archive on disk) and rebuilt by the ``augment`` stage.
+    """
+    df = load_table()
+    if "augmented" in df:
+        df = df[df.augmented.isna()].reset_index(drop=True)
+    t = time.time()
+    reports = features.scan_paths(df.canonical_path.tolist(), tokens=True)
+    fdf = pd.DataFrame([r.get("features") or {} for r in reports]).add_prefix("f_")
+    changed = sum(
+        list(a) != (r.get("tokens") or []) for a, r in zip(df.tokens, reports, strict=True)
+    )
+    df["tokens"] = [r.get("tokens") or [] for r in reports]
+    log(f"token streams changed for {changed} of {len(df)} archives")
+    old = feature_cols(df)
+    added = sorted(set(fdf.columns) - set(old))
+    df = pd.concat([df.drop(columns=old), fdf], axis=1)
+    log(f"rescanned {len(df)} archives in {time.time() - t:.0f}s; new features: {added}")
+    df.to_parquet(work() / "dataset.parquet")
+
+
 def stage_cluster() -> None:
     df = load_table()
     t = time.time()
@@ -346,6 +372,7 @@ def stage_ensemble(scheme: str = SCHEME) -> None:
 def main(argv: list[str]) -> None:
     stages = {
         "table": stage_table,
+        "refresh": stage_refresh,
         "cluster": stage_cluster,
         "split": stage_split,
         "gbdt": stage_gbdt,

@@ -614,8 +614,16 @@ DIFF_FPR_WARN = 0.005
 DIFF_FPR_BLOCK = 0.001
 
 
+# Features left out of the diff model. A delta omits unchanged files, so which delta
+# files an install hook reaches (the inst_ surface) is not well defined, and these two were
+# added to the scanner after the deltas were scanned.
+DIFF_EXCLUDE = ("f_inst_", "f_all_hidden_ws_lines", "f_all_exec_decoded")
+
+
 def diff_feature_cols(table: pd.DataFrame) -> list[str]:
-    return [c for c in table.columns if c.startswith(("f_", "p_"))]
+    return [
+        c for c in table.columns if c.startswith(("f_", "p_")) and not c.startswith(DIFF_EXCLUDE)
+    ]
 
 
 def stage_train() -> dict:
@@ -685,23 +693,45 @@ def stage_train() -> dict:
     ens = json.loads((Path(__file__).resolve().parents[2] / "models/ensemble.json").read_text())[
         "thresholds"
     ]
+    ens = {k: ens[k] for k in ("warn", "block")}
+    val_benign = table[(table.label == 0) & (table.split == "val")]
 
-    def block(rows: pd.DataFrame) -> dict:
+    def tail_score(ref: np.ndarray, x: np.ndarray) -> np.ndarray:
+        """-log of the smoothed share of validation benign pairs scoring at least x."""
+        ref = np.sort(ref)
+        return -np.log((len(ref) - np.searchsorted(ref, x, side="left") + 1) / (len(ref) + 1))
+
+    def block(rows: pd.DataFrame, with_base: bool = True) -> dict:
         y = rows.label.to_numpy()
         d, b = rows.diff_risk.to_numpy(), rows.base_risk.to_numpy()
-        comb_warn = (b >= ens["warn"]) | (d >= thresholds["warn"])
-        comb_block = (b >= ens["block"]) | (d >= thresholds["block"])
         out = {
             "n_pos": int(y.sum()),
             "n_neg": int((1 - y).sum()),
             "diff": metrics.summarize(y, d, thresholds).__dict__,
-            "base": metrics.summarize(y, b, ens).__dict__,
-            "combined": {
-                "recall_warn": float(comb_warn[y == 1].mean()) if y.sum() else None,
-                "recall_block": float(comb_block[y == 1].mean()) if y.sum() else None,
-                "fpr_warn": float(comb_warn[y == 0].mean()),
-                "fpr_block": float(comb_block[y == 0].mean()),
-            },
+        }
+        if not with_base:
+            return out
+        out["base"] = metrics.summarize(y, b, ens).__dict__
+        # Base and diff combined by taking the larger benign tail score, then compared with
+        # the base model alone at the same false positive rate on these negatives.
+        comb = np.maximum(
+            tail_score(val_benign.base_risk.to_numpy(), b),
+            tail_score(val_benign.diff_risk.to_numpy(), d),
+        )
+        matched = {}
+        for f in (0.001, 0.005, 0.01):
+            tb, tc = np.quantile(b[y == 0], 1 - f), np.quantile(comb[y == 0], 1 - f)
+            matched[str(f)] = {
+                "base_recall": float((b[y == 1] > tb).mean()),
+                "combined_recall": float((comb[y == 1] > tc).mean()),
+            }
+        out["matched_fpr"] = matched
+        tb, td = np.quantile(b[y == 0], 0.995), np.quantile(d[y == 0], 0.995)
+        out["overlap_at_fpr_0.005"] = {
+            "both": int(((b > tb) & (d > td))[y == 1].sum()),
+            "base_only": int(((b > tb) & (d <= td))[y == 1].sum()),
+            "diff_only": int(((b <= tb) & (d > td))[y == 1].sum()),
+            "neither": int(((b <= tb) & (d <= td))[y == 1].sum()),
         }
         if 0 < y.sum() < len(y):
             cl = rows.cluster.fillna(-1).to_numpy()
@@ -722,7 +752,8 @@ def stage_train() -> dict:
             pd.concat([table[real & (table.split == "test")], neg_test])
         ),
         "real_compromised_all": block(pd.concat([table[real], neg_test])),
-        "synthetic_test": block(table[(table.split == "test") & ~real]),
+        # Synthetic positives have no full-package base score, so only the diff model.
+        "synthetic_test": block(table[(table.split == "test") & ~real], with_base=False),
         "synthetic_test_by_mode": {
             m: float((g.diff_risk >= thresholds["warn"]).mean())
             for m, g in table[

@@ -82,6 +82,19 @@ const OTHER: &[(&str, &str)] = &[
         "inst_long_line_ratio",
         "Many extremely long lines in install-time code",
     ),
+    (
+        "inst_hidden_ws_lines",
+        "Install-time code hidden after a long run of blanks",
+    ),
+    (
+        "all_hidden_ws_lines",
+        "Code hidden after a long run of blanks",
+    ),
+    (
+        "inst_exec_decoded",
+        "Install-time code runs decoded data on the same line",
+    ),
+    ("all_exec_decoded", "Runs decoded data on the same line"),
     ("meta_desc_len", "Length of the package description"),
     ("meta_has_homepage", "Declares a homepage"),
     ("meta_has_repo", "Declares a source repository"),

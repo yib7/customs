@@ -194,6 +194,10 @@ const FEATURE_NAMES: &[&str] = &[
     "inst_obf_ident_ratio",
     "inst_nonascii_ratio",
     "inst_long_line_ratio",
+    "inst_hidden_ws_lines",
+    "all_hidden_ws_lines",
+    "inst_exec_decoded",
+    "all_exec_decoded",
     "inst_n_files",
     "n_links",
     "n_unsafe_paths",
@@ -636,10 +640,116 @@ impl<'a> Scanner<'a> {
             .filter(|p| p.to_ascii_lowercase().ends_with(".pth"))
             .collect();
         pths.sort_unstable();
-        for p in inits.into_iter().chain(pths) {
+        let inits: Vec<String> = inits.into_iter().map(str::to_string).collect();
+        let pths: Vec<String> = pths.into_iter().map(str::to_string).collect();
+        for p in inits.iter().chain(&pths) {
             self.add_inst_path(p, Some(Lang::Python));
         }
+        self.follow_python_imports();
         meta
+    }
+
+    /// Put the package's own modules imported (transitively) by setup-time Python files
+    /// (`setup.py`, cmdclass and in-tree build backend modules) on the install surface
+    /// too, so a payload moved out of `setup.py` into a helper module stays on it.
+    /// An `__init__.py` reached this way joins the surface, but its own imports are not
+    /// followed: in a benign package they lead into the whole library, and measured on
+    /// the corpus that dilutes the install surface more than it uncovers payloads.
+    fn follow_python_imports(&mut self) {
+        const MAX_HOPS: usize = 3;
+        const MAX_FILES: usize = 48;
+        let mut frontier: Vec<usize> = self
+            .entry_unit
+            .iter()
+            .filter(|(_, &u)| self.units[u].inst && self.units[u].lang == Lang::Python)
+            .map(|(&idx, _)| idx)
+            .filter(|&idx| self.follows_imports(idx))
+            .collect();
+        frontier.sort_unstable();
+        let mut seen: HashSet<usize> = frontier.iter().copied().collect();
+        for _ in 0..MAX_HOPS {
+            let mut next = Vec::new();
+            for idx in frontier {
+                let Some(&u) = self.entry_unit.get(&idx) else {
+                    continue;
+                };
+                let path = self.c.entries[idx].path.clone();
+                let dir = path
+                    .rsplit_once('/')
+                    .map(|(d, _)| d)
+                    .unwrap_or("")
+                    .to_string();
+                for imp in indicators::python_imports(&self.units[u].text) {
+                    for cand in self.python_module_files(&dir, &imp) {
+                        if seen.len() >= MAX_FILES {
+                            break;
+                        }
+                        if let Some(i) = self.add_inst_path(&cand, Some(Lang::Python)) {
+                            if seen.insert(i) && self.follows_imports(i) {
+                                next.push(i);
+                            }
+                        }
+                    }
+                }
+            }
+            frontier = next;
+        }
+    }
+
+    fn follows_imports(&self, idx: usize) -> bool {
+        let p = self.c.entries[idx].path.to_ascii_lowercase();
+        !(p == "__init__.py" || p.ends_with("/__init__.py") || p.ends_with(".pth"))
+    }
+
+    /// Files in this archive that an import loads: the module itself, the `__init__.py` of
+    /// each enclosing package, and imported names that are submodules. Absolute imports
+    /// resolve only to top-level packages shipped in the archive (at the root or in `src/`).
+    fn python_module_files(&self, dir: &str, imp: &indicators::PyImport) -> Vec<String> {
+        let mut base: Vec<String> = if imp.level > 0 {
+            let mut parts: Vec<String> = dir
+                .split('/')
+                .filter(|p| !p.is_empty())
+                .map(str::to_string)
+                .collect();
+            for _ in 1..imp.level {
+                if parts.pop().is_none() {
+                    return Vec::new();
+                }
+            }
+            parts
+        } else {
+            let Some(top) = imp.module.split('.').next().filter(|t| !t.is_empty()) else {
+                return Vec::new();
+            };
+            let shipped = |root: &str| {
+                self.index
+                    .contains_key(format!("{root}{top}/__init__.py").as_str())
+                    || self.index.contains_key(format!("{root}{top}.py").as_str())
+            };
+            if shipped("") {
+                Vec::new()
+            } else if shipped("src/") {
+                vec!["src".to_string()]
+            } else {
+                return Vec::new();
+            }
+        };
+        let mut out = Vec::new();
+        for part in imp.module.split('.').filter(|p| !p.is_empty()) {
+            base.push(part.to_string());
+            out.push(format!("{}/__init__.py", base.join("/")));
+        }
+        if !base.is_empty() {
+            out.push(format!("{}.py", base.join("/")));
+        }
+        for name in &imp.names {
+            let mut sub = base.clone();
+            sub.push(name.clone());
+            let sub = sub.join("/");
+            out.push(format!("{sub}.py"));
+            out.push(format!("{sub}/__init__.py"));
+        }
+        out
     }
 
     fn run(mut self, filename: &str, sha256: String) -> ScanReport {
@@ -705,6 +815,10 @@ impl<'a> Scanner<'a> {
             "inst_long_line_ratio",
             ratio(inst.long_lines as f64, inst.n_lines as f64),
         );
+        set("inst_hidden_ws_lines", inst.hidden_ws as f64);
+        set("all_hidden_ws_lines", all.hidden_ws as f64);
+        set("inst_exec_decoded", inst.exec_decoded as f64);
+        set("all_exec_decoded", all.exec_decoded as f64);
         set(
             "inst_n_files",
             self.units.iter().filter(|u| u.inst).count() as f64,
@@ -868,13 +982,23 @@ fn ratio(a: f64, b: f64) -> f64 {
 
 const SNIPPET_CHARS: usize = 160;
 
+/// The evidence line, trimmed and cut to `SNIPPET_CHARS`. Code hidden after a long
+/// whitespace run is pulled into view with a marker, so the snippet shows what the run hid.
 fn snippet(text: &str, line: u32) -> String {
     let l = text
         .lines()
         .nth(line.saturating_sub(1) as usize)
         .unwrap_or("")
         .trim();
-    l.chars().take(SNIPPET_CHARS).collect()
+    let shown = match indicators::hidden_ws_offset(l) {
+        Some(at) => {
+            let head = l[..at].trim_end();
+            let hidden = at - head.len();
+            format!("{head} [{hidden} blank columns] {}", &l[at..])
+        }
+        None => l.to_string(),
+    };
+    shown.chars().take(SNIPPET_CHARS).collect()
 }
 
 /// 1-based line of the first `"key"` in a JSON document (1 when absent).
@@ -901,6 +1025,8 @@ struct Agg {
     hex: u64,
     idents: u64,
     obf: u64,
+    hidden_ws: u64,
+    exec_decoded: u64,
 }
 
 impl Agg {
@@ -923,6 +1049,8 @@ impl Agg {
             g.hex += a.hex_escapes;
             g.idents += a.n_idents;
             g.obf += a.n_obf_idents;
+            g.hidden_ws += a.hidden_ws_lines;
+            g.exec_decoded += a.exec_decoded_lines;
         }
         g
     }
@@ -1016,6 +1144,11 @@ mod tests {
         let long = "x".repeat(500);
         assert_eq!(snippet(&format!("a\n  {long}  \n"), 2).chars().count(), 160);
         assert_eq!(snippet("a\nb", 9), "");
+        let hidden = format!("import os{};exec(x)", " ".repeat(250));
+        assert_eq!(
+            snippet(&hidden, 1),
+            "import os [250 blank columns] ;exec(x)"
+        );
     }
 
     #[test]

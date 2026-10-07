@@ -14,10 +14,10 @@ are stopped before anything is downloaded.
 | | Customs | GuardDog 3.2 |
 |---|---:|---:|
 | ROC AUC | **0.972** | 0.837 |
-| Malware caught at GuardDog's own false-positive rate (18%) | **94.9%** | 79.4% |
-| Malware caught at GuardDog's `high_risk` false-positive rate (5%) | **86.3%** | 49.7% |
-| Malware flagged (warn) at a 0.7% false-positive rate | **79.5%** | |
-| Malware auto-blocked at a 0.05% false-positive rate | **55.3%** | |
+| Malware caught at GuardDog's own false-positive rate (18%) | **95.1%** | 79.4% |
+| Malware caught at GuardDog's `high_risk` false-positive rate (5%) | **86.5%** | 49.7% |
+| Malware flagged (warn) at a 0.8% false-positive rate | **78.9%** | |
+| Malware auto-blocked at a 0.02% false-positive rate | **57.4%** | |
 
 The Rust binary reproduces the offline evaluation exactly: replaying 706 held-out packages
 through the live proxy gave identical decisions to the Python pipeline (largest risk
@@ -48,7 +48,7 @@ flowchart LR
     subgraph P[customs binary, Rust]
       direction TB
       R[registry proxy<br/>PyPI simple + npm] --> POL[policy engine<br/>age, nonexistent names,<br/>allow / deny]
-      POL --> S[scanner<br/>safe unpack, 70 static features,<br/>install-time token stream]
+      POL --> S[scanner<br/>safe unpack, 74 static features,<br/>install-time token stream]
       S --> M[models<br/>gradient-boosted trees, code CNN,<br/>name model, stacked + calibrated]
     end
     P -->|allowed archives| A
@@ -60,7 +60,7 @@ flowchart LR
   zip-bomb, traversal and symlink defenses; a hand-written lexer for Python, JavaScript
   and shell finds what the code does at install and import time (process execution,
   network calls, credential paths, exfiltration endpoints, obfuscation, persistence) and
-  emits 70 features plus a normalized token stream. Training and serving call this same
+  emits 74 features plus a normalized token stream. Training and serving call this same
   code, so there is no train/serve skew.
 * **Models** (`python/customs_ml`, inference in `crates/customs-model`): a LightGBM model over
   the features, a 1D CNN (PyTorch) over install-time tokens, and a package-name model for
@@ -93,14 +93,38 @@ the agent stops and asks you. See [`hooks/README.md`](hooks/README.md).
 
 `scripts/demo.sh` runs the whole tour against the live registries.
 
+### Beyond the proxy
+
+**Agents over MCP.** `customs mcp` is a Model Context Protocol server, so any MCP client
+can ask before it installs: `claude mcp add customs -- customs mcp`. Tools:
+`check_package`, `check_install_command` (parses a whole shell command),
+`explain_verdict` and `scan_archive`. Evidence quoted from package code is marked as
+untrusted data and cut to one bounded line, so a malicious package cannot use its own
+source to prompt-inject the agent reading the verdict. See [`hooks/README.md`](hooks/README.md).
+
+**Lockfiles in CI.** `customs audit` checks every pin in `requirements.txt`, `poetry.lock`,
+`uv.lock`, `Pipfile.lock`, `package-lock.json`, `pnpm-lock.yaml` and `yarn.lock`, and can
+write SARIF 2.1.0 for GitHub code scanning. The composite action in [`action.yml`](action.yml)
+turns blocked dependencies into alerts on the lockfile line in the pull request:
+
+```sh
+customs audit -r --fail-on warn                       # whole repo; exit 1 on warn or block
+customs audit -r --format sarif -o customs.sarif      # see docs/github-action.md
+```
+
+**Release history rules.** Account takeovers show up in registry metadata before anyone
+reads the code. The policy engine compares each release with the ones before it and warns
+when npm provenance disappears, an install script appears or changes, the publisher is new,
+or a project wakes up after a year of silence (`docs/DESIGN.md`, section 8).
+
 ## Results
 
 | Test set (time split, malware found from 2026-02-13) | Value (95% CI) |
 |---|---|
-| ROC AUC | 0.972 (0.966 to 0.977) |
-| Flagged at the warn threshold (target FPR 1%) | 79.5% (76.3 to 82.5), realized FPR 0.71% |
-| Blocked at the block threshold (target FPR 0.1%) | 55.3% (50.6 to 59.7), realized FPR 0.05% |
-| Never-seen campaigns (no near-duplicate in training), ROC AUC | 0.972 |
+| ROC AUC | 0.972 (0.967 to 0.977) |
+| Flagged at the warn threshold (target FPR 1%) | 78.9% (75.7 to 82.1), realized FPR 0.76% |
+| Blocked at the block threshold (target FPR 0.1%) | 57.4% (52.6 to 62.0), realized FPR 0.02% |
+| Never-seen campaigns (no near-duplicate in training), ROC AUC | 0.971 |
 | Benign false positives at block, popular packages | 0 of 2,064 (top and mid tiers) |
 
 ![Verdict for a real PyPI stealer, blocked with the code evidence](docs/screenshots/verdict-light.png)
@@ -120,7 +144,7 @@ training was augmented with disguised malware. Detection at the warn threshold:
 | payload wrapped in base64 + exec | no | 91.6% | 93.9% |
 
 **Known weak spots** (from the report): compromised releases of popular libraries (a
-payload inside thousands of lines of legitimate code, ROC AUC 0.888) and very large
+payload inside thousands of lines of legitimate code, ROC AUC 0.882) and very large
 packages. The policy rules (minimum package age, install scripts in new packages) are the
 backstop there.
 

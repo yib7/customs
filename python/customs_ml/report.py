@@ -314,6 +314,123 @@ def render(scheme: str = SCHEME) -> str:
         add(f"| Largest risk difference vs Python | {rep['max_abs_risk_diff']:.2e} |")
         add("")
 
+    ext = _load("external_malregistry.json")
+    ext_base = _load("external_malregistry_baseline.json")
+    if ext:
+        add("## Independent dataset: MalRegistry\n")
+        add(
+            "All training and test malware above comes from one collector. MalRegistry "
+            "(the PyPI malware corpus from *An Empirical Study of Malicious Code In PyPI "
+            "Ecosystem*, ASE 2023) was gathered separately and is never trained on. Its "
+            f"{ext['archives']:,} unique archives are canonicalized like the corpus and scored "
+            "by the shipped binary. Samples whose name appears in the training data "
+            f"({ext['name_seen_in_training_data']:,}) or whose code is a MinHash near-duplicate "
+            f"of training malware ({ext['near_duplicate_of_training']:,}) are set aside; the "
+            "rest are **novel**. Novel clusters are split in half: misses in the dev half "
+            "drove the scanner changes below, and the held-out half was not looked at.\n"
+        )
+        rows = [
+            ("All archives", "all"),
+            ("Novel, dev half", "novel_dev"),
+            ("Novel, held-out half", "novel_heldout"),
+            ("Novel, held-out, one per cluster", "novel_heldout_one_per_cluster"),
+        ]
+        if ext_base:
+            add(
+                "| Subset | n | Warn or block (before) | Warn or block (after) | "
+                "Block (before) | Block (after) |"
+            )
+            add("|---|---:|---:|---:|---:|---:|")
+            for label, k in rows:
+                a, b = ext_base.get(k), ext.get(k)
+                if a and b:
+                    add(
+                        f"| {label} | {b['n']:,} | {pct(a['warn_or_block'])} | "
+                        f"{pct(b['warn_or_block'])} | {pct(a['block'])} | {pct(b['block'])} |"
+                    )
+        else:
+            add("| Subset | n | Warn or block | Block |\n|---|---:|---:|---:|")
+            for label, k in rows:
+                if ext.get(k):
+                    r = ext[k]
+                    add(f"| {label} | {r['n']:,} | {pct(r['warn_or_block'])} | {pct(r['block'])} |")
+        add(
+            "\nError analysis on the dev half found that most misses carried clear behavior "
+            "indicators but none on the install surface: the payload sat in a module that "
+            "`__init__.py` or `setup.py` imports, which runs on install or import just the "
+            "same. The scanner now follows a package's own imports from the install surface "
+            "(relative imports, and absolute imports of packages shipped in the archive, up to "
+            "three hops), and gained two features for code hidden past a long run of blanks "
+            "and for running decoded data on the line that decodes it.\n"
+        )
+
+    dif = _load("diff_eval.json")
+    if dif and "matched_fpr" in dif.get("real_compromised_test", {}):
+        rt = dif["real_compromised_test"]
+        add("## Experiment: release diff model\n")
+        add(
+            "A hijacked release of a popular library is mostly the previous release plus a "
+            "payload, so the payload is a small share of the package. This experiment scores "
+            "only what a release adds: files new since the previous release, plus the new "
+            "lines of changed files (`customs-scan delta`). The model is trained on "
+            f"{dif['pairs']['benign']:,} benign release pairs and as many synthetic compromises "
+            "(training-split malware payloads injected into benign releases in seven ways), "
+            "and tested on the real compromised releases, which never enter training.\n"
+        )
+        add("| | Base model | Diff model |\n|---|---:|---:|")
+        add(
+            f"| ROC AUC, real compromised test releases (n={rt['n_pos']}) | "
+            f"{num(rt['base']['roc_auc'])} | {num(rt['diff']['roc_auc'])} |"
+        )
+        add(
+            f"| ROC AUC, synthetic compromises (test) | n/a | "
+            f"{num(dif['synthetic_test']['diff']['roc_auc'])} |"
+        )
+        add("\n| Test FPR | Base recall | Base + diff recall |\n|---:|---:|---:|")
+        for f, r in rt["matched_fpr"].items():
+            add(f"| {pct(float(f))} | {pct(r['base_recall'])} | {pct(r['combined_recall'])} |")
+        ov = rt["overlap_at_fpr_0.005"]
+        add(
+            f"\nAt 0.5% FPR the two models disagree often: {ov['both']} releases are caught "
+            f"by both, {ov['base_only']} only by the base model and {ov['diff_only']} only by "
+            "the diff model (among them litellm 1.82.7 and 1.82.8, which the base model "
+            "scores near zero). The diff model misses releases whose previous version was "
+            "already compromised, since the payload is then not new. Combined at a matched "
+            "false positive rate the two do not beat the base model alone, so the diff model "
+            "is not part of the shipped decision.\n"
+        )
+
+    live = _load("live_study.json")
+    if live:
+        add("## Prospective study: live PyPI traffic\n")
+        add(
+            "Every number above is about malware someone already found. Here the frozen "
+            "models ran forward in time: `scripts/live_watch.py` followed PyPI's changelog "
+            "and sent every new release published during the window through a running "
+            "`customs serve` (downloaded and scanned in memory, never installed). Outcomes "
+            "were read off later from PyPI itself (the project was removed) and from OpenSSF "
+            "malicious-package reports.\n"
+        )
+        add(f"Window: {live['window'][0]} to {live['window'][1]} (UTC).\n")
+        add("| Decision | Releases | Later removed from PyPI | OpenSSF report |")
+        add("|---|---:|---:|---:|")
+        for k in ("allow", "warn", "block"):
+            r = live["removed_by_decision"].get(k)
+            if r:
+                add(f"| {k} | {r['n']:,} | {r['removed']:,} | {r['ossf']:,} |")
+        add(
+            f"\n{live['scanned']:,} of {live['releases']:,} releases were scanned "
+            f"({live['new_projects']:,} from projects created during the window).\n"
+        )
+        flagged = sum(live["removed_by_decision"].get(k, {}).get("n", 0) for k in ("warn", "block"))
+        add(
+            f"The window is hours long, and malicious uploads usually stay up for days, so "
+            f"the removal columns are a floor. What the window does measure is the alert "
+            f"load on real traffic: {flagged} of {live['scanned']:,} fresh releases "
+            f"({pct(flagged / max(live['scanned'], 1))}) were warned or blocked, the rate a "
+            "user installing brand-new releases would see.\n"
+        )
+
     add("## Calibration\n")
     add("![Calibration](figures/calibration.png)\n")
     add(

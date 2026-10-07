@@ -66,6 +66,25 @@ pub const EVIDENCE_RANK: [usize; N_IND] = [
 const MAX_HITS_PER_FILE: usize = 400;
 /// Strings shorter than this are too short for a meaningful entropy estimate.
 const ENTROPY_MIN_LEN: usize = 20;
+/// Whitespace run that hides the rest of a line from view.
+pub const HIDDEN_WS_RUN: usize = 100;
+
+/// Byte offset where code resumes after a hiding whitespace run, if the line has one.
+pub fn hidden_ws_offset(line: &str) -> Option<usize> {
+    let b = line.as_bytes();
+    let mut run = 0usize;
+    for (i, &c) in b.iter().enumerate() {
+        if c == b' ' || c == b'\t' {
+            run += 1;
+        } else {
+            if run >= HIDDEN_WS_RUN {
+                return Some(i);
+            }
+            run = 0;
+        }
+    }
+    None
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct FileAnalysis {
@@ -87,6 +106,11 @@ pub struct FileAnalysis {
     pub n_obf_idents: u64,
     /// Relative module specifiers (`./x`, `../y`) required or imported (JavaScript only).
     pub relative_imports: Vec<String>,
+    /// Lines where code resumes after a run of `HIDDEN_WS_RUN` or more spaces or tabs,
+    /// which pushes it past the right edge of an editor or diff view.
+    pub hidden_ws_lines: u64,
+    /// Lines holding both a dynamic-code call and a decode call (`exec(b64decode(..))`).
+    pub exec_decoded_lines: u64,
 }
 
 impl FileAnalysis {
@@ -354,6 +378,9 @@ fn text_stats(fa: &mut FileAnalysis, text: &str) {
         if len > 1000 {
             fa.long_lines += 1;
         }
+        if len as usize > HIDDEN_WS_RUN && hidden_ws_offset(line).is_some() {
+            fa.hidden_ws_lines += 1;
+        }
     }
     for c in text.chars() {
         fa.chars += 1;
@@ -449,6 +476,130 @@ fn analyze_code(toks: &[Token<'_>], lang: Lang, fa: &mut FileAnalysis) {
             .unwrap_or(1);
         fa.hit(DOWNLOAD_EXEC, line);
     }
+    let mut dyn_lines: Vec<u32> = fa
+        .hits
+        .iter()
+        .filter(|(i, _)| *i == DYN_CODE)
+        .map(|(_, l)| *l)
+        .collect();
+    let mut dec_lines: Vec<u32> = fa
+        .hits
+        .iter()
+        .filter(|(i, _)| *i == DECODE_OBF)
+        .map(|(_, l)| *l)
+        .collect();
+    dec_lines.sort_unstable();
+    dec_lines.dedup();
+    dyn_lines.sort_unstable();
+    dyn_lines.dedup();
+    fa.exec_decoded_lines = dyn_lines
+        .iter()
+        .filter(|l| dec_lines.binary_search(l).is_ok())
+        .count() as u64;
+}
+
+/// One Python import statement: `from <level dots><module> import <names>` or
+/// `import <module>` (level 0, no names).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PyImport {
+    pub level: usize,
+    pub module: String,
+    pub names: Vec<String>,
+}
+
+/// Import statements at the start of a logical line (`import x` inside an `if` body still
+/// counts; an import after `:` on the same line does not).
+pub fn python_imports(text: &str) -> Vec<PyImport> {
+    let toks = lex(text, Lang::Python);
+    let mut out = Vec::new();
+    let mut i = 0;
+    let ident = |i: usize| {
+        toks.get(i)
+            .filter(|t| t.kind == TokKind::Ident && t.text != "import" && t.text != "as")
+            .map(|t| t.text)
+    };
+    // `name ("." name)*`
+    let dotted = |i: &mut usize| -> String {
+        let mut m = String::new();
+        if let Some(first) = ident(*i) {
+            m.push_str(first);
+            *i += 1;
+            while toks.get(*i).is_some_and(|t| t.text == ".") {
+                let Some(next) = ident(*i + 1) else { break };
+                m.push('.');
+                m.push_str(next);
+                *i += 2;
+            }
+        }
+        m
+    };
+    while i < toks.len() {
+        let start = i == 0 || toks[i - 1].kind == TokKind::Newline;
+        let t = toks[i];
+        i += 1;
+        if !start || t.kind != TokKind::Ident {
+            continue;
+        }
+        if t.text == "import" {
+            loop {
+                let m = dotted(&mut i);
+                if !m.is_empty() {
+                    out.push(PyImport {
+                        level: 0,
+                        module: m,
+                        names: Vec::new(),
+                    });
+                }
+                if toks.get(i).is_some_and(|t| t.text == "as") {
+                    i += 2;
+                }
+                if toks.get(i).is_some_and(|t| t.text == ",") {
+                    i += 1;
+                } else {
+                    break;
+                }
+            }
+        } else if t.text == "from" {
+            let mut level = 0;
+            while let Some(t) = toks.get(i).filter(|t| t.kind == TokKind::Punct) {
+                if t.text.chars().all(|c| c == '.') {
+                    level += t.text.len();
+                    i += 1;
+                } else {
+                    break;
+                }
+            }
+            let module = dotted(&mut i);
+            if !toks.get(i).is_some_and(|t| t.text == "import") {
+                continue;
+            }
+            i += 1;
+            let mut names = Vec::new();
+            let mut after_as = false;
+            while let Some(t) = toks.get(i) {
+                match t.kind {
+                    TokKind::Newline => break,
+                    TokKind::Ident if t.text == "as" => after_as = true,
+                    TokKind::Ident => {
+                        if !after_as {
+                            names.push(t.text.to_string());
+                        }
+                        after_as = false;
+                    }
+                    _ => after_as = false,
+                }
+                i += 1;
+            }
+            if level > 0 || !module.is_empty() {
+                out.push(PyImport {
+                    level,
+                    module,
+                    names,
+                });
+            }
+        }
+    }
+    out
 }
 
 /// Small helper view over a token slice.
@@ -829,6 +980,47 @@ fn js_rules(code: &[Token<'_>], fa: &mut FileAnalysis) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn python_import_statements() {
+        let src = "import os, a.b as c\nfrom . import core, util as u\nfrom ..pkg.mod import (x,\n  y)\nfrom pkg import *\nif t:\n    import z\nx = 'import nope'\n";
+        let got = python_imports(src);
+        let want = [
+            (0, "os", vec![]),
+            (0, "a.b", vec![]),
+            (1, "", vec!["core", "util"]),
+            (2, "pkg.mod", vec!["x", "y"]),
+            (0, "pkg", vec![]),
+            (0, "z", vec![]),
+        ];
+        assert_eq!(got.len(), want.len(), "{got:?}");
+        for (g, (level, module, names)) in got.iter().zip(want) {
+            assert_eq!((g.level, g.module.as_str()), (level, module));
+            assert_eq!(g.names, names);
+        }
+    }
+
+    #[test]
+    fn hidden_whitespace_and_exec_of_decoded_data() {
+        let src = format!(
+            "import os{};__import__('builtins').exec(__import__('base64').b64decode('aGk='))\nx = 1\n",
+            " ".repeat(250)
+        );
+        let fa = analyze(&src, Lang::Python);
+        assert_eq!(fa.hidden_ws_lines, 1);
+        assert_eq!(fa.exec_decoded_lines, 1);
+        // Decoding and running on different lines is not the same-line shape.
+        let fa = analyze(
+            "import base64\ns = base64.b64decode(p)\nexec(s)\n",
+            Lang::Python,
+        );
+        assert_eq!(fa.exec_decoded_lines, 0);
+        assert_eq!(fa.hidden_ws_lines, 0);
+        // Leading whitespace this deep pushes code off screen too; short runs never count.
+        let fa = analyze(&format!("{}x = 1\n", " ".repeat(120)), Lang::Js);
+        assert_eq!(fa.hidden_ws_lines, 1);
+        assert_eq!(hidden_ws_offset("a    b"), None);
+    }
 
     fn py(src: &str) -> [u32; N_IND] {
         analyze(src, Lang::Python).counts
