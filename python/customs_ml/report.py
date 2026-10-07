@@ -647,7 +647,7 @@ def render(scheme: str = SCHEME) -> str:
             ("Recall at exactly 0.1% FPR (test ROC)", "roc_recall_0_001", True),
             ("Compromised libraries: ROC AUC", "compromised_lib_roc_auc", False),
             ("Compromised libraries: recall at block", "compromised_lib_recall_block", True),
-            ("PyPI malware: ROC AUC", "pypi_roc_auc", False),
+            ("PyPI malware vs all benign: ROC AUC", "pypi_roc_auc", False),
             ("PyPI malware: recall at block", "pypi_recall_block", True),
         ]
         for label, k, is_pct in rows:

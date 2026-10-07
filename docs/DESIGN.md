@@ -126,6 +126,15 @@ Implementation details (`customs-scan`, schema 1):
   `x/index.js`). From those files and from inline JavaScript, relative `require`/`import`
   specifiers are followed two levels deep (at most 32 files), so moving a payload into a
   helper module keeps it on the install surface. Then `main`. `.json` targets are never code.
+  `main`'s own requires, `bin` targets (what `npx pkg` runs) and the `.` export are not
+  followed. Among missed test malware with indicators only off the surface, those files
+  are where the evidence sits, so both were tried and measured on 1,500 benign and 1,500
+  malicious npm training archives. Following `main` one level raised the share with any
+  behavior indicator on the surface from 23.2% to 39.3% for benign packages and from
+  75.9% to 82.5% for malicious ones; adding just the `bin` and `exports` files raised them
+  from 23.2% to 27.9% and from 75.9% to 77.6%. A command-line tool's entry point spawns
+  processes and reads the environment as its job, so in both versions benign packages
+  gained more than malicious ones and the install surface lost contrast.
 - `all_` is every source file (including files inside nested archives, see 4.7) plus every
   install-surface unit, so `all_<x> >= inst_<x>` always holds and npm script commands count
   on both surfaces.
