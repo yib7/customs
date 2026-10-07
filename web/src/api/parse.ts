@@ -341,6 +341,7 @@ export function parsePolicy(v: unknown): Policy {
   }
   const minAge = asNumber(r.min_age_days);
   const dormantDays = asNumber(r.dormant_days);
+  const youngDays = asNumber(r.young_dependency_days);
   return {
     mode: parseMode(r.mode),
     warn_threshold: parseThreshold(r.warn_threshold),
@@ -354,6 +355,9 @@ export function parsePolicy(v: unknown): Policy {
     dormant_revival: parseRuleSeverity(r.dormant_revival, 'warn'),
     dormant_days: dormantDays === null ? 365 : dormantDays,
     version_anomaly: parseRuleSeverity(r.version_anomaly, 'off'),
+    nonregistry_dependency_added: parseRuleSeverity(r.nonregistry_dependency_added, 'block'),
+    young_dependency_added: parseRuleSeverity(r.young_dependency_added, 'block'),
+    young_dependency_days: youngDays === null ? 7 : youngDays,
     allow: asStringArray(r.allow),
     deny: asStringArray(r.deny),
     upstream,

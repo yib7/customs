@@ -15,6 +15,9 @@ const POLICY: Policy = {
   dormant_revival: 'warn',
   dormant_days: 365,
   version_anomaly: 'off',
+  nonregistry_dependency_added: 'block',
+  young_dependency_added: 'block',
+  young_dependency_days: 7,
   allow: ['pypi:requests', 'npm:react'],
   deny: ['npm:event-stream@3.3.6'],
   upstream: {},
@@ -53,6 +56,9 @@ describe('validateDraft', () => {
       dormant_revival: 'warn',
       dormant_days: 365,
       version_anomaly: 'off',
+      nonregistry_dependency_added: 'block',
+      young_dependency_added: 'block',
+      young_dependency_days: 7,
       allow: ['pypi:requests', 'npm:react'],
       deny: ['npm:event-stream@3.3.6'],
     });
@@ -87,6 +93,14 @@ describe('validateDraft', () => {
       history: { ...d.history, provenance_dropped: 'block', version_anomaly: 'warn' },
     });
     expect(r.policy).toMatchObject({ dormant_days: 730, provenance_dropped: 'block', version_anomaly: 'warn', publisher_changed: 'warn' });
+  });
+
+  it('validates the new dependency window', () => {
+    const d = policyToDraft(POLICY);
+    expect(validateDraft({ ...d, youngDependencyDays: '0' }).errors.young_dependency_days).toMatch(/1 to 365/);
+    expect(validateDraft({ ...d, youngDependencyDays: '366' }).errors.young_dependency_days).toBeDefined();
+    const r = validateDraft({ ...d, youngDependencyDays: '30', history: { ...d.history, young_dependency_added: 'warn' } });
+    expect(r.policy).toMatchObject({ young_dependency_days: 30, young_dependency_added: 'warn', nonregistry_dependency_added: 'block' });
   });
 
   it('rejects an entry on both lists', () => {

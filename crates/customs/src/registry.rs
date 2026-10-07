@@ -91,6 +91,9 @@ pub struct VersionMeta {
     /// npm: the account that published the version (`_npmUser.name`). PyPI's JSON API does
     /// not name uploaders.
     pub publisher: Option<String>,
+    /// npm: `dependencies` and `optionalDependencies` as `(name, spec)`, at most
+    /// [`MAX_DEPENDENCIES`]. Empty for PyPI, whose JSON API does not list them per release.
+    pub dependencies: Vec<(String, String)>,
     pub yanked: bool,
 }
 
@@ -101,6 +104,11 @@ pub struct PackageMeta {
     pub latest: Option<String>,
     pub dist_tags: BTreeMap<String, String>,
     pub versions: Vec<VersionMeta>,
+    /// npm: when the package was first published (`time.created`).
+    pub created: Option<DateTime<Utc>>,
+    /// npm: accounts that maintain or have published the package (`maintainers[].name`
+    /// and every version's `_npmUser.name`), at most [`MAX_PEOPLE`].
+    pub people: Vec<String>,
 }
 
 impl PackageMeta {
@@ -133,6 +141,31 @@ const NPM_INSTALL_SCRIPTS: [&str; 3] = ["preinstall", "install", "postinstall"];
 /// Longest install script command kept per version. Packuments of large packages list
 /// thousands of versions, so metadata keeps only what the policy rules compare.
 pub const MAX_SCRIPT_CHARS: usize = 512;
+/// Dependencies kept per npm version; real packages stay far below this.
+pub const MAX_DEPENDENCIES: usize = 400;
+/// Maintainer and publisher names kept per npm package.
+pub const MAX_PEOPLE: usize = 200;
+const MAX_SPEC_CHARS: usize = 256;
+
+fn npm_dependencies(doc: &Value) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for key in ["dependencies", "optionalDependencies"] {
+        let Some(o) = doc.get(key).and_then(Value::as_object) else {
+            continue;
+        };
+        for (name, spec) in o {
+            if out.len() >= MAX_DEPENDENCIES {
+                return out;
+            }
+            if out.iter().any(|(n, _)| n == name) {
+                continue;
+            }
+            let spec = spec.as_str().unwrap_or("");
+            out.push((name.clone(), spec.chars().take(MAX_SPEC_CHARS).collect()));
+        }
+    }
+    out
+}
 
 /// URL path form of an npm package name: scoped names escape the slash.
 pub fn npm_escape(name: &str) -> String {
@@ -415,6 +448,8 @@ pub fn parse_pypi_project(v: &Value) -> Option<PackageMeta> {
         latest,
         dist_tags: BTreeMap::new(),
         versions,
+        created: None,
+        people: Vec::new(),
     })
 }
 
@@ -431,7 +466,7 @@ pub fn parse_npm_packument(v: &Value) -> Option<PackageMeta> {
         })
         .unwrap_or_default();
     let time = v.get("time");
-    let versions = v
+    let versions: Vec<VersionMeta> = v
         .get("versions")
         .and_then(Value::as_object)
         .map(|o| {
@@ -476,6 +511,7 @@ pub fn parse_npm_packument(v: &Value) -> Option<PackageMeta> {
                     let attested = dist
                         .and_then(|d| d.get("attestations"))
                         .is_some_and(|a| !a.is_null());
+                    let dependencies = npm_dependencies(doc);
                     VersionMeta {
                         version: ver.clone(),
                         published,
@@ -494,18 +530,40 @@ pub fn parse_npm_packument(v: &Value) -> Option<PackageMeta> {
                         install_commands,
                         attested,
                         publisher,
+                        dependencies,
                         yanked: doc.get("deprecated").is_some_and(|d| d.is_string()),
                     }
                 })
                 .collect()
         })
         .unwrap_or_default();
+    let mut people: Vec<String> = Vec::new();
+    let maintainers = v
+        .get("maintainers")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|m| m.get("name").and_then(Value::as_str))
+        .map(str::to_string);
+    let publishers = versions
+        .iter()
+        .filter_map(|x: &VersionMeta| x.publisher.clone());
+    for p in maintainers.chain(publishers) {
+        if people.len() >= MAX_PEOPLE {
+            break;
+        }
+        if !p.is_empty() && !people.contains(&p) {
+            people.push(p);
+        }
+    }
     Some(PackageMeta {
         ecosystem: Ecosystem::Npm,
         name,
         latest: dist_tags.get("latest").cloned(),
         dist_tags,
         versions,
+        created: time.and_then(|t| t.get("created")).and_then(parse_time),
+        people,
     })
 }
 
@@ -595,6 +653,36 @@ mod tests {
         .unwrap();
         let r = p.version("1.0").unwrap();
         assert!(!r.attested && r.publisher.is_none() && r.install_commands.is_empty());
+    }
+
+    #[test]
+    fn keeps_dependencies_and_people() {
+        let v = serde_json::json!({
+            "name": "app",
+            "maintainers": [{"name": "alice", "email": "a@x"}, {"name": "bob"}],
+            "time": {"created": "2020-01-01T00:00:00.000Z", "1.0.0": "2020-01-01T00:00:00.000Z"},
+            "versions": {"1.0.0": {
+                "_npmUser": {"name": "carol"},
+                "dist": {"tarball": "t"},
+                "dependencies": {"left-pad": "^1.0.0", "x": 5},
+                "optionalDependencies": {"fsevents": "^2", "left-pad": "^9"}
+            }}
+        });
+        let m = parse_npm_packument(&v).unwrap();
+        assert_eq!(m.people, vec!["alice", "bob", "carol"]);
+        assert_eq!(
+            m.created,
+            Some("2020-01-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap())
+        );
+        // `dependencies` wins over a duplicate optional entry; a non-string spec is empty.
+        assert_eq!(
+            m.version("1.0.0").unwrap().dependencies,
+            vec![
+                ("left-pad".to_string(), "^1.0.0".to_string()),
+                ("x".to_string(), String::new()),
+                ("fsevents".to_string(), "^2".to_string()),
+            ]
+        );
     }
 
     #[test]

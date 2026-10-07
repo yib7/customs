@@ -57,7 +57,7 @@ DEFAULT_ON = RULES[:4]
 INSTALL_SCRIPTS = ("preinstall", "install", "postinstall")
 RECENT_RELEASES = 5
 DORMANT_DAYS = 365
-MAX_SCRIPT_CHARS = 1000
+MAX_SCRIPT_CHARS = 512  # registry.rs MAX_SCRIPT_CHARS
 SEMVER = re.compile(r"^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$")
 
 

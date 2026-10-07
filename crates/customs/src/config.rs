@@ -189,6 +189,9 @@ fn default_off() -> RuleSeverity {
 fn default_dormant_days() -> u32 {
     365
 }
+fn default_young_dependency_days() -> u32 {
+    7
+}
 
 /// The active policy. Field names and defaults follow DESIGN.md section 8.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -236,6 +239,17 @@ pub struct Policy {
     /// been quiet for `dormant_days` while a newer major exists.
     #[serde(default = "default_off")]
     pub version_anomaly: RuleSeverity,
+    /// npm: this version adds a dependency fetched from git, a URL or a local path, which
+    /// npm installs without asking the registry (and so without passing the proxy).
+    #[serde(default = "default_block")]
+    pub nonregistry_dependency_added: RuleSeverity,
+    /// npm: this version adds a dependency first published fewer than
+    /// `young_dependency_days` before it, by accounts that do not maintain this package, or a
+    /// dependency the registry does not know.
+    #[serde(default = "default_block")]
+    pub young_dependency_added: RuleSeverity,
+    #[serde(default = "default_young_dependency_days")]
+    pub young_dependency_days: u32,
     #[serde(default)]
     pub allow: Vec<String>,
     #[serde(default)]
@@ -260,6 +274,9 @@ impl Default for Policy {
             dormant_revival: default_warn(),
             dormant_days: default_dormant_days(),
             version_anomaly: default_off(),
+            nonregistry_dependency_added: default_block(),
+            young_dependency_added: default_block(),
+            young_dependency_days: default_young_dependency_days(),
             allow: Vec::new(),
             deny: Vec::new(),
             upstream: Upstream::default(),
@@ -397,6 +414,12 @@ impl Policy {
             return Err(ConfigError::new(
                 "dormant_days",
                 "must be between 1 and 3650 (set dormant_revival = \"off\" to disable)",
+            ));
+        }
+        if !(1..=365).contains(&self.young_dependency_days) {
+            return Err(ConfigError::new(
+                "young_dependency_days",
+                "must be between 1 and 365 (set young_dependency_added = \"off\" to disable)",
             ));
         }
         for (list, key) in [(&self.allow, "allow"), (&self.deny, "deny")] {
@@ -575,6 +598,11 @@ npm = "https://registry.npmjs.org"
         let p = Policy::from_json(r#"{"version_anomaly": "warn", "dormant_days": 90}"#).unwrap();
         assert_eq!(p.version_anomaly, RuleSeverity::Warn);
 
+        assert_eq!(p.nonregistry_dependency_added, RuleSeverity::Block);
+        assert_eq!(p.young_dependency_added, RuleSeverity::Block);
+        assert_eq!(Policy::default().young_dependency_days, 7);
+        let e = Policy::from_toml("young_dependency_days = 0").unwrap_err();
+        assert_eq!(e.key, "young_dependency_days");
         let e = Policy::from_toml("dormant_days = 0").unwrap_err();
         assert_eq!(e.key, "dormant_days");
         let e = Policy::from_json(r#"{"dormant_days": 5000}"#).unwrap_err();

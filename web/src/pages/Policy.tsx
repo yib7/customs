@@ -72,6 +72,14 @@ const HISTORY_RULE_TEXT: Record<HistoryRule, { label: string; description: strin
     label: 'Dormant package revived',
     description: 'The previous release is older than the dormancy period below.',
   },
+  nonregistry_dependency_added: {
+    label: 'Off-registry dependency added',
+    description: 'npm: this version adds a git, URL or local dependency, which npm fetches without the registry and so without this proxy.',
+  },
+  young_dependency_added: {
+    label: 'Brand-new dependency added',
+    description: 'npm: this version adds a dependency first published within the window below by accounts that do not maintain this package, or one the registry does not know.',
+  },
   version_anomaly: {
     label: 'Unusual version jump',
     description: 'More than one major version up, or a release on an old major line that had gone quiet. Noisy, so off by default.',
@@ -222,7 +230,8 @@ function PolicyForm({
     if (!errors[f as PolicyField]) errors[f as PolicyField] = msg;
   }
   const unknownServerErrors = Object.entries(serverErrors).filter(
-    ([f]) => !['mode', 'warn_threshold', 'block_threshold', 'min_age_days', 'dormant_days', 'allow', 'deny'].includes(f),
+    ([f]) =>
+      !['mode', 'warn_threshold', 'block_threshold', 'min_age_days', 'dormant_days', 'young_dependency_days', 'allow', 'deny'].includes(f),
   );
 
   const set = <K extends keyof PolicyDraft>(k: K, v: PolicyDraft[K], field?: PolicyField) => {
@@ -423,6 +432,23 @@ function PolicyForm({
             aria-describedby={errors.dormant_days ? 'dormant-days-error' : undefined}
           />
           <FieldError id="dormant-days-error">{errors.dormant_days}</FieldError>
+        </div>
+        <div className="mt-3 max-w-xs border-t border-line pt-3">
+          <label htmlFor="young-dependency-days" className="text-sm font-medium text-ink">
+            New dependency window (days)
+          </label>
+          <p className="text-xs text-muted">An added dependency first published this recently counts as brand-new.</p>
+          <input
+            id="young-dependency-days"
+            type="text"
+            inputMode="numeric"
+            className={`${inputCls} mt-2 w-28 font-mono`}
+            value={draft.youngDependencyDays}
+            onChange={(e) => set('youngDependencyDays', e.target.value, 'young_dependency_days')}
+            aria-invalid={errors.young_dependency_days ? true : undefined}
+            aria-describedby={errors.young_dependency_days ? 'young-dependency-days-error' : undefined}
+          />
+          <FieldError id="young-dependency-days-error">{errors.young_dependency_days}</FieldError>
         </div>
       </Card>
 

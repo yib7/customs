@@ -11,7 +11,7 @@ use customs_model::{Decision, Thresholds};
 use customs_scan::Ecosystem;
 
 use crate::config::{Policy, RuleSeverity, Threshold};
-use crate::history::ReleaseHistory;
+use crate::history::{is_nonregistry_spec, ReleaseHistory};
 use crate::util::{human_duration, normalize_name, registry_name};
 use crate::verdict::PolicyHit;
 
@@ -226,6 +226,26 @@ pub fn history_hits(policy: &Policy, eco: Ecosystem, h: &ReleaseHistory) -> Vec<
                     changes.join("; "),
                 );
             }
+            let off_registry: Vec<String> = cur
+                .dependencies
+                .iter()
+                .filter(|(n, s)| {
+                    is_nonregistry_spec(s)
+                        && !prev.dependencies.iter().any(|(p, q)| p == n && q == s)
+                })
+                .map(|(n, s)| format!("{n} -> {}", shown_command(s)))
+                .collect();
+            if !off_registry.is_empty() {
+                hit(
+                    "nonregistry_dependency_added",
+                    policy.nonregistry_dependency_added,
+                    format!(
+                        "dependency fetched outside the registry, new since {}: {}",
+                        prev.version,
+                        off_registry.join("; ")
+                    ),
+                );
+            }
         }
         if let (Some(c), Some(p)) = (cur.published, prev.published) {
             if c - p > dormant {
@@ -261,6 +281,44 @@ pub fn history_hits(policy: &Policy, eco: Ecosystem, h: &ReleaseHistory) -> Vec<
                     ),
                 );
             }
+        }
+    }
+
+    if npm {
+        let young = chrono::Duration::days(policy.young_dependency_days as i64);
+        let flagged: Vec<String> = h
+            .added_dependencies
+            .iter()
+            .filter_map(|d| {
+                let info = d.info.as_ref()?;
+                if !info.exists {
+                    return Some(format!("{} is not on the registry", d.name));
+                }
+                // A maintainer's own new package (platform binaries, monorepo siblings) is
+                // routine; a brand-new package from someone else is how hijacked releases
+                // pull in their payload.
+                if info.people.iter().any(|p| h.people.contains(p)) {
+                    return None;
+                }
+                let (created, published) = (info.created?, cur.published?);
+                (published - created < young).then(|| {
+                    format!(
+                        "{} was first published {} before this release",
+                        d.name,
+                        human_duration(published - created)
+                    )
+                })
+            })
+            .collect();
+        if !flagged.is_empty() {
+            hit(
+                "young_dependency_added",
+                policy.young_dependency_added,
+                format!(
+                    "new dependency from outside the maintainers: {}",
+                    flagged.join("; ")
+                ),
+            );
         }
     }
 
@@ -439,7 +497,7 @@ mod tests {
 
     // ------------------------------------------------------------ release history rules
 
-    use crate::history::release_history;
+    use crate::history::{release_history, DependencyInfo};
     use crate::registry::{parse_npm_packument, parse_pypi_project, PackageMeta};
     use serde_json::{json, Value};
 
@@ -777,6 +835,117 @@ mod tests {
             hits[0].detail.ends_with("there was no earlier 3.x release"),
             "{}",
             hits[0].detail
+        );
+    }
+
+    fn with_deps(deps: Value) -> Value {
+        let mut d = doc(Some("alice"), false, json!({}));
+        d["dependencies"] = deps;
+        d
+    }
+
+    #[test]
+    fn nonregistry_dependency_added() {
+        let m = npm(&[
+            (
+                "1.0.0",
+                "2025-01-01T00:00:00Z",
+                with_deps(json!({"a": "^1", "fork": "github:me/fork#v1"})),
+            ),
+            (
+                "1.0.1",
+                "2025-01-02T00:00:00Z",
+                with_deps(json!({"a": "^1", "fork": "github:me/fork#v1"})),
+            ),
+            (
+                "1.0.2",
+                "2025-01-03T00:00:00Z",
+                with_deps(
+                    json!({"a": "^1", "fork": "github:me/fork#v1", "setup": "github:x/y#abc"}),
+                ),
+            ),
+        ]);
+        let p = Policy::default();
+        // An unchanged git dependency is not news.
+        assert!(history_for(&p, &m, "1.0.1").is_empty());
+        let hits = history_for(&p, &m, "1.0.2");
+        assert_eq!(rules(&hits), vec!["nonregistry_dependency_added"]);
+        assert_eq!(hits[0].severity, Decision::Block);
+        assert!(
+            hits[0].detail.contains("setup -> github:x/y#abc"),
+            "{}",
+            hits[0].detail
+        );
+    }
+
+    #[test]
+    fn young_dependency_added() {
+        let mut m = npm(&[
+            (
+                "1.0.0",
+                "2025-01-01T00:00:00Z",
+                with_deps(json!({"a": "^1"})),
+            ),
+            (
+                "1.0.1",
+                "2025-03-01T00:00:00Z",
+                with_deps(json!({"a": "^1", "lure": "^1", "old": "^1", "own": "^1"})),
+            ),
+        ]);
+        m.people = vec!["alice".into()];
+        let mut h = release_history(&m, "1.0.1").unwrap();
+        let t = |s: &str| s.parse::<DateTime<Utc>>().unwrap();
+        let p = Policy::default();
+        // Not looked up yet: nothing to judge.
+        assert!(history_hits(&p, Ecosystem::Npm, &h).is_empty());
+        for d in h.added_dependencies.iter_mut() {
+            d.info = Some(match d.name.as_str() {
+                "lure" => DependencyInfo {
+                    exists: true,
+                    created: Some(t("2025-02-28T12:00:00Z")),
+                    people: vec!["stranger".into()],
+                },
+                "old" => DependencyInfo {
+                    exists: true,
+                    created: Some(t("2020-01-01T00:00:00Z")),
+                    people: vec!["someone".into()],
+                },
+                // The maintainer's own new package.
+                _ => DependencyInfo {
+                    exists: true,
+                    created: Some(t("2025-03-01T00:00:00Z")),
+                    people: vec!["alice".into()],
+                },
+            });
+        }
+        let hits = history_hits(&p, Ecosystem::Npm, &h);
+        assert_eq!(rules(&hits), vec!["young_dependency_added"]);
+        assert_eq!(
+            hits[0].detail,
+            "new dependency from outside the maintainers: lure was first published 12 hours before this release"
+        );
+        // A dependency the registry does not know.
+        h.added_dependencies[0].info = Some(DependencyInfo::default());
+        let hits = history_hits(&p, Ecosystem::Npm, &h);
+        assert!(
+            hits[0].detail.contains("lure is not on the registry"),
+            "{}",
+            hits[0].detail
+        );
+        // The window is configurable.
+        h.added_dependencies[0].info = Some(DependencyInfo {
+            exists: true,
+            created: Some(t("2025-02-20T00:00:00Z")),
+            people: vec![],
+        });
+        assert!(history_hits(&p, Ecosystem::Npm, &h).is_empty());
+        let wide = Policy {
+            young_dependency_days: 30,
+            ..Policy::default()
+        };
+        assert_eq!(
+            rules(&history_hits(&wide, Ecosystem::Npm, &h)),
+            vec!["young_dependency_added"]
         );
     }
 

@@ -209,6 +209,31 @@ fn npm_packages() -> Vec<(&'static str, &'static str, &'static [u8], String, Val
             "2024-01-01T00:00:00.000Z".into(),
             json!({"_npmUser": {"name": "attacker"}, "scripts": {"postinstall": "node bundle.js"}}),
         ),
+        // A takeover that hides its payload in dependencies: a brand-new package from a
+        // stranger and a git dependency npm would fetch without asking the registry.
+        (
+            "depjack",
+            "2.0.0",
+            b"benign depjack",
+            "2023-12-01T00:00:00.000Z".into(),
+            json!({"_npmUser": {"name": "maintainer"}, "dependencies": {"plainlib": "^0.1.0"}}),
+        ),
+        (
+            "depjack",
+            "2.0.1",
+            b"benign depjack 2.0.1",
+            "2024-01-02T00:00:00.000Z".into(),
+            json!({"_npmUser": {"name": "maintainer"}, "dependencies":
+                {"plainlib": "^0.1.0", "lure-dep": "^0.0.1"},
+                "optionalDependencies": {"@depjack/setup": "github:evil/payload#abc"}}),
+        ),
+        (
+            "lure-dep",
+            "0.0.1",
+            b"benign lure",
+            "2024-01-01T00:00:00.000Z".into(),
+            json!({"_npmUser": {"name": "stranger"}}),
+        ),
     ]
 }
 
@@ -636,6 +661,50 @@ fn rules_of(v: &Value) -> Vec<String> {
         .iter()
         .map(|h| h.as_str_rule().to_string())
         .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dependency_rules() {
+    let h = Harness::start(|_| {}).await;
+    let (s, v) = h.check("npm", "depjack", None).await;
+    assert_eq!(s, 200);
+    assert_eq!(v["decision"], "block");
+    let r = rules_of(&v);
+    assert!(
+        r.contains(&"nonregistry_dependency_added".to_string()),
+        "{v}"
+    );
+    assert!(r.contains(&"young_dependency_added".to_string()), "{v}");
+    let detail = v["policy_hits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["rule"] == "young_dependency_added")
+        .unwrap()["detail"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        detail.contains("lure-dep was first published 24 hours before"),
+        "{detail}"
+    );
+    // The proxy applies the same rules to the tarball.
+    let r = h.get("/npm/depjack/-/depjack-2.0.1.tgz").await;
+    assert_eq!(r.status(), 403);
+    h.stop().await;
+
+    // Both rules can be turned off; the earlier release never triggers them.
+    let h = Harness::start(|p| {
+        p.nonregistry_dependency_added = RuleSeverity::Off;
+        p.young_dependency_added = RuleSeverity::Off;
+    })
+    .await;
+    let (_, v) = h.check("npm", "depjack", None).await;
+    let r = rules_of(&v);
+    assert!(!r.iter().any(|x| x.contains("dependency")), "{v}");
+    let (_, v) = h.check("npm", "depjack", Some("2.0.0")).await;
+    assert!(rules_of(&v).is_empty(), "{v}");
+    h.stop().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

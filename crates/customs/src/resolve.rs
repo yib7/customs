@@ -413,6 +413,8 @@ mod tests {
                     ..Default::default()
                 })
                 .collect(),
+            created: None,
+            people: Vec::new(),
         }
     }
 

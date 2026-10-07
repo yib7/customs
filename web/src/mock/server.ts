@@ -190,7 +190,15 @@ export class MockServer {
       // validation errors can be exercised.
       errors.push({ field: 'min_age_days', message: 'min_age_days must be at most 365 (server limit)' });
     }
-    for (const f of ['provenance_dropped', 'install_script_added', 'publisher_changed', 'dormant_revival', 'version_anomaly'] as const) {
+    for (const f of [
+      'provenance_dropped',
+      'install_script_added',
+      'publisher_changed',
+      'dormant_revival',
+      'version_anomaly',
+      'nonregistry_dependency_added',
+      'young_dependency_added',
+    ] as const) {
       const v = body[f];
       if (v !== undefined && v !== 'off' && v !== 'warn' && v !== 'block') {
         errors.push({ field: f, message: `${f} must be "off", "warn" or "block"` });
@@ -199,6 +207,10 @@ export class MockServer {
     const dormant = body.dormant_days;
     if (dormant !== undefined && (typeof dormant !== 'number' || !Number.isInteger(dormant) || dormant < 1 || dormant > 3650)) {
       errors.push({ field: 'dormant_days', message: 'dormant_days must be between 1 and 3650' });
+    }
+    const young = body.young_dependency_days;
+    if (young !== undefined && (typeof young !== 'number' || !Number.isInteger(young) || young < 1 || young > 365)) {
+      errors.push({ field: 'young_dependency_days', message: 'young_dependency_days must be between 1 and 365' });
     }
     for (const f of ['allow', 'deny'] as const) {
       const list = body[f];

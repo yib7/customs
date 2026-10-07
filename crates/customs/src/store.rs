@@ -510,6 +510,10 @@ pub fn rule_label(rule: &str) -> String {
         "publisher_changed" => "Release published by a new account".into(),
         "dormant_revival" => "First release after a long dormancy".into(),
         "version_anomaly" => "Unusual version jump".into(),
+        "nonregistry_dependency_added" => {
+            "Release added a dependency from outside the registry".into()
+        }
+        "young_dependency_added" => "Release added a brand-new dependency".into(),
         other => other.to_string(),
     }
 }

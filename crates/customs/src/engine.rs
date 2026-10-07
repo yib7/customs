@@ -18,8 +18,8 @@ use customs_scan::{scan_archive, Ecosystem, Evidence, ScanError, ScanOptions, Sc
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, OnceCell};
 
-use crate::config::Policy;
-use crate::history::{release_history, ReleaseHistory};
+use crate::config::{Policy, RuleSeverity};
+use crate::history::{release_history, DependencyInfo, ReleaseHistory, MAX_ADDED_LOOKUPS};
 use crate::metrics::Metrics;
 use crate::policy::{effective_thresholds, evaluate, PolicyContext};
 use crate::registry::{FetchError, FileMeta, Registry, VersionMeta};
@@ -347,6 +347,38 @@ impl Engine {
         })
     }
 
+    /// Looks up each registry dependency a release added (npm), for
+    /// `young_dependency_added`. A failed lookup leaves that dependency unjudged.
+    async fn lookup_added_dependencies(&self, policy: &Policy, h: &mut ReleaseHistory) {
+        if policy.young_dependency_added == RuleSeverity::Off || h.added_dependencies.is_empty() {
+            return;
+        }
+        let lookups = h
+            .added_dependencies
+            .iter()
+            .take(MAX_ADDED_LOOKUPS)
+            .map(|d| {
+                self.registry
+                    .package_meta(&policy.upstream, Ecosystem::Npm, &d.name)
+            })
+            .collect::<Vec<_>>();
+        let results = futures::future::join_all(lookups).await;
+        for (d, r) in h.added_dependencies.iter_mut().zip(results) {
+            d.info = match r {
+                Ok(Some(m)) => Some(DependencyInfo {
+                    exists: true,
+                    created: m.created,
+                    people: m.people.clone(),
+                }),
+                Ok(None) => Some(DependencyInfo::default()),
+                Err(e) => {
+                    tracing::debug!(dependency = %d.name, error = %e, "dependency lookup failed");
+                    None
+                }
+            };
+        }
+    }
+
     /// Registry facts for an artifact requested through the proxy. Failures only cost the
     /// metadata rules, so they are logged and otherwise ignored.
     async fn artifact_meta(&self, policy: &Policy, req: &ArtifactRequest) -> MetaFacts {
@@ -377,6 +409,9 @@ impl Engine {
                         m.version(version).cloned()
                     })
                 });
+        }
+        if let Some(h) = facts.history.as_mut() {
+            self.lookup_added_dependencies(policy, h).await;
         }
         if req.ecosystem == Ecosystem::Pypi && !matches!(result, Ok(Some(_))) {
             result = self
@@ -730,11 +765,15 @@ impl Engine {
             .version(&version)
             .cloned()
             .ok_or_else(|| EngineError::Unresolvable(format!("{name} has no version {version}")))?;
+        let mut history = release_history(&meta, &version);
+        if let Some(h) = history.as_mut() {
+            self.lookup_added_dependencies(&policy, h).await;
+        }
         let facts = MetaFacts {
             exists: true,
             published: vm.published,
             install_scripts: vm.install_scripts.clone(),
-            history: release_history(&meta, &version),
+            history,
         };
         let Some(file) = choose_file(eco, &vm.files) else {
             return Err(EngineError::NotFound(format!(

@@ -67,6 +67,24 @@ fn rule(id: &str) -> Rule {
             "The scanner rejected the archive, so the malware classifier could not inspect its code.",
             "warning",
         ),
+        "customs/install-script-added" => (
+            "InstallScriptAdded",
+            "Release added or changed an install script",
+            "This version adds an npm preinstall, install, or postinstall script, or changes its command, compared with the previous release. Account takeovers usually ship their payload this way.",
+            "error",
+        ),
+        "customs/nonregistry-dependency-added" => (
+            "NonRegistryDependencyAdded",
+            "Release added a dependency from outside the registry",
+            "This version adds a git, URL, or local-path dependency. npm fetches it without the registry, so no registry-side check sees its code.",
+            "error",
+        ),
+        "customs/young-dependency-added" => (
+            "YoungDependencyAdded",
+            "Release added a brand-new dependency",
+            "This version adds a dependency first published days before it by accounts that do not maintain the package, or one the registry does not know. Hijacked releases pull in their payload this way.",
+            "error",
+        ),
         "customs/unavailable" => (
             "UnavailableVersion",
             "Pinned version is not available on the registry",
@@ -414,6 +432,15 @@ mod tests {
     #[test]
     fn rule_ids_for_policy_rules() {
         assert_eq!(policy_rule_id("deny"), "customs/deny-list");
+        for (policy, name) in [
+            ("install_script_added", "InstallScriptAdded"),
+            ("nonregistry_dependency_added", "NonRegistryDependencyAdded"),
+            ("young_dependency_added", "YoungDependencyAdded"),
+        ] {
+            let r = rule(&policy_rule_id(policy));
+            assert_eq!(r.name, name);
+            assert_eq!(r.level, "error");
+        }
         assert_eq!(
             policy_rule_id("block_install_scripts_from_new"),
             "customs/install-scripts-from-new-package"

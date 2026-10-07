@@ -114,7 +114,14 @@ export type PolicyMode = 'enforce' | 'monitor';
 export type RuleSeverity = 'off' | 'warn' | 'block';
 
 /** Policy keys of the release history rules. */
-export type HistoryRule = 'provenance_dropped' | 'install_script_added' | 'publisher_changed' | 'dormant_revival' | 'version_anomaly';
+export type HistoryRule =
+  | 'provenance_dropped'
+  | 'install_script_added'
+  | 'publisher_changed'
+  | 'dormant_revival'
+  | 'version_anomaly'
+  | 'nonregistry_dependency_added'
+  | 'young_dependency_added';
 
 export interface Policy {
   mode: PolicyMode;
@@ -129,6 +136,9 @@ export interface Policy {
   dormant_revival: RuleSeverity;
   dormant_days: number;
   version_anomaly: RuleSeverity;
+  nonregistry_dependency_added: RuleSeverity;
+  young_dependency_added: RuleSeverity;
+  young_dependency_days: number;
   allow: string[];
   deny: string[];
   upstream: Record<string, string>;

@@ -467,7 +467,8 @@ effective ones (policy overrides applied). Policy `severity` is `allow` for info
 hits (`allow`, `not_scanned`), else `warn` or `block`. Rules: `deny`, `allow`,
 `block_nonexistent`, `min_age_days`, `block_install_scripts_from_new`, the release history
 rules of section 8 (`provenance_dropped`, `install_script_added`, `publisher_changed`,
-`dormant_revival`, `version_anomaly`), `scan_error` (scanner rejected the archive, warn),
+`dormant_revival`, `version_anomaly`, `nonregistry_dependency_added`,
+`young_dependency_added`), `scan_error` (scanner rejected the archive, warn),
 `not_scanned` (archive above the scan size limit).
 `reasons` mix model features (positive contributions to the stacked logit, largest first)
 and name signals (`name_dist1`, `name_contains_popular_token`, ...). In `monitor` mode the
@@ -555,6 +556,9 @@ publisher_changed = "warn"     # npm: publisher of none of the previous 5 releas
 dormant_revival = "warn"       # previous release is more than dormant_days older
 dormant_days = 365
 version_anomaly = "off"        # major version jump, or a release on a long-quiet old major
+nonregistry_dependency_added = "block"  # npm: new git/URL/file dependency since the previous release
+young_dependency_added = "block"        # npm: new dependency first published days before, by strangers
+young_dependency_days = 7
 allow = ["pypi:requests", "npm:react"]  # always allow (exact names)
 deny  = ["npm:event-stream@3.3.6"]
 [upstream]
@@ -589,6 +593,8 @@ itself a prerelease. A version without a publish time gets no history rules.
 | `publisher_changed` | npm | `_npmUser.name` differs from every known publisher of the previous 5 releases |
 | `dormant_revival` | npm, PyPI | the previous release is more than `dormant_days` (1 to 3650) older |
 | `version_anomaly` | npm, PyPI | the major version is more than one above the highest earlier version, or the release extends an older major line while a newer major exists and that line had no release for `dormant_days` (or never had one) |
+| `nonregistry_dependency_added` | npm | a `dependencies` or `optionalDependencies` entry whose spec fetches code outside the registry (`git+`, `github:`, `owner/repo`, `http(s):`, `file:`, `link:` and the like) is new or changed since the previous release |
+| `young_dependency_added` | npm | a dependency new since the previous release does not exist on the registry, or was first published less than `young_dependency_days` (1 to 365) before this release, and shares no maintainer or publisher with the package |
 
 These are heuristics with known false positives: maintainers move publishing on or off CI
 (provenance comes and goes), add native builds (`install: node-gyp rebuild`), hand packages

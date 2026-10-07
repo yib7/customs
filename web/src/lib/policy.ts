@@ -7,6 +7,8 @@ export const HISTORY_RULES: readonly HistoryRule[] = [
   'publisher_changed',
   'dormant_revival',
   'version_anomaly',
+  'nonregistry_dependency_added',
+  'young_dependency_added',
 ];
 
 export type PolicyField =
@@ -15,6 +17,7 @@ export type PolicyField =
   | 'block_threshold'
   | 'min_age_days'
   | 'dormant_days'
+  | 'young_dependency_days'
   | 'allow'
   | 'deny';
 
@@ -32,6 +35,7 @@ export interface PolicyDraft {
   block_install_scripts_from_new: boolean;
   history: Record<HistoryRule, RuleSeverity>;
   dormantDays: string;
+  youngDependencyDays: string;
   allow: string[];
   deny: string[];
 }
@@ -68,8 +72,11 @@ export function policyToDraft(p: Policy): PolicyDraft {
       publisher_changed: p.publisher_changed,
       dormant_revival: p.dormant_revival,
       version_anomaly: p.version_anomaly,
+      nonregistry_dependency_added: p.nonregistry_dependency_added,
+      young_dependency_added: p.young_dependency_added,
     },
     dormantDays: String(p.dormant_days),
+    youngDependencyDays: String(p.young_dependency_days),
     allow: [...p.allow],
     deny: [...p.deny],
   };
@@ -117,6 +124,12 @@ export function validateDraft(d: PolicyDraft): DraftResult {
     errors.dormant_days = 'Enter a whole number of days from 1 to 3650.';
   }
 
+  const youngText = d.youngDependencyDays.trim();
+  const young = Number(youngText);
+  if (!/^\d+$/.test(youngText) || young < 1 || young > 365) {
+    errors.young_dependency_days = 'Enter a whole number of days from 1 to 365.';
+  }
+
   const badAllow = d.allow.find((e) => validateListEntry(e) !== null);
   if (badAllow !== undefined) errors.allow = `Invalid entry: ${badAllow.slice(0, 80)}`;
   const badDeny = d.deny.find((e) => validateListEntry(e) !== null);
@@ -139,6 +152,7 @@ export function validateDraft(d: PolicyDraft): DraftResult {
       block_install_scripts_from_new: d.block_install_scripts_from_new,
       ...d.history,
       dormant_days: dormant,
+      young_dependency_days: young,
       allow: d.allow.map((e) => e.trim()),
       deny: d.deny.map((e) => e.trim()),
     },

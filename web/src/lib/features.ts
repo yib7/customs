@@ -80,6 +80,8 @@ const POLICY_RULES: Record<string, string> = {
   publisher_changed: 'Release published by an account new to the package',
   dormant_revival: 'First release after a long dormancy',
   version_anomaly: 'Unusual version jump',
+  nonregistry_dependency_added: 'Release added a dependency fetched outside the registry',
+  young_dependency_added: 'Release added a brand-new dependency from outside the maintainers',
   deny: 'Matches the deny list',
   allow: 'Matches the allow list',
   model: 'Model risk above threshold',

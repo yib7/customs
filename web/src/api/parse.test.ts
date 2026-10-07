@@ -190,6 +190,9 @@ describe('parsePolicy', () => {
       dormant_revival: 'warn',
       dormant_days: 730,
       version_anomaly: 'off',
+      nonregistry_dependency_added: 'block',
+      young_dependency_added: 'block',
+      young_dependency_days: 7,
       allow: ['pypi:requests'],
       deny: ['npm:event-stream@3.3.6'],
       upstream: { npm: 'https://registry.npmjs.org' },
@@ -204,6 +207,9 @@ describe('parsePolicy', () => {
     expect(p.provenance_dropped).toBe('warn');
     expect(p.version_anomaly).toBe('off');
     expect(p.dormant_days).toBe(365);
+    expect(p.install_script_added).toBe('block');
+    expect(p.young_dependency_added).toBe('block');
+    expect(p.young_dependency_days).toBe(7);
   });
 });
 

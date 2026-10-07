@@ -472,6 +472,9 @@ export const INITIAL_POLICY = {
   dormant_revival: 'warn',
   dormant_days: 365,
   version_anomaly: 'off',
+  nonregistry_dependency_added: 'block',
+  young_dependency_added: 'block',
+  young_dependency_days: 7,
   allow: ['pypi:requests', 'npm:react'],
   deny: ['npm:event-stream@3.3.6'],
   upstream: {

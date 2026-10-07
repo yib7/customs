@@ -1,6 +1,7 @@
 //! Release history around one requested version, for the release history rules in
 //! [`crate::policy`]: `provenance_dropped`, `install_script_added`, `publisher_changed`,
-//! `dormant_revival`, and `version_anomaly`.
+//! `dormant_revival`, `version_anomaly`, `nonregistry_dependency_added`, and
+//! `young_dependency_added`.
 //!
 //! Account takeovers (the 2025 chalk/debug compromise, the Shai-Hulud worm) publish a new
 //! version of a real library with a payload buried in legitimate code, which is where the
@@ -30,6 +31,8 @@ pub struct ReleaseFacts {
     pub publisher: Option<String>,
     /// `(script, command)` for npm install scripts.
     pub install_commands: Vec<(String, String)>,
+    /// npm `dependencies` and `optionalDependencies` as `(name, spec)`.
+    pub dependencies: Vec<(String, String)>,
 }
 
 impl ReleaseFacts {
@@ -40,8 +43,64 @@ impl ReleaseFacts {
             attested: v.attested,
             publisher: v.publisher.clone(),
             install_commands: v.install_commands.clone(),
+            dependencies: v.dependencies.clone(),
         }
     }
+}
+
+/// Registry facts about a dependency the requested release added, filled in by the engine
+/// with one metadata lookup per added dependency.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct DependencyInfo {
+    /// False when the registry does not know the name.
+    pub exists: bool,
+    /// When the dependency was first published.
+    pub created: Option<DateTime<Utc>>,
+    /// Its maintainers and publishers.
+    pub people: Vec<String>,
+}
+
+/// A registry dependency that the requested release lists and the previous release did not.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AddedDependency {
+    pub name: String,
+    pub spec: String,
+    /// `None` until the engine looks it up (or when the lookup failed).
+    pub info: Option<DependencyInfo>,
+}
+
+/// The most added dependencies looked up per release; real releases add a handful.
+pub const MAX_ADDED_LOOKUPS: usize = 20;
+
+/// True for npm dependency specs that are not fetched from the registry: git, GitHub and
+/// other hosted-git shorthands, URLs, and local paths. npm installs these without asking the
+/// registry, so they bypass the proxy and its scan.
+pub fn is_nonregistry_spec(spec: &str) -> bool {
+    const PREFIXES: [&str; 10] = [
+        "git+",
+        "git:",
+        "github:",
+        "gitlab:",
+        "bitbucket:",
+        "gist:",
+        "http:",
+        "https:",
+        "file:",
+        "link:",
+    ];
+    let s = spec.trim();
+    if PREFIXES.iter().any(|p| s.starts_with(p)) {
+        return true;
+    }
+    // `owner/repo` and `owner/repo#ref`: GitHub shorthand.
+    let repo = s.split('#').next().unwrap_or("");
+    let mut parts = repo.split('/');
+    let ok = |p: &str| {
+        !p.is_empty()
+            && p.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    };
+    matches!((parts.next(), parts.next(), parts.next()), (Some(a), Some(b), None) if ok(a) && ok(b) && !a.starts_with('@'))
 }
 
 /// An earlier release, as `version_anomaly` sees it.
@@ -71,6 +130,10 @@ pub struct ReleaseHistory {
     pub highest_prior: Option<VersionRef>,
     /// The most recently published earlier release with the same major version.
     pub line_previous: Option<VersionRef>,
+    /// npm: maintainers and publishers of the package itself.
+    pub people: Vec<String>,
+    /// npm: registry dependencies new since the previous release, sorted by name.
+    pub added_dependencies: Vec<AddedDependency>,
 }
 
 fn is_prerelease(eco: Ecosystem, v: &str) -> bool {
@@ -138,9 +201,32 @@ pub fn release_history(meta: &PackageMeta, version: &str) -> Option<ReleaseHisto
             .find(|v| major(eco, &v.version) == Some(m))
             .and_then(|v| version_ref(eco, v))
     });
+    let added_dependencies = match earlier.first() {
+        Some(prev) => {
+            let mut added: Vec<AddedDependency> = cur
+                .dependencies
+                .iter()
+                .filter(|(n, s)| {
+                    n != &meta.name
+                        && !is_nonregistry_spec(s)
+                        && !prev.dependencies.iter().any(|(p, _)| p == n)
+                })
+                .map(|(n, s)| AddedDependency {
+                    name: n.clone(),
+                    spec: s.clone(),
+                    info: None,
+                })
+                .collect();
+            added.sort_by(|a, b| a.name.cmp(&b.name));
+            added
+        }
+        None => Vec::new(),
+    };
     Some(ReleaseHistory {
         current: ReleaseFacts::of(cur),
         previous: earlier.first().map(|v| ReleaseFacts::of(v)),
+        people: meta.people.clone(),
+        added_dependencies,
         recent_publishers,
         current_major,
         highest_prior,
@@ -153,6 +239,60 @@ mod tests {
     use super::*;
     use crate::registry::parse_npm_packument;
     use serde_json::{json, Value};
+
+    #[test]
+    fn nonregistry_specs() {
+        for s in [
+            "github:tanstack/router#79ac49e",
+            "git+https://github.com/a/b.git",
+            "git://github.com/a/b",
+            "https://example.com/x.tgz",
+            "file:../local",
+            "owner/repo",
+            "owner/repo#main",
+            "gitlab:a/b",
+        ] {
+            assert!(is_nonregistry_spec(s), "{s}");
+        }
+        for s in [
+            "^1.2.3",
+            "1.x || >=2.5.0",
+            "latest",
+            "npm:other@^1",
+            "*",
+            "",
+            "@scope/name",
+            ">=1 <2",
+        ] {
+            assert!(!is_nonregistry_spec(s), "{s}");
+        }
+    }
+
+    #[test]
+    fn added_dependencies_compare_with_the_previous_release() {
+        let v = serde_json::json!({
+            "name": "app",
+            "time": {"1.0.0": "2024-01-01T00:00:00Z", "1.0.1": "2024-02-01T00:00:00Z"},
+            "versions": {
+                "1.0.0": {"dist": {"tarball": "t"}, "dependencies": {"a": "^1"}},
+                "1.0.1": {"dist": {"tarball": "t"}, "dependencies":
+                    {"a": "^2", "z-new": "^1", "b-new": "^1", "app": "^1", "g": "github:x/y"}}
+            }
+        });
+        let m = parse_npm_packument(&v).unwrap();
+        let h = release_history(&m, "1.0.1").unwrap();
+        // Sorted; version bumps, self references and off-registry specs are not additions.
+        let names: Vec<&str> = h
+            .added_dependencies
+            .iter()
+            .map(|d| d.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["b-new", "z-new"]);
+        assert!(release_history(&m, "1.0.0")
+            .unwrap()
+            .added_dependencies
+            .is_empty());
+    }
 
     type Row<'a> = (&'a str, &'a str, Option<&'a str>, bool, Option<&'a str>);
 
