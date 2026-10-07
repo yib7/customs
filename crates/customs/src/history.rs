@@ -9,9 +9,10 @@
 //! release lost the provenance attestation its predecessors had, gained an install script,
 //! came from a different account, or broke a long silence. These are heuristics with known
 //! false positives (maintainers move CI, add native builds, hand a package over, revive an
-//! old project), which is why most rules warn by default. `install_script_added` blocks:
-//! measured on npm, it fires on 0.02% of legitimate releases and on at least 37% of
-//! compromised ones (DESIGN.md section 8).
+//! old project), which is why most rules warn by default. `install_script_added` and the two
+//! dependency rules block: measured on npm, together they fire on 5 of 14,897 legitimate
+//! releases and lift the share of test-period compromised releases blocked from 40% to at
+//! least 95% (DESIGN.md section 8).
 
 use chrono::{DateTime, Utc};
 use customs_scan::Ecosystem;

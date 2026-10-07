@@ -14,15 +14,15 @@ are stopped before anything is downloaded.
 
 | | Customs | GuardDog 3.2 |
 |---|---:|---:|
-| ROC AUC | **0.969** | 0.837 |
-| Malware caught at GuardDog's own false-positive rate (18%) | **95.5%** | 79.4% |
-| Malware caught at GuardDog's `high_risk` false-positive rate (5%) | **85.9%** | 49.7% |
-| Malware flagged (warn) at a 0.7% false-positive rate | **78.3%** | |
+| ROC AUC | **0.972** | 0.837 |
+| Malware caught at GuardDog's own false-positive rate (18%) | **96.1%** | 79.4% |
+| Malware caught at GuardDog's `high_risk` false-positive rate (5%) | **87.3%** | 49.7% |
+| Malware flagged (warn) at a 0.7% false-positive rate | **79.2%** | |
 | Malware auto-blocked at a 0.07% false-positive rate | **66.5%** | |
 
 The Rust binary reproduces the offline evaluation exactly: replaying 706 held-out packages
 through the live proxy gave identical decisions to the Python pipeline (largest risk
-difference 2e-7) at about 56 ms per package. Under load, 16 concurrent clients get 61
+difference 1e-7) at about 60 ms per package. Under load, 16 concurrent clients get 61
 cold scans a second (median 34 ms) and 809 cached verdicts a second. Full report:
 [`docs/EVALUATION.md`](docs/EVALUATION.md).
 
@@ -119,18 +119,21 @@ reads the code. The policy engine compares each release with the ones before it 
 npm provenance disappearing, an install script appearing or changing, a new publisher, a
 project waking up after a year of silence, a new dependency fetched from git or a URL, or a
 new dependency that strangers published days before the release (`docs/DESIGN.md`, section
-8). The install script and dependency rules block by default: together they fired on 4 of
-14,897 legitimate releases, and they lift the share of test-period compromised npm releases
-blocked from 41% to at least 70%. The rest warn.
+8). The install script and dependency rules block by default, and each compares a release
+with the one before it and with the newest release at least a day older, so a burst of
+malicious versions published within hours cannot hide the change. Together they fired on 5
+of 14,897 legitimate releases and lift the share of test-period compromised npm releases
+blocked from 40% to at least 95%: of 17 groups of three or more releases (one npm scope or
+name prefix each), 15 are blocked in full. The rest warn.
 
 ## Results
 
 | Test set (time split, malware found from 2026-02-13) | Value (95% CI) |
 |---|---|
-| ROC AUC | 0.969 (0.964 to 0.974) |
-| Flagged at the warn threshold (target FPR 1%) | 78.3% (74.9 to 81.7), realized FPR 0.74% |
+| ROC AUC | 0.972 (0.965 to 0.977) |
+| Flagged at the warn threshold (target FPR 1%) | 79.2% (76.0 to 82.5), realized FPR 0.69% |
 | Blocked at the block threshold (target FPR 0.1%) | 66.5% (62.5 to 70.3), realized FPR 0.07% |
-| Never-seen campaigns (no near-duplicate in training), ROC AUC | 0.968 |
+| Never-seen campaigns (no near-duplicate in training), ROC AUC | 0.971 |
 | Benign false positives at block, popular packages | 0 of 2,064 (top and mid tiers) |
 
 ![Verdict for a real PyPI stealer, blocked with the code evidence](docs/screenshots/verdict-light.png)
@@ -142,12 +145,12 @@ training was augmented with disguised malware. Detection at the warn threshold:
 | Evasion | Used in augmentation | Before | After |
 |---|---|---:|---:|
 | none (clean) | | 80.0% | 77.5% |
-| starjacking (README, repo link and description copied from a real project) | yes | 57.9% | **73.8%** |
-| fake README and repository metadata | yes | 63.2% | **74.9%** |
-| payload buried inside a real library's source | yes | 68.0% | **80.6%** |
-| string literals split into concatenations | no | 78.0% | 76.8% |
+| starjacking (README, repo link and description copied from a real project) | yes | 57.9% | **73.9%** |
+| fake README and repository metadata | yes | 63.2% | **74.6%** |
+| payload buried inside a real library's source | yes | 68.0% | **77.9%** |
+| string literals split into concatenations | no | 78.0% | 76.4% |
 | install script moved behind an import | no | 79.9% | 77.5% |
-| payload wrapped in base64 + exec | no | 91.6% | 92.5% |
+| payload wrapped in base64 + exec | no | 91.6% | 94.0% |
 
 **A second source.** The test sets above hold one collector's malware.
 [MalRegistry](https://github.com/lxyeternal/pypi_malregistry) (ASE 2023) was gathered by
@@ -157,7 +160,7 @@ campaign into a dev half and a held-out half that is never looked at or trained 
 | Held-out MalRegistry campaigns (2,174 archives, 660 clusters) | Before | After |
 |---|---:|---:|
 | Caught at a 0.5% false-positive rate (code only, no name model) | 37.4% | **48.7%** |
-| Warned or blocked, one sample per campaign | 59.2% | **83.3%** |
+| Warned or blocked, one sample per campaign | 59.2% | **83.0%** |
 
 *Before* is the model trained on one collector; *after* adds the dev half to training (the
 first row is a controlled retrain; the second is the shipped model). The gain grows with
@@ -165,18 +168,23 @@ the share of dev campaigns added (43.0% at a quarter, 46.1% at half). A round of
 fixes driven by dev-half error analysis, by contrast, helped the dev half and barely moved
 the held-out one, which is why the held-out half exists.
 
-Weighting each campaign equally, the shipped models catch 69.9% / 81.0% / 83.8% of held-out
+Weighting each campaign equally, the shipped models catch 72.3% / 80.3% / 83.5% of held-out
 campaigns at 0.1% / 0.5% / 1% false positives. Per-archive numbers are fragile here: one
-campaign is 901 near-identical archives (41% of the held-out half) scoring about 0.97, and
-per-archive recall at 0.5% reads 91.0% for the shipped model only because that one score
-clears the threshold.
+campaign is 901 near-identical archives (41% of the held-out half), so per-archive recall
+moves by 41 points whenever a retrain carries that one score across a threshold (at 0.5% it
+read 91.0% for the previous model and 76.0% for this one, while the campaign-weighted
+number moved from 81.0% to 80.3%).
 
 **Known weak spots** (from the report): compromised releases of popular libraries (a
-payload inside thousands of lines of legitimate code, ROC AUC 0.852, 40% blocked) and very
+payload inside thousands of lines of legitimate code, ROC AUC 0.901, 38% blocked) and very
 large packages. Blocking of compromised releases rose from 31% to 46% once the scanner
 parsed `bun run index.js` correctly and followed hooks that call other scripts
-(`npm run setup`); retrains with different seeds block between 37% and 47% of them, so
-single-run differences of a few points there are noise. Packages whose payload is a
+(`npm run setup`); retrains with different seeds block between 36% and 43% of them, so
+single-run differences of a few points there are noise. Error analysis of missed takeovers
+raised their ROC AUC from 0.852 to 0.901: npm installs a package with a `binding.gyp` by
+running node-gyp, which executes commands embedded in that file, and an archive layout that
+bundles the published wheel beside a clean source checkout had the scanner reading the clean
+copy. Packages whose payload is a
 compiled binary are the largest group of misses with no code signal, and strings inside
 those binaries do not separate malware from benign native modules. The policy rules
 (minimum package age, install scripts in new packages, release history) are the backstop.
@@ -211,9 +219,9 @@ methodology, is in [`docs/EVALUATION.md`](docs/EVALUATION.md).
   registry and requests it through the real binary. It caught four train/serve skews
   that unit tests missed (a name-encoding label leak in the source data, CNN pooling over
   batch padding, the CNN skipped on empty token streams in Rust, and a feature derived
-  from the archive file name); after the fixes the binary matches the evaluation to 2e-7.
+  from the archive file name); after the fixes the binary matches the evaluation to 1e-7.
 * **Seed noise measured.** Five retrains that differ only in random seed give ROC AUC
-  0.968 to 0.969 but block recall 63% to 69%, because the block threshold rests on two or
+  0.968 to 0.969 but block recall 61% to 70%, because the block threshold rests on two or
   three validation packages. Model changes are judged against that spread. One scanner
   fix (re-rooting packages nested beside a source checkout) lowered the headline from
   0.972 to 0.969: scoring the old and new models on the corrected features gives 0.969

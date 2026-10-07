@@ -617,8 +617,8 @@ itself a prerelease. A version without a publish time gets no history rules.
 | `publisher_changed` | npm | `_npmUser.name` differs from every known publisher of the previous 5 releases |
 | `dormant_revival` | npm, PyPI | the previous release is more than `dormant_days` (1 to 3650) older |
 | `version_anomaly` | npm, PyPI | the major version is more than one above the highest earlier version, or the release extends an older major line while a newer major exists and that line had no release for `dormant_days` (or never had one) |
-| `nonregistry_dependency_added` | npm | a `dependencies` or `optionalDependencies` entry whose spec fetches code outside the registry (`git+`, `github:`, `owner/repo`, `http(s):`, `file:`, `link:` and the like) is new or changed since the previous release |
-| `young_dependency_added` | npm | a dependency new since the previous release does not exist on the registry, or was first published less than `young_dependency_days` (1 to 365) before this release, and shares no maintainer or publisher with the package |
+| `nonregistry_dependency_added` | npm | a `dependencies` or `optionalDependencies` entry whose spec fetches code outside the registry (`git+`, `github:`, `owner/repo`, `http(s):`, `file:`, `link:` and the like) is new or changed since the previous release, or since the newest release at least 24 hours older |
+| `young_dependency_added` | npm | a dependency new since the previous release (or since the newest release at least 24 hours older) does not exist on the registry, or was first published less than `young_dependency_days` (1 to 365) before this release, and shares no maintainer or publisher with the package |
 
 These are heuristics with known false positives: maintainers move publishing on or off CI
 (provenance comes and goes), add native builds (`install: node-gyp rebuild`), hand packages
@@ -629,31 +629,38 @@ packages:
 
 | Rule | Default | Compromised releases | Benign releases |
 |---|---|---:|---:|
-| `install_script_added` | block | 38% to 62% | 0.02% |
+| `install_script_added` | block | 69% to 72% | 0.03% |
 | `provenance_dropped` | warn | unknown (most malicious versions were unpublished) | 0.19% |
 | `publisher_changed` | warn | unknown (same) | 1.06% |
 | `dormant_revival` | warn | 16% | 0.50% |
 | `version_anomaly` | off | 3% | 0.09% |
-| `nonregistry_dependency_added` | block | 4% to 40% (unknown where the previous release was unpublished) | 0 of 14,897 |
+| `nonregistry_dependency_added` | block | 9% to 40% (unknown where an earlier release was unpublished) | 0 of 14,897 |
 | `young_dependency_added` | block | 6% to 42% (same) | 1 of 14,897 |
 
 `install_script_added` blocks because it is both common in takeovers and rare in
-legitimate releases: 3 of 14,897, well under the 0.1% budget of the model's block
+legitimate releases: 4 of 14,897, well under the 0.1% budget of the model's block
 threshold. On the compromised npm releases of the test period it raises the share blocked
-from 41% to at least 55%. The others warn (and `version_anomaly`, which fires on releases
+from 40% to at least 76%. Comparing with the settled release (the newest one at least 24
+hours older) as well as the previous one matters here: attackers publish several malicious
+versions within hours, and against the previous release alone the second one shows no
+change. Before that comparison, and before an added root `binding.gyp` counted as an added
+install script (npm runs `node-gyp rebuild` for it), the rule fired on 38% of compromised
+releases; now it fires on 69%, while legitimate releases went from 3 to 4. The others warn (and `version_anomaly`, which fires on releases
 the model already flags, is off); the model still judges the archive itself, and `block` is
 available for teams that would rather review such releases first. Provenance is weaker
 evidence than it looks: an attacker who takes over the project's CI publishes with valid
 provenance, and 2 of the 3 still-listed compromised releases that followed an attested
-release carry it. The Python replay of the rules matches `customs check` on 105 of 105
+release carry it. The Python replay of the rules matches `customs check` on 107 of 107
 sampled releases.
 
 The two dependency rules cover takeovers whose payload arrives through a dependency, which
 leaves nothing for the scanner in the package's own archive: the Mastra wave added
 `easy-day-js`, a package published the day before, the axios compromise added
 `plain-crypto-js`, and the TanStack wave added an optional dependency on a GitHub commit.
-On the 70 test-period compromised npm releases the model lets through, they catch 24, and
-with them the share blocked rises from 41% to at least 70%. A new dependency is exempt from
+Both compare with the settled release too. On the 54 test-period compromised npm releases
+the model lets through, they catch 28, and with every blocking rule the share blocked rises
+from 40% to between 95% and 98% (the range covers earlier releases that were unpublished
+and whose facts are unknown), at a cost of 5 of 14,897 legitimate releases. A new dependency is exempt from
 `young_dependency_added` when it shares a maintainer or publisher with the package, since
 maintainers routinely publish new platform or sibling packages alongside a release. The
 proxy fetches the packuments of at most 20 added dependencies per release, concurrently and
