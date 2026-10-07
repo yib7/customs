@@ -1,0 +1,431 @@
+{
+ "cases": [
+  {
+   "ecosystem": "pypi",
+   "features": {
+    "all_url": 2.626,
+    "has_setup_py": 1.681,
+    "inst_download_exec": 0.5,
+    "inst_env_access": 0.0,
+    "inst_exfil_endpoint": 0.0,
+    "inst_max_str_entropy": 0.5,
+    "inst_network": 3.515,
+    "inst_proc_exec": 0.5,
+    "meta_has_repo": 0.559,
+    "n_files": 2.0,
+    "n_npm_install_scripts": 2.0,
+    "unused_feature": 7.0
+   },
+   "name": "requests",
+   "risk": 0.14085977124717108,
+   "scores": {
+    "code_gbdt": 0.028965244982652294,
+    "code_nn": 0.3541866353596734,
+    "name": 0.9597327721001975
+   },
+   "tokens": [
+    "STR",
+    "child_process",
+    "base64",
+    "def",
+    "'",
+    "zzz",
+    "from",
+    "require",
+    "STR",
+    "env",
+    "os",
+    "def",
+    "def",
+    "\"",
+    "NUM",
+    "\"",
+    "unknown_a",
+    "require",
+    "}",
+    "eval"
+   ],
+   "weight_set": "primary"
+  },
+  {
+   "ecosystem": "pypi",
+   "features": {
+    "all_url": 2.517,
+    "has_setup_py": 1.0,
+    "inst_download_exec": 2.586,
+    "inst_env_access": 2.345,
+    "inst_exfil_endpoint": 4.2,
+    "inst_max_str_entropy": 2.543,
+    "inst_network": 0.28,
+    "inst_proc_exec": 4.2,
+    "meta_has_repo": 3.5,
+    "n_files": 4.674,
+    "n_npm_install_scripts": 0.5
+   },
+   "name": "python-dateutil-ng",
+   "risk": 0.8718948475237415,
+   "scores": {
+    "code_gbdt": 0.028965244982652294,
+    "code_nn": 0.36836909968456466,
+    "name": 0.999941309916502
+   },
+   "tokens": [
+    "subprocess",
+    "ID",
+    "base64",
+    "base64",
+    "https",
+    ")",
+    "http",
+    "https",
+    "requests",
+    "require",
+    "ID",
+    "(",
+    "eval",
+    "zzz",
+    ")",
+    "http",
+    "child_process",
+    "system",
+    "zzz",
+    "require"
+   ],
+   "weight_set": "primary"
+  },
+  {
+   "ecosystem": "pypi",
+   "features": {
+    "all_url": 2.0,
+    "has_setup_py": 2.0,
+    "inst_decode_obf": 1.0,
+    "inst_exfil_endpoint": 1.0,
+    "inst_proc_exec": 2.0,
+    "meta_has_repo": 0.5,
+    "n_files": 4.643,
+    "unused_feature": 7.0
+   },
+   "name": "openai-helper-tools",
+   "risk": 0.2200612559473258,
+   "scores": {
+    "code_gbdt": 0.028965244982652294,
+    "code_nn": null,
+    "name": 0.9998110709797433
+   },
+   "tokens": [],
+   "weight_set": "code_gbdt+name"
+  },
+  {
+   "ecosystem": "pypi",
+   "features": {},
+   "name": "scikit_learn",
+   "risk": 0.8718948475237415,
+   "scores": {
+    "code_gbdt": null,
+    "code_nn": 0.37712270152600685,
+    "name": 0.9911274776010742
+   },
+   "tokens": [
+    ",",
+    "https",
+    "\"",
+    "os",
+    "unknown_b",
+    "unknown_b",
+    ",",
+    "ID",
+    "'",
+    "env",
+    "(",
+    "system",
+    "zzz",
+    "base64",
+    "system",
+    "eval",
+    ";",
+    ";",
+    "return",
+    "exec"
+   ],
+   "weight_set": "partial:code_nn+name"
+  },
+  {
+   "ecosystem": "npm",
+   "features": {
+    "all_url": 1.0,
+    "has_setup_py": 0.741,
+    "inst_decode_obf": 0.591,
+    "inst_env_access": 1.77,
+    "inst_exfil_endpoint": 2.096,
+    "inst_max_str_entropy": 0.0,
+    "inst_network": 0.75,
+    "inst_proc_exec": 2.0,
+    "meta_has_repo": 4.2,
+    "n_files": 3.372,
+    "n_npm_install_scripts": 0.5,
+    "unused_feature": 7.0
+   },
+   "name": null,
+   "risk": 0.14085977124717108,
+   "scores": {
+    "code_gbdt": 0.028965244982652294,
+    "code_nn": 0.361139437523338,
+    "name": null
+   },
+   "tokens": [
+    "require",
+    "eval",
+    "requests",
+    "ID",
+    "os",
+    "process",
+    "\"",
+    "process",
+    "require",
+    ".",
+    "=",
+    "Buffer",
+    "\"",
+    "process",
+    "base64",
+    "http",
+    "return",
+    "}",
+    "unknown_a",
+    "b64decode"
+   ],
+   "weight_set": "partial:code_gbdt+code_nn"
+  },
+  {
+   "ecosystem": "npm",
+   "features": {
+    "all_url": 0.42,
+    "has_setup_py": 4.001,
+    "inst_download_exec": 2.727,
+    "inst_env_access": 0.5,
+    "inst_exfil_endpoint": 1.719,
+    "inst_max_str_entropy": 4.2,
+    "inst_network": 4.829,
+    "inst_proc_exec": 4.567,
+    "meta_has_repo": 2.916,
+    "n_npm_install_scripts": 2.469,
+    "unused_feature": 7.0
+   },
+   "name": "express-session-helper",
+   "risk": 0.6794409969920545,
+   "scores": {
+    "code_gbdt": 0.028965244982652294,
+    "code_nn": null,
+    "name": 0.9999727762820733
+   },
+   "tokens": [],
+   "weight_set": "code_gbdt+name"
+  },
+  {
+   "ecosystem": "npm",
+   "features": {
+    "all_url": 1.675,
+    "inst_decode_obf": 1.429,
+    "inst_download_exec": 0.5,
+    "inst_exfil_endpoint": 3.303,
+    "inst_network": 1.247,
+    "inst_proc_exec": 2.047,
+    "n_files": 3.5,
+    "n_npm_install_scripts": 0.06
+   },
+   "name": "eventstream",
+   "risk": 0.219793066188047,
+   "scores": {
+    "code_gbdt": 0.028965244982652294,
+    "code_nn": 0.3321573116962098,
+    "name": 0.999407483995264
+   },
+   "tokens": [
+    "return",
+    "(",
+    "process",
+    "subprocess",
+    ")",
+    "https",
+    "base64",
+    "Buffer",
+    "Buffer",
+    ".",
+    "{",
+    "os",
+    "https",
+    "}",
+    "http",
+    "subprocess",
+    "from",
+    "requests",
+    "unknown_a",
+    "eval"
+   ],
+   "weight_set": "primary"
+  },
+  {
+   "ecosystem": "pypi",
+   "features": {},
+   "name": "Requests",
+   "risk": 0.7798013933973014,
+   "scores": {
+    "code_gbdt": null,
+    "code_nn": 0.3968413930800891,
+    "name": 0.9597327721001975
+   },
+   "tokens": [
+    "unknown_a",
+    "https",
+    "http",
+    "child_process",
+    "{",
+    "}",
+    "base64",
+    "unknown_a",
+    ",",
+    "exec",
+    "subprocess",
+    ".",
+    "return",
+    "fetch",
+    "=",
+    "ID",
+    ";",
+    "unknown_b",
+    ";",
+    "NUM"
+   ],
+   "weight_set": "partial:code_nn+name"
+  },
+  {
+   "ecosystem": "pypi",
+   "features": {
+    "all_url": 4.545,
+    "has_setup_py": 0.0,
+    "inst_decode_obf": 2.535,
+    "inst_download_exec": 3.42,
+    "inst_env_access": 2.408,
+    "inst_proc_exec": 3.465,
+    "meta_has_repo": 1.45
+   },
+   "name": "nunpy",
+   "risk": 0.14085977124717108,
+   "scores": {
+    "code_gbdt": 0.028965244982652294,
+    "code_nn": null,
+    "name": 0.9837301072270618
+   },
+   "tokens": [],
+   "weight_set": "code_gbdt+name"
+  },
+  {
+   "ecosystem": "pypi",
+   "features": {
+    "all_url": 3.5,
+    "has_setup_py": 2.013,
+    "inst_decode_obf": 4.182,
+    "inst_download_exec": 0.0,
+    "inst_env_access": 4.2,
+    "inst_exfil_endpoint": 0.044,
+    "inst_max_str_entropy": 0.0,
+    "inst_network": 2.893,
+    "inst_proc_exec": 2.604,
+    "meta_has_repo": 4.2,
+    "n_files": 4.2,
+    "n_npm_install_scripts": 2.0,
+    "unused_feature": 7.0
+   },
+   "name": null,
+   "risk": 0.14085977124717108,
+   "scores": {
+    "code_gbdt": 0.028965244982652294,
+    "code_nn": 0.33218774066233403,
+    "name": null
+   },
+   "tokens": [
+    "}",
+    "\"",
+    ".",
+    ";",
+    "{",
+    "zzz",
+    "STR",
+    "env",
+    "os",
+    "ID",
+    "=",
+    "subprocess",
+    "require",
+    ",",
+    "}",
+    "b64decode",
+    "unknown_a",
+    "require",
+    "unknown_a",
+    "b64decode"
+   ],
+   "weight_set": "partial:code_gbdt+code_nn"
+  },
+  {
+   "ecosystem": "npm",
+   "features": {
+    "all_url": 3.5,
+    "has_setup_py": 2.29,
+    "inst_decode_obf": 2.0,
+    "inst_download_exec": 3.094,
+    "inst_env_access": 0.0,
+    "inst_exfil_endpoint": 4.222,
+    "inst_max_str_entropy": 4.2,
+    "inst_network": 0.0,
+    "inst_proc_exec": 2.655,
+    "meta_has_repo": 4.957,
+    "n_files": 1.0,
+    "n_npm_install_scripts": 2.0
+   },
+   "name": "react",
+   "risk": 0.14085977124717108,
+   "scores": {
+    "code_gbdt": 0.028965244982652294,
+    "code_nn": 0.4705439359956809,
+    "name": 0.9386674438216792
+   },
+   "tokens": [
+    ")",
+    "base64",
+    "}",
+    "import",
+    "'",
+    "NUM",
+    "def",
+    "http",
+    "http",
+    "'",
+    "}",
+    "(",
+    ";",
+    "import",
+    ",",
+    "(",
+    "import",
+    "get",
+    "'",
+    "subprocess"
+   ],
+   "weight_set": "primary"
+  },
+  {
+   "ecosystem": "npm",
+   "features": {},
+   "name": "@acme/react",
+   "risk": 0.8117224582920315,
+   "scores": {
+    "code_gbdt": null,
+    "code_nn": null,
+    "name": 0.9872322258013605
+   },
+   "tokens": [],
+   "weight_set": "name"
+  }
+ ]
+}

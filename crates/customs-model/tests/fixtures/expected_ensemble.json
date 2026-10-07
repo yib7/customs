@@ -1,0 +1,394 @@
+{
+ "cases": [
+  {
+   "logits": {
+    "code_gbdt": 2.432216,
+    "code_nn": 1.697723,
+    "name": 3.020712
+   },
+   "out": {
+    "raw": 0.9975585341237558,
+    "risk": 0.8718948475237415,
+    "weight_set": "primary",
+    "z": 6.0127122
+   }
+  },
+  {
+   "logits": {
+    "code_gbdt": null,
+    "code_nn": 1.783937,
+    "name": 2.956805
+   },
+   "out": {
+    "raw": 0.9654933348367145,
+    "risk": 0.8714623377818711,
+    "weight_set": "partial:code_nn+name",
+    "z": 3.3314867
+   }
+  },
+  {
+   "logits": {
+    "code_gbdt": 2.357318,
+    "code_nn": -4.594265,
+    "name": null
+   },
+   "out": {
+    "raw": 0.36273588799631595,
+    "risk": 0.22004446612185719,
+    "weight_set": "partial:code_gbdt+code_nn",
+    "z": -0.5635091999999995
+   }
+  },
+  {
+   "logits": {
+    "code_gbdt": null,
+    "code_nn": 1.946346,
+    "name": -2.74486
+   },
+   "out": {
+    "raw": 0.15413037565169593,
+    "risk": 0.21860318607851892,
+    "weight_set": "partial:code_nn+name",
+    "z": -1.7025664000000003
+   }
+  },
+  {
+   "logits": {
+    "code_gbdt": 0.192066,
+    "code_nn": 3.322446,
+    "name": 0.176929
+   },
+   "out": {
+    "raw": 0.8769626354032118,
+    "risk": 0.7527958552197832,
+    "weight_set": "primary",
+    "z": 1.9639762999999997
+   }
+  },
+  {
+   "logits": {
+    "code_gbdt": 4.069525,
+    "code_nn": 1.791901,
+    "name": -1.054761
+   },
+   "out": {
+    "raw": 0.985259891384517,
+    "risk": 0.8718948475237415,
+    "weight_set": "primary",
+    "z": 4.202333199999999
+   }
+  },
+  {
+   "logits": {
+    "code_gbdt": -3.46834,
+    "code_nn": 3.053393,
+    "name": 5.224131
+   },
+   "out": {
+    "raw": 0.9104041565374167,
+    "risk": 0.7937665016105531,
+    "weight_set": "primary",
+    "z": 2.3185797
+   }
+  },
+  {
+   "logits": {
+    "code_gbdt": 2.566665,
+    "code_nn": null,
+    "name": 1.611094
+   },
+   "out": {
+    "raw": 0.9926408537992588,
+    "risk": 0.8718948475237415,
+    "weight_set": "code_gbdt+name",
+    "z": 4.904425
+   }
+  },
+  {
+   "logits": {
+    "code_gbdt": 2.447643,
+    "code_nn": null,
+    "name": 0.697015
+   },
+   "out": {
+    "raw": 0.9786205793387486,
+    "risk": 0.8718948475237415,
+    "weight_set": "code_gbdt+name",
+    "z": 3.8237151999999996
+   }
+  },
+  {
+   "logits": {
+    "code_gbdt": null,
+    "code_nn": -1.776073,
+    "name": -4.037063
+   },
+   "out": {
+    "raw": 0.006065824533374961,
+    "risk": 0.14085977124717108,
+    "weight_set": "partial:code_nn+name",
+    "z": -5.0990005
+   }
+  },
+  {
+   "logits": {
+    "code_gbdt": null,
+    "code_nn": 1.327103,
+    "name": 1.327908
+   },
+   "out": {
+    "raw": 0.8308100302565518,
+    "risk": 0.7088212293113441,
+    "weight_set": "partial:code_nn+name",
+    "z": 1.5913789999999999
+   }
+  },
+  {
+   "logits": {
+    "code_gbdt": 0.78364,
+    "code_nn": null,
+    "name": null
+   },
+   "out": {
+    "raw": 0.6134894728380452,
+    "risk": 0.22146252721302573,
+    "weight_set": "partial:code_gbdt",
+    "z": 0.4620040000000001
+   }
+  },
+  {
+   "logits": {
+    "code_gbdt": null,
+    "code_nn": 0.334721,
+    "name": -0.045671
+   },
+   "out": {
+    "raw": 0.44021949419612516,
+    "risk": 0.22048265123185162,
+    "weight_set": "partial:code_nn+name",
+    "z": -0.24027130000000002
+   }
+  },
+  {
+   "logits": {
+    "code_gbdt": -1.879624,
+    "code_nn": -3.201021,
+    "name": -1.167713
+   },
+   "out": {
+    "raw": 0.004324431859211578,
+    "risk": 0.14085977124717108,
+    "weight_set": "primary",
+    "z": -5.4391407
+   }
+  },
+  {
+   "logits": {
+    "code_gbdt": 3.941563,
+    "code_nn": -2.469482,
+    "name": null
+   },
+   "out": {
+    "raw": 0.9208556651716541,
+    "risk": 0.8085069411607138,
+    "weight_set": "partial:code_gbdt+code_nn",
+    "z": 2.4540300999999998
+   }
+  },
+  {
+   "logits": {
+    "code_gbdt": -0.580281,
+    "code_nn": 2.47945,
+    "name": 4.830053
+   },
+   "out": {
+    "raw": 0.9918083016565246,
+    "risk": 0.8718948475237415,
+    "weight_set": "primary",
+    "z": 4.7964085999999995
+   }
+  },
+  {
+   "logits": {
+    "code_gbdt": null,
+    "code_nn": 1.361631,
+    "name": -0.728265
+   },
+   "out": {
+    "raw": 0.44066591899954277,
+    "risk": 0.22048517585236407,
+    "weight_set": "partial:code_nn+name",
+    "z": -0.23845990000000006
+   }
+  },
+  {
+   "logits": {
+    "code_gbdt": -2.312263,
+    "code_nn": -0.461374,
+    "name": null
+   },
+   "out": {
+    "raw": 0.038408397881159975,
+    "risk": 0.14085977124717108,
+    "weight_set": "partial:code_gbdt+code_nn",
+    "z": -3.2203137
+   }
+  },
+  {
+   "logits": {
+    "code_gbdt": -2.654282,
+    "code_nn": null,
+    "name": null
+   },
+   "out": {
+    "raw": 0.034901168571871075,
+    "risk": 0.14085977124717108,
+    "weight_set": "partial:code_gbdt",
+    "z": -3.3197102
+   }
+  },
+  {
+   "logits": {
+    "code_gbdt": 2.244633,
+    "code_nn": 0.941618,
+    "name": 1.347324
+   },
+   "out": {
+    "raw": 0.9790953763863204,
+    "risk": 0.8718948475237415,
+    "weight_set": "primary",
+    "z": 3.8466587000000003
+   }
+  },
+  {
+   "logits": {
+    "code_gbdt": -0.089692,
+    "code_nn": null,
+    "name": 0.343888
+   },
+   "out": {
+    "raw": 0.47959114564156324,
+    "risk": 0.22070530570375108,
+    "weight_set": "code_gbdt+name",
+    "z": -0.08168079999999994
+   }
+  },
+  {
+   "logits": {
+    "code_gbdt": -1.188031,
+    "code_nn": null,
+    "name": null
+   },
+   "out": {
+    "raw": 0.15357479857841774,
+    "risk": 0.21774329884259308,
+    "weight_set": "partial:code_gbdt",
+    "z": -1.7068341
+   }
+  },
+  {
+   "logits": {
+    "code_gbdt": -0.24526,
+    "code_nn": -2.509445,
+    "name": -3.988957
+   },
+   "out": {
+    "raw": 0.003123993326594494,
+    "risk": 0.14085977124717108,
+    "weight_set": "primary",
+    "z": -5.7655143
+   }
+  },
+  {
+   "logits": {
+    "code_gbdt": 0.443655,
+    "code_nn": 1.830942,
+    "name": null
+   },
+   "out": {
+    "raw": 0.7661298633414068,
+    "risk": 0.433244182544967,
+    "weight_set": "partial:code_gbdt+code_nn",
+    "z": 1.1865857
+   }
+  },
+  {
+   "logits": {
+    "code_gbdt": -3.461423,
+    "code_nn": 3.069746,
+    "name": 3.308167
+   },
+   "out": {
+    "raw": 0.6483131302014765,
+    "risk": 0.2216594618793454,
+    "weight_set": "primary",
+    "z": 0.6116325999999996
+   }
+  },
+  {
+   "logits": {
+    "code_gbdt": null,
+    "code_nn": 1.338057,
+    "name": 0.797861
+   },
+   "out": {
+    "raw": 0.7541573062250505,
+    "risk": 0.385560981891805,
+    "weight_set": "partial:code_nn+name",
+    "z": 1.1209091
+   }
+  },
+  {
+   "logits": {
+    "code_gbdt": null,
+    "code_nn": null,
+    "name": -0.700018
+   },
+   "out": {
+    "raw": 0.16246212348653835,
+    "risk": 0.42807307046889265,
+    "weight_set": "name",
+    "z": -1.6400216
+   }
+  },
+  {
+   "logits": {
+    "code_gbdt": 2.228452,
+    "code_nn": null,
+    "name": 1.736852
+   },
+   "out": {
+    "raw": 0.9896122379472873,
+    "risk": 0.8718948475237415,
+    "weight_set": "code_gbdt+name",
+    "z": 4.5566848
+   }
+  },
+  {
+   "logits": {
+    "code_gbdt": -0.677744,
+    "code_nn": 0.093298,
+    "name": -1.452251
+   },
+   "out": {
+    "raw": 0.08343496949865195,
+    "risk": 0.14085977124717108,
+    "weight_set": "primary",
+    "z": -2.3965655
+   }
+  },
+  {
+   "logits": {
+    "code_gbdt": 2.455723,
+    "code_nn": null,
+    "name": null
+   },
+   "out": {
+    "raw": 0.9089842583699138,
+    "risk": 0.7917639272609613,
+    "weight_set": "partial:code_gbdt",
+    "z": 2.3012953
+   }
+  }
+ ]
+}

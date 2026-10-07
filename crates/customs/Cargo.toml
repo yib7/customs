@@ -5,9 +5,44 @@ edition.workspace = true
 license.workspace = true
 description = "Package firewall for AI coding agents"
 
+[lib]
+name = "customs"
+path = "src/lib.rs"
+
+[[bin]]
+name = "customs"
+path = "src/main.rs"
+
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+tokio-util.workspace = true
+futures.workspace = true
+axum.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+hyper.workspace = true
+http.workspace = true
+bytes.workspace = true
+reqwest.workspace = true
+rusqlite.workspace = true
+toml.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+chrono.workspace = true
+sha2.workspace = true
+hex.workspace = true
+regex.workspace = true
+url.workspace = true
+percent-encoding.workspace = true
+semver.workspace = true
 customs-scan = { path = "../customs-scan" }
 customs-model = { path = "../customs-model" }
+
+[dev-dependencies]
+tempfile.workspace = true

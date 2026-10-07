@@ -1,0 +1,14 @@
+{
+ "model_version": "dev-untrained",
+ "feature_schema_version": 1,
+ "code_gbdt": "code_gbdt.json",
+ "name_model": "name_model.json",
+ "code_nn": "code_nn.json",
+ "ensemble": "ensemble.json",
+ "popular_names": {
+  "pypi": "popular_pypi.txt",
+  "npm": "popular_npm.txt"
+ },
+ "untrained": true,
+ "description": "UNTRAINED development placeholder. Hand-written rules of thumb in the production artifact formats so the binary runs end to end; replace with models/ from the training pipeline."
+}
