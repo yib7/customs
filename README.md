@@ -22,8 +22,8 @@ are stopped before anything is downloaded.
 
 The Rust binary reproduces the offline evaluation exactly: replaying 706 held-out packages
 through the live proxy gave identical decisions to the Python pipeline (largest risk
-difference 1e-7) at about 60 ms per package. Under load, 16 concurrent clients get 61
-cold scans a second (median 34 ms) and 809 cached verdicts a second. Full report:
+difference 1e-7) at about 50 ms per package. Under load, 16 concurrent clients get 66
+cold scans a second (median 25 ms) and 772 cached verdicts a second. Full report:
 [`docs/EVALUATION.md`](docs/EVALUATION.md).
 
 ## Why this exists

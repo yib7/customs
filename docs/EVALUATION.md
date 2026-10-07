@@ -148,7 +148,7 @@ The name model's job is the pre-download check (typosquats and names an agent ha
 | | Value |
 |---|---:|
 | Requests | 706 |
-| Mean latency per request (scan + score + policy) | 60 ms |
+| Mean latency per request (scan + score + policy) | 49 ms |
 | Malicious: blocked (HTTP 403) | 64.7% |
 | Malicious: blocked or warned | 76.5% |
 | Benign: blocked | 0.2% |
@@ -162,13 +162,13 @@ The name model's job is the pre-download check (typosquats and names an agent ha
 
 | Run | Clients | Requests/s | p50 ms | p95 ms | p99 ms |
 |---|---:|---:|---:|---:|---:|
-| Upstream directly (no firewall) | 1 | 564.2 | 1 | 4 | 11 |
-| Cold | 1 | 26.6 | 15 | 112 | 559 |
-| Cold | 4 | 44.3 | 26 | 472 | 1048 |
-| Cold | 16 | 60.6 | 34 | 1253 | 1554 |
-| Warm (cached) | 16 | 809.0 | 10 | 40 | 69 |
+| Upstream directly (no firewall) | 1 | 757.8 | 1 | 3 | 5 |
+| Cold | 1 | 30.1 | 16 | 112 | 345 |
+| Cold | 4 | 67.1 | 24 | 264 | 608 |
+| Cold | 16 | 65.7 | 25 | 1072 | 1326 |
+| Warm (cached) | 16 | 771.8 | 12 | 39 | 66 |
 
-The server's own scan-and-score time averages 45 ms. Sequential cold latency grows with archive size (median 13 ms under 100 KB, 36 ms 100 KB to 1 MB, 111 ms over 1 MB). When 16 clients request the same uncached archive at once, 20 such bursts (320 requests) cost 20 scans: 294 requests waited on the scan already in flight and the rest arrived after it finished and hit the cache.
+The server's own scan-and-score time averages 34 ms. Sequential cold latency grows with archive size (median 12 ms under 100 KB, 32 ms 100 KB to 1 MB, 111 ms over 1 MB). When 16 clients request the same uncached archive at once, 20 such bursts (320 requests) cost 20 scans: 290 requests waited on the scan already in flight and the rest arrived after it finished and hit the cache.
 
 ## Independent dataset: MalRegistry
 
@@ -284,16 +284,16 @@ The Python replay agrees with the proxy's own `customs check` on 107 of 107 beni
 
 Every number above is about malware someone already found. Here the frozen models ran forward in time: `scripts/live_watch.py` followed PyPI's changelog and sent every new release published during the window through a running `customs serve` (downloaded and scanned in memory, never installed). Outcomes were read off later from PyPI itself (the project was removed) and from OpenSSF malicious-package reports.
 
-Window: 2026-10-07T07:56:21Z to 2026-10-07T16:49:47Z (UTC).
+Window: 2026-10-07T07:56:21Z to 2026-10-07T21:12:04Z (UTC).
 
 | Decision | Releases | Later removed from PyPI | OpenSSF report |
 |---|---:|---:|---:|
-| allow | 4,644 | 7 | 0 |
-| warn | 4 | 0 | 0 |
+| allow | 6,835 | 9 | 0 |
+| warn | 6 | 0 | 0 |
 
-4,648 of 4,649 releases were scanned (513 from projects created during the window).
+6,841 of 6,842 releases were scanned (770 from projects created during the window).
 
-The window is hours long, and malicious uploads usually stay up for days, so the removal columns are a floor. What the window does measure is the alert load on real traffic: 4 of 4,648 fresh releases (0.1%) were warned or blocked, the rate a user installing brand-new releases would see.
+The window is hours long, and malicious uploads usually stay up for days, so the removal columns are a floor. What the window does measure is the alert load on real traffic: 6 of 6,841 fresh releases (0.1%) were warned or blocked, the rate a user installing brand-new releases would see.
 
 ## Retrain variance
 
