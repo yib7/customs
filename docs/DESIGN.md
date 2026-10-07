@@ -201,6 +201,19 @@ How indicators are counted (`customs-scan`, schema 1):
   whole string literals only.
 - `download_exec` additionally counts once per Python/JavaScript file that has `network`,
   `file_write` and `proc_exec` all nonzero (fetch, write, run).
+- String literals joined by `+`, or written side by side in Python (`'a' 'b'`), are folded
+  into one literal before any rule runs, so `require('child_' + 'process')` is
+  `require('child_process')` and a host split across literals is still one URL. Folding
+  follows precedence: a literal next to a tighter operator (`n * 'a' + 'b'`,
+  `'a' + 'b'.join(x)`) stays apart, and parentheses that only group the folded expression
+  are dropped. The CNN token stream (4.6) folds the same way. String entropy statistics stay
+  per original literal, since folding long messages in benign code would move them while a
+  chunked blob is high-entropy chunk by chunk; the base64 run length uses the folded text.
+  On 6,000 random corpus archives, folding changed features in 45 of 4,784 malicious and 9
+  of 1,216 benign archives, and every indicator that appeared where there was none before
+  appeared in malware. Constant idioms such as `String.fromCharCode(...)` chains,
+  `chr(n) + chr(n)`, `[...].join('')` and reversed strings are not decoded: each shows up
+  in under 1% of malicious archives and about as often in benign ones.
 
 ### 4.3 Structural and obfuscation features (no prefix unless stated)
 

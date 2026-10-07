@@ -416,6 +416,97 @@ fn string_stats(fa: &mut FileAnalysis, s: &str) {
     fa.longest_b64_run = fa.longest_b64_run.max(longest_b64_run(s));
 }
 
+/// String literals joined by `+`, or written side by side in Python, folded into one, so a
+/// host, path or module name split across literals (`'child_' + 'process'`) still matches.
+struct Fold {
+    text: String,
+    /// Offset in `text` and source line where each literal starts.
+    parts: Vec<(usize, u32)>,
+}
+
+impl Fold {
+    fn line(&self, off: usize, idx: &LineIndex) -> u32 {
+        let k = self.parts.partition_point(|p| p.0 <= off).saturating_sub(1);
+        let (start, line) = self.parts[k];
+        line + idx.line(off) - idx.line(start)
+    }
+}
+
+fn is_punct(t: Option<&Token<'_>>, ops: &[&str]) -> bool {
+    t.is_some_and(|t| t.kind == TokKind::Punct && ops.contains(&t.text))
+}
+
+/// Find runs of literals to fold: `(first, end, literal indices)`, where `first..end` is
+/// the token range the folded literal replaces (with redundant parentheses around it).
+pub(crate) fn fold_runs(toks: &[Token<'_>], lang: Lang) -> Vec<(usize, usize, Vec<usize>)> {
+    // Operators that bind tighter than `+`: a literal next to one is not a `+` operand.
+    const TIGHT_BEFORE: &[&str] = &["*", "**", "/", "%", "-", ".", "?."];
+    const TIGHT_AFTER: &[&str] = &["*", "**", "/", "%", ".", "?.", "[", "("];
+    let is_str = |i: usize| toks.get(i).is_some_and(|t| t.kind == TokKind::Str);
+    // A unit is one literal, or in Python several adjacent ones (implicit concatenation,
+    // which binds tighter than any operator).
+    let unit_end = |i: usize| {
+        let mut j = i + 1;
+        if lang == Lang::Python {
+            while is_str(j) {
+                j += 1;
+            }
+        }
+        j
+    };
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < toks.len() {
+        if !is_str(i) || (i > 0 && is_punct(toks.get(i - 1), TIGHT_BEFORE)) {
+            i += 1;
+            continue;
+        }
+        let mut units = vec![(i, unit_end(i))];
+        while let Some(&(_, e)) = units.last() {
+            if is_punct(toks.get(e), &["+"]) && is_str(e + 1) {
+                units.push((e + 1, unit_end(e + 1)));
+            } else {
+                break;
+            }
+        }
+        // `'a' + 'b'.join(x)` adds 'a' to the call's result: the last unit is not folded.
+        if units.len() > 1 && is_punct(toks.get(units[units.len() - 1].1), TIGHT_AFTER) {
+            units.pop();
+        }
+        let (first, mut end) = (units[0].0, units[units.len() - 1].1);
+        let lits: Vec<usize> = units.iter().flat_map(|&(a, b)| a..b).collect();
+        if lits.len() < 2 {
+            i = end;
+            continue;
+        }
+        // `require(('child_' + 'process'))`: parentheses that only group the expression.
+        let mut start = first;
+        let grouping = start >= 1
+            && is_punct(toks.get(start - 1), &["("])
+            && is_punct(toks.get(end), &[")"])
+            && (start < 2
+                || !matches!(toks[start - 2].kind, TokKind::Ident | TokKind::Str)
+                    && !is_punct(toks.get(start - 2), &[")", "]"]));
+        if grouping {
+            start -= 1;
+            end += 1;
+        }
+        out.push((start, end, lits));
+        i = end;
+    }
+    out
+}
+
+fn make_fold(toks: &[Token<'_>], lits: &[usize]) -> Fold {
+    let mut text = String::new();
+    let mut parts = Vec::with_capacity(lits.len());
+    for &l in lits {
+        parts.push((text.len(), toks[l].line));
+        text.push_str(toks[l].text);
+    }
+    Fold { text, parts }
+}
+
 /// Analyze one source file or command string.
 pub fn analyze(text: &str, lang: Lang) -> FileAnalysis {
     let mut fa = FileAnalysis::default();
@@ -424,7 +515,33 @@ pub fn analyze(text: &str, lang: Lang) -> FileAnalysis {
         Lang::Shell => analyze_shell(text, &mut fa),
         Lang::Python | Lang::Js => {
             let toks = lex(text, lang);
-            analyze_code(&toks, lang, &mut fa);
+            let runs = fold_runs(&toks, lang);
+            if runs.is_empty() {
+                analyze_code(&toks, &[], lang, &mut fa);
+            } else {
+                let folds: Vec<Fold> = runs.iter().map(|r| make_fold(&toks, &r.2)).collect();
+                let mut code = Vec::with_capacity(toks.len());
+                let mut fold_of = Vec::with_capacity(toks.len());
+                let mut i = 0;
+                for (r, f) in runs.iter().zip(&folds) {
+                    for t in &toks[i..r.0] {
+                        code.push(*t);
+                        fold_of.push(None);
+                    }
+                    code.push(Token {
+                        kind: TokKind::Str,
+                        text: &f.text,
+                        line: f.parts[0].1,
+                    });
+                    fold_of.push(Some(f));
+                    i = r.1;
+                }
+                for t in &toks[i..] {
+                    code.push(*t);
+                    fold_of.push(None);
+                }
+                analyze_code(&code, &fold_of, lang, &mut fa);
+            }
         }
     }
     fa
@@ -445,17 +562,35 @@ fn analyze_shell(text: &str, fa: &mut FileAnalysis) {
     }
 }
 
-fn analyze_code(toks: &[Token<'_>], lang: Lang, fa: &mut FileAnalysis) {
+/// `fold_of[i]` is the fold token `i` came from, if any (empty when nothing was folded).
+fn analyze_code(toks: &[Token<'_>], fold_of: &[Option<&Fold>], lang: Lang, fa: &mut FileAnalysis) {
     // Strings and identifiers first: they feed both rules and statistics.
-    for t in toks {
+    for (k, t) in toks.iter().enumerate() {
         match t.kind {
             TokKind::Str => {
-                string_stats(fa, t.text);
+                let fold = fold_of.get(k).copied().flatten();
+                match fold {
+                    // Entropy stays per literal: folding long messages in benign code would
+                    // shift it, while a chunked blob is high-entropy chunk by chunk anyway.
+                    Some(f) => {
+                        for (w, p) in f.parts.iter().enumerate() {
+                            let end = f.parts.get(w + 1).map_or(f.text.len(), |q| q.0);
+                            string_stats(fa, &f.text[p.0..end]);
+                        }
+                        fa.longest_b64_run = fa.longest_b64_run.max(longest_b64_run(t.text));
+                    }
+                    None => string_stats(fa, t.text),
+                }
                 // Built on the first match only: most strings match no rule. Counting
                 // newlines per match instead is quadratic in a long string with many hits.
                 let idx = OnceCell::new();
-                let line_of =
-                    |off: usize| t.line - 1 + idx.get_or_init(|| LineIndex::new(t.text)).line(off);
+                let line_of = |off: usize| {
+                    let idx = idx.get_or_init(|| LineIndex::new(t.text));
+                    match fold {
+                        Some(f) => f.line(off, idx),
+                        None => t.line - 1 + idx.line(off),
+                    }
+                };
                 STRING_RULES.apply(t.text, fa, &line_of);
                 if WALLET_ADDRESS.is_match(t.text.trim()) {
                     fa.hit(CRYPTO_WALLET, t.line);
@@ -1013,6 +1148,51 @@ mod tests {
             assert_eq!((g.level, g.module.as_str()), (level, module));
             assert_eq!(g.names, names);
         }
+    }
+
+    #[test]
+    fn split_literals_are_folded() {
+        // The red team's string_split evasion, and the hand-written form of it.
+        let c = js("const cp = require(('child_' + 'process'));\ncp.exec('ls');\n");
+        assert_eq!(c[PROC_EXEC], 2);
+        assert_eq!(
+            js("require('chi' + 'ld_' + 'process').exec(x);\n")[PROC_EXEC],
+            2
+        );
+        assert_eq!(js("fetch('https://' + 'evil.example/x');\n")[URL], 1);
+        let fa = analyze(
+            "import os\nk = open(os.path.expanduser('~/.s' + 'sh/id_' + 'rsa'))\n",
+            Lang::Python,
+        );
+        assert_eq!(fa.counts[SECRET_PATHS], 2);
+        assert!(fa.hits.iter().all(|h| h.1 == 2));
+        // Python implicit concatenation across lines keeps each part's own line.
+        let fa = analyze("x = ('aaa'\n     '~/.ss' 'h/id_rsa')\n", Lang::Python);
+        assert_eq!(fa.hits, vec![(SECRET_PATHS, 2), (SECRET_PATHS, 2)]);
+        let fa = analyze(
+            "x = ('aaa'\n  'bbb'\n  'ccc ~/.aws/credentials')\n",
+            Lang::Python,
+        );
+        assert_eq!(fa.hits, vec![(SECRET_PATHS, 3)]);
+        // A base64 payload cut into chunks is one long run again.
+        let chunks: Vec<String> = (0..8).map(|_| format!("'{}'", "QUFB".repeat(10))).collect();
+        let fa = analyze(&format!("p = ({})\n", chunks.join(" +\n  ")), Lang::Python);
+        assert_eq!(fa.longest_b64_run, 320);
+    }
+
+    #[test]
+    fn folding_respects_precedence() {
+        // `'a' + 'b'.join(x)` adds 'a' to a call's result; `x * 'a' + 'b'` repeats 'a' only.
+        let fa = analyze("s = '~/.s' + 'sh'.join(x)\n", Lang::Python);
+        assert_eq!(fa.counts[SECRET_PATHS], 0);
+        let fa = analyze("s = n * '~/.s' + 'sh'\n", Lang::Python);
+        assert_eq!(fa.counts[SECRET_PATHS], 0);
+        // JavaScript has no implicit concatenation; adjacent literals stay apart.
+        assert_eq!(js("x = ['~/.s', 'sh']\n")[SECRET_PATHS], 0);
+        // Python's binds tighter than `%`, so it folds even before one.
+        assert_eq!(py("s = '~/.s' 'sh/%s' % k\n")[SECRET_PATHS], 1);
+        // A call's own parentheses are kept: the callee still sees its argument.
+        assert_eq!(py("__import__('o' + 's')\n")[DYN_CODE], 1);
     }
 
     #[test]

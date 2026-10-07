@@ -11,7 +11,9 @@
 //!    content is 1 to 24 bytes long and consists only of ASCII letters, digits and
 //!    `_ - . : / @`, in which case the lowercased content is kept without quotes:
 //!    `'child_process'` becomes `child_process`, `"discord.com"` stays `discord.com`.
-//!    Template literal chunks around `${...}` are separate strings.
+//!    Template literal chunks around `${...}` are separate strings. Literals joined by `+`
+//!    (or written side by side in Python) count as one, folded as the indicator rules
+//!    fold them, so `('child_' + 'process')` also becomes `child_process`.
 //! 5. Numbers become `<num>`.
 //! 6. Punctuation is kept verbatim, with multi-character operators as single tokens
 //!    (`==`, `=>`, `**`, `...`, `?.`).
@@ -19,6 +21,7 @@
 //!    rule (4); shell operators (`|`, `&&`, `;`, `>`) are punctuation.
 //! 8. The stream is truncated at `max_tokens` (default 4096) tokens in total.
 
+use crate::indicators::fold_runs;
 use crate::lexer::{lex, Lang, TokKind};
 
 pub const FILE_MARKER: &str = "<file>";
@@ -47,10 +50,25 @@ pub fn push_unit_tokens(out: &mut Vec<String>, text: &str, lang: Lang, max_token
         return;
     }
     out.push(FILE_MARKER.to_string());
-    for t in lex(text, lang) {
+    let toks = lex(text, lang);
+    let runs = match lang {
+        Lang::Shell => Vec::new(),
+        _ => fold_runs(&toks, lang),
+    };
+    let mut runs = runs.iter().peekable();
+    let mut i = 0;
+    while i < toks.len() {
         if out.len() >= max_tokens {
             return;
         }
+        if let Some((_, end, lits)) = runs.next_if(|r| r.0 == i) {
+            let folded: String = lits.iter().map(|&l| toks[l].text).collect();
+            out.push(norm_string(&folded));
+            i = *end;
+            continue;
+        }
+        let t = toks[i];
+        i += 1;
         let tok = match t.kind {
             TokKind::Newline => continue,
             TokKind::Ident if lang == Lang::Shell => norm_string(t.text),
@@ -95,6 +113,40 @@ mod tests {
                 "child_process"
             ]
         );
+    }
+
+    #[test]
+    fn split_literals_fold_into_one_token() {
+        let mut out = Vec::new();
+        push_unit_tokens(
+            &mut out,
+            "require(('child_' + 'process')) + 'a' + x;",
+            Lang::Js,
+            4096,
+        );
+        assert_eq!(
+            out,
+            vec![
+                "<file>",
+                "require",
+                "(",
+                "child_process",
+                ")",
+                "+",
+                "a",
+                "+",
+                "x",
+                ";"
+            ]
+        );
+        let mut out = Vec::new();
+        push_unit_tokens(
+            &mut out,
+            "u = ('https://' 'pastebin' '.com/raw/' + k)\n",
+            Lang::Python,
+            4096,
+        );
+        assert_eq!(out, vec!["<file>", "u", "=", "(", "<str>", "+", "k", ")"]);
     }
 
     #[test]
