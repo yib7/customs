@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, OnceCell};
 
 use crate::config::Policy;
+use crate::history::{release_history, ReleaseHistory};
 use crate::metrics::Metrics;
 use crate::policy::{effective_thresholds, evaluate, PolicyContext};
 use crate::registry::{FetchError, FileMeta, Registry, VersionMeta};
@@ -120,6 +121,8 @@ pub struct MetaFacts {
     pub exists: bool,
     pub published: Option<DateTime<Utc>>,
     pub install_scripts: Vec<String>,
+    /// The version compared with earlier releases, when the full package metadata was read.
+    pub history: Option<ReleaseHistory>,
 }
 
 /// One artifact to evaluate.
@@ -338,7 +341,7 @@ impl Engine {
     }
 
     /// Registry facts for an artifact requested through the proxy. Failures only cost the
-    /// age rule, so they are logged and otherwise ignored.
+    /// metadata rules, so they are logged and otherwise ignored.
     async fn artifact_meta(&self, policy: &Policy, req: &ArtifactRequest) -> MetaFacts {
         let mut facts = MetaFacts {
             exists: true,
@@ -347,18 +350,33 @@ impl Engine {
         let Some(version) = &req.version else {
             return facts;
         };
-        let result: Result<Option<VersionMeta>, FetchError> = match req.ecosystem {
-            Ecosystem::Pypi => {
-                self.registry
-                    .pypi_release(&policy.upstream, &req.name, version)
-                    .await
-            }
-            Ecosystem::Npm => self
-                .registry
-                .package_meta(&policy.upstream, Ecosystem::Npm, &req.name)
-                .await
-                .map(|m| m.and_then(|m| m.version(version).cloned())),
+        // npm needs the packument anyway. For PyPI the per-release document is enough unless
+        // a release history rule that applies to PyPI is on; then the project document (also
+        // cached for `check`) is read, falling back to the release document when it does not
+        // list the version yet.
+        let full = match req.ecosystem {
+            Ecosystem::Npm => true,
+            Ecosystem::Pypi => policy.pypi_history_rules_enabled(),
         };
+        let mut result: Result<Option<VersionMeta>, FetchError> = Ok(None);
+        if full {
+            result = self
+                .registry
+                .package_meta(&policy.upstream, req.ecosystem, &req.name)
+                .await
+                .map(|m| {
+                    m.and_then(|m| {
+                        facts.history = release_history(&m, version);
+                        m.version(version).cloned()
+                    })
+                });
+        }
+        if req.ecosystem == Ecosystem::Pypi && !matches!(result, Ok(Some(_))) {
+            result = self
+                .registry
+                .pypi_release(&policy.upstream, &req.name, version)
+                .await;
+        }
         match result {
             Ok(Some(vm)) => {
                 // Prefer the upload time of this exact file over the release time.
@@ -541,6 +559,7 @@ impl Engine {
                 exists: meta.exists,
                 published: meta.published,
                 install_scripts: scripts,
+                history: meta.history.as_ref(),
                 now: now(),
             },
         );
@@ -684,6 +703,7 @@ impl Engine {
             exists: true,
             published: vm.published,
             install_scripts: vm.install_scripts.clone(),
+            history: release_history(&meta, &version),
         };
         let Some(file) = choose_file(eco, &vm.files) else {
             return Err(EngineError::NotFound(format!(

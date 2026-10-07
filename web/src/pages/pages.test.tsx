@@ -50,6 +50,31 @@ describe('Policy page', () => {
     expect(await screen.findByTestId('policy-saved')).toBeInTheDocument();
     expect(window.__customsMock?.server.policy).toMatchObject({ min_age_days: 7, allow: ['pypi:requests', 'npm:react', 'pypi:httpx'] });
   });
+
+  it('edits the release history rules', async () => {
+    const user = userEvent.setup();
+    renderApp('/policy');
+    const provenance = await screen.findByRole('combobox', { name: 'Provenance dropped' });
+    expect(provenance).toHaveValue('warn');
+    expect(screen.getByRole('combobox', { name: 'Unusual version jump' })).toHaveValue('off');
+    await user.selectOptions(provenance, 'block');
+    await user.selectOptions(screen.getByRole('combobox', { name: 'New publisher' }), 'off');
+    const dormant = screen.getByRole('textbox', { name: 'Dormancy period (days)' });
+    await user.clear(dormant);
+    await user.type(dormant, '0');
+    await user.click(screen.getByRole('button', { name: 'Save policy' }));
+    expect(await screen.findByText('Enter a whole number of days from 1 to 3650.')).toBeInTheDocument();
+    await user.clear(dormant);
+    await user.type(dormant, '180');
+    await user.click(screen.getByRole('button', { name: 'Save policy' }));
+    expect(await screen.findByTestId('policy-saved')).toBeInTheDocument();
+    expect(window.__customsMock?.server.policy).toMatchObject({
+      provenance_dropped: 'block',
+      publisher_changed: 'off',
+      install_script_added: 'warn',
+      dormant_days: 180,
+    });
+  });
 });
 
 describe('Check page', () => {

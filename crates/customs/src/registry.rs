@@ -74,7 +74,7 @@ pub struct FileMeta {
     pub yanked: bool,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct VersionMeta {
     pub version: String,
     /// Earliest upload time among the version's files (PyPI) or `time[version]` (npm).
@@ -82,6 +82,15 @@ pub struct VersionMeta {
     pub files: Vec<FileMeta>,
     /// npm lifecycle scripts that run on install (`preinstall`, `install`, `postinstall`).
     pub install_scripts: Vec<String>,
+    /// The same scripts with their commands, `(script, command)`. The command is empty when
+    /// only `hasInstallScript` is known, and capped at [`MAX_SCRIPT_CHARS`] characters.
+    pub install_commands: Vec<(String, String)>,
+    /// npm: the version carries a provenance attestation (`dist.attestations`). PyPI's JSON
+    /// API does not report attestations, so this is always false there.
+    pub attested: bool,
+    /// npm: the account that published the version (`_npmUser.name`). PyPI's JSON API does
+    /// not name uploaders.
+    pub publisher: Option<String>,
     pub yanked: bool,
 }
 
@@ -120,6 +129,10 @@ fn parse_time(v: &Value) -> Option<DateTime<Utc>> {
 }
 
 const NPM_INSTALL_SCRIPTS: [&str; 3] = ["preinstall", "install", "postinstall"];
+
+/// Longest install script command kept per version. Packuments of large packages list
+/// thousands of versions, so metadata keeps only what the policy rules compare.
+pub const MAX_SCRIPT_CHARS: usize = 512;
 
 /// URL path form of an npm package name: scoped names escape the slash.
 pub fn npm_escape(name: &str) -> String {
@@ -359,8 +372,8 @@ fn pypi_version(version: String, files: Vec<FileMeta>) -> VersionMeta {
         version,
         published,
         files,
-        install_scripts: Vec::new(),
         yanked,
+        ..Default::default()
     }
 }
 
@@ -432,22 +445,37 @@ pub fn parse_npm_packument(v: &Value) -> Option<PackageMeta> {
                         .to_string();
                     let filename = tarball.rsplit('/').next().unwrap_or("").to_string();
                     let published = time.and_then(|t| t.get(ver)).and_then(parse_time);
-                    let mut install_scripts: Vec<String> = doc
+                    let mut install_commands: Vec<(String, String)> = doc
                         .get("scripts")
                         .and_then(Value::as_object)
                         .map(|s| {
                             NPM_INSTALL_SCRIPTS
                                 .iter()
-                                .filter(|k| s.contains_key(**k))
-                                .map(|k| k.to_string())
+                                .filter_map(|k| {
+                                    let cmd = s.get(*k)?.as_str().unwrap_or("");
+                                    Some((
+                                        k.to_string(),
+                                        cmd.chars().take(MAX_SCRIPT_CHARS).collect(),
+                                    ))
+                                })
                                 .collect()
                         })
                         .unwrap_or_default();
-                    if install_scripts.is_empty()
+                    if install_commands.is_empty()
                         && doc.get("hasInstallScript").and_then(Value::as_bool) == Some(true)
                     {
-                        install_scripts.push("install script".to_string());
+                        install_commands.push(("install script".to_string(), String::new()));
                     }
+                    let install_scripts = install_commands.iter().map(|(k, _)| k.clone()).collect();
+                    let publisher = doc
+                        .get("_npmUser")
+                        .and_then(|u| u.get("name"))
+                        .and_then(Value::as_str)
+                        .filter(|n| !n.is_empty())
+                        .map(|n| n.chars().take(214).collect());
+                    let attested = dist
+                        .and_then(|d| d.get("attestations"))
+                        .is_some_and(|a| !a.is_null());
                     VersionMeta {
                         version: ver.clone(),
                         published,
@@ -463,6 +491,9 @@ pub fn parse_npm_packument(v: &Value) -> Option<PackageMeta> {
                             yanked: false,
                         }],
                         install_scripts,
+                        install_commands,
+                        attested,
+                        publisher,
                         yanked: doc.get("deprecated").is_some_and(|d| d.is_string()),
                     }
                 })
@@ -526,6 +557,44 @@ mod tests {
         assert_eq!(v2.files[0].filename, "p-2.0.0.tgz");
         assert!(v2.published.is_some());
         assert_eq!(m.version("3.0.0-rc.1").unwrap().install_scripts.len(), 1);
+    }
+
+    #[test]
+    fn keeps_release_history_fields() {
+        let long = "x".repeat(MAX_SCRIPT_CHARS + 50);
+        let v: Value = serde_json::from_str(&format!(
+            r#"{{"name": "@s/p",
+                "time": {{"1.0.0": "2024-05-01T00:00:00.000Z", "1.0.1": "2024-06-01T00:00:00.000Z"}},
+                "versions": {{
+                  "1.0.0": {{"_npmUser": {{"name": "alice", "email": "a@x"}},
+                            "dist": {{"tarball": "t", "attestations": {{"url": "u", "provenance": {{}}}}}},
+                            "scripts": {{"install": "node-gyp rebuild", "postinstall": "{long}", "build": "tsc"}}}},
+                  "1.0.1": {{"_npmUser": {{"name": ""}}, "dist": {{"tarball": "t", "attestations": null}},
+                            "scripts": {{"preinstall": 5}}}}
+                }}}}"#
+        ))
+        .unwrap();
+        let m = parse_npm_packument(&v).unwrap();
+        let a = m.version("1.0.0").unwrap();
+        assert!(a.attested);
+        assert_eq!(a.publisher.as_deref(), Some("alice"));
+        assert_eq!(a.install_scripts, vec!["install", "postinstall"]);
+        assert_eq!(a.install_commands[0].1, "node-gyp rebuild");
+        assert_eq!(a.install_commands[1].1.len(), MAX_SCRIPT_CHARS);
+        let b = m.version("1.0.1").unwrap();
+        assert!(!b.attested);
+        assert_eq!(b.publisher, None);
+        // A non-string command still counts as a script, with an unknown command.
+        assert_eq!(
+            b.install_commands,
+            vec![("preinstall".to_string(), String::new())]
+        );
+        // PyPI metadata has none of these.
+        let p = parse_pypi_project(&serde_json::json!({"info": {"name": "d"},
+            "releases": {"1.0": [{"filename": "d-1.0.tar.gz", "url": "u"}]}}))
+        .unwrap();
+        let r = p.version("1.0").unwrap();
+        assert!(!r.attested && r.publisher.is_none() && r.install_commands.is_empty());
     }
 
     #[test]

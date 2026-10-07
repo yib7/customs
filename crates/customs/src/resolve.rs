@@ -60,7 +60,7 @@ fn newest(meta: &PackageMeta, ok: impl Fn(&str) -> bool) -> Option<String> {
     best.map(str::to_string)
 }
 
-fn compare_versions(eco: Ecosystem, a: &str, b: &str) -> Ordering {
+pub(crate) fn compare_versions(eco: Ecosystem, a: &str, b: &str) -> Ordering {
     match eco {
         Ecosystem::Npm => match (semver::Version::parse(a), semver::Version::parse(b)) {
             (Ok(x), Ok(y)) => x.cmp(&y),
@@ -348,6 +348,11 @@ impl Pep440 {
         self.pre.is_some() || self.dev.is_some()
     }
 
+    /// First release segment (`2` in `2.31.0`).
+    pub fn major(&self) -> u64 {
+        self.release.first().copied().unwrap_or(0)
+    }
+
     fn release_starts_with(&self, prefix: &[u64]) -> bool {
         prefix
             .iter()
@@ -404,10 +409,8 @@ mod tests {
                 .iter()
                 .map(|v| VersionMeta {
                     version: v.to_string(),
-                    published: None,
-                    files: vec![],
-                    install_scripts: vec![],
                     yanked: *v == "1.9.9",
+                    ..Default::default()
                 })
                 .collect(),
         }

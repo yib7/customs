@@ -114,6 +114,26 @@ impl AgeSeverity {
     }
 }
 
+/// Severity of a rule that can also be switched off (the release history rules).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RuleSeverity {
+    Off,
+    Warn,
+    Block,
+}
+
+impl RuleSeverity {
+    /// The decision a hit carries, or `None` when the rule is off.
+    pub fn decision(&self) -> Option<Decision> {
+        match self {
+            RuleSeverity::Off => None,
+            RuleSeverity::Warn => Some(Decision::Warn),
+            RuleSeverity::Block => Some(Decision::Block),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Upstream {
@@ -157,6 +177,15 @@ fn default_true() -> bool {
 fn default_min_age() -> u32 {
     3
 }
+fn default_warn() -> RuleSeverity {
+    RuleSeverity::Warn
+}
+fn default_off() -> RuleSeverity {
+    RuleSeverity::Off
+}
+fn default_dormant_days() -> u32 {
+    365
+}
 
 /// The active policy. Field names and defaults follow DESIGN.md section 8.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -179,6 +208,29 @@ pub struct Policy {
     pub block_nonexistent: bool,
     #[serde(default = "default_true")]
     pub block_install_scripts_from_new: bool,
+    // Release history rules: compare the requested version with the releases published
+    // before it to catch compromised releases of established packages. They are heuristics
+    // with known false positives (CI changes, new native builds, new maintainers), so they
+    // warn by default and the model still judges the archive itself.
+    /// npm: this version has no provenance attestation but the previous release had one.
+    #[serde(default = "default_warn")]
+    pub provenance_dropped: RuleSeverity,
+    /// npm: this version adds an install script or changes its command.
+    #[serde(default = "default_warn")]
+    pub install_script_added: RuleSeverity,
+    /// npm: this version was published by an account that published none of the previous
+    /// five releases.
+    #[serde(default = "default_warn")]
+    pub publisher_changed: RuleSeverity,
+    /// The previous release is more than `dormant_days` older than this version.
+    #[serde(default = "default_warn")]
+    pub dormant_revival: RuleSeverity,
+    #[serde(default = "default_dormant_days")]
+    pub dormant_days: u32,
+    /// Jumps of more than one major version, and releases on an old major line that had
+    /// been quiet for `dormant_days` while a newer major exists.
+    #[serde(default = "default_off")]
+    pub version_anomaly: RuleSeverity,
     #[serde(default)]
     pub allow: Vec<String>,
     #[serde(default)]
@@ -197,6 +249,12 @@ impl Default for Policy {
             min_age_severity: AgeSeverity::Block,
             block_nonexistent: true,
             block_install_scripts_from_new: true,
+            provenance_dropped: default_warn(),
+            install_script_added: default_warn(),
+            publisher_changed: default_warn(),
+            dormant_revival: default_warn(),
+            dormant_days: default_dormant_days(),
+            version_anomaly: default_off(),
             allow: Vec::new(),
             deny: Vec::new(),
             upstream: Upstream::default(),
@@ -330,6 +388,12 @@ impl Policy {
         if self.min_age_days > 3650 {
             return Err(ConfigError::new("min_age_days", "must be at most 3650"));
         }
+        if !(1..=3650).contains(&self.dormant_days) {
+            return Err(ConfigError::new(
+                "dormant_days",
+                "must be between 1 and 3650 (set dormant_revival = \"off\" to disable)",
+            ));
+        }
         for (list, key) in [(&self.allow, "allow"), (&self.deny, "deny")] {
             for (i, entry) in list.iter().enumerate() {
                 PackageRule::parse(entry)
@@ -348,6 +412,12 @@ impl Policy {
             }
         }
         Ok(self)
+    }
+
+    /// Whether a release history rule that applies to PyPI is on. Those rules need the
+    /// project document, which the proxy otherwise does not read.
+    pub fn pypi_history_rules_enabled(&self) -> bool {
+        self.dormant_revival != RuleSeverity::Off || self.version_anomaly != RuleSeverity::Off
     }
 
     pub fn allow_rules(&self) -> Vec<PackageRule> {
@@ -469,6 +539,45 @@ npm = "https://registry.npmjs.org"
         assert_eq!(e.key, "warn_threshold");
         let e = Policy::from_json(r#"{"mode": "monitor", "bogus": 1}"#).unwrap_err();
         assert!(e.message.contains("bogus"), "{e}");
+    }
+
+    #[test]
+    fn release_history_keys() {
+        let p = Policy::default();
+        assert_eq!(p.provenance_dropped, RuleSeverity::Warn);
+        assert_eq!(p.install_script_added, RuleSeverity::Warn);
+        assert_eq!(p.publisher_changed, RuleSeverity::Warn);
+        assert_eq!(p.dormant_revival, RuleSeverity::Warn);
+        assert_eq!(p.dormant_days, 365);
+        assert_eq!(p.version_anomaly, RuleSeverity::Off);
+        assert!(p.pypi_history_rules_enabled());
+
+        let p = Policy::from_toml(
+            "provenance_dropped = \"block\"\ninstall_script_added = \"off\"\n\
+             publisher_changed = \"warn\"\ndormant_revival = \"off\"\ndormant_days = 730\n\
+             version_anomaly = \"off\"",
+        )
+        .unwrap();
+        assert_eq!(p.provenance_dropped, RuleSeverity::Block);
+        assert_eq!(p.provenance_dropped.decision(), Some(Decision::Block));
+        assert_eq!(p.install_script_added.decision(), None);
+        assert_eq!(p.dormant_days, 730);
+        assert!(!p.pypi_history_rules_enabled());
+        assert_eq!(Policy::from_toml(&p.to_toml()).unwrap(), p);
+        let json = serde_json::to_value(&p).unwrap();
+        assert_eq!(json["provenance_dropped"], "block");
+        assert_eq!(json["install_script_added"], "off");
+        let p = Policy::from_json(r#"{"version_anomaly": "warn", "dormant_days": 90}"#).unwrap();
+        assert_eq!(p.version_anomaly, RuleSeverity::Warn);
+
+        let e = Policy::from_toml("dormant_days = 0").unwrap_err();
+        assert_eq!(e.key, "dormant_days");
+        let e = Policy::from_json(r#"{"dormant_days": 5000}"#).unwrap_err();
+        assert_eq!(e.key, "dormant_days");
+        let e = Policy::from_toml("publisher_changed = \"maybe\"").unwrap_err();
+        assert!(e.to_string().contains("publisher_changed"), "{e}");
+        let e = Policy::from_toml("provenance_dropped = true").unwrap_err();
+        assert!(e.to_string().contains("provenance_dropped"), "{e}");
     }
 
     #[test]

@@ -9,6 +9,7 @@ pub mod cli;
 pub mod client;
 pub mod config;
 pub mod engine;
+pub mod history;
 pub mod hook;
 pub mod metrics;
 pub mod policy;

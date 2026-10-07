@@ -416,8 +416,10 @@ allow). `risk` and component scores are `null` when that part of the model could
 (for example a package that does not exist has only a name score). `thresholds` are the
 effective ones (policy overrides applied). Policy `severity` is `allow` for informational
 hits (`allow`, `not_scanned`), else `warn` or `block`. Rules: `deny`, `allow`,
-`block_nonexistent`, `min_age_days`, `block_install_scripts_from_new`, `scan_error`
-(scanner rejected the archive, warn), `not_scanned` (archive above the scan size limit).
+`block_nonexistent`, `min_age_days`, `block_install_scripts_from_new`, the release history
+rules of section 8 (`provenance_dropped`, `install_script_added`, `publisher_changed`,
+`dormant_revival`, `version_anomaly`), `scan_error` (scanner rejected the archive, warn),
+`not_scanned` (archive above the scan size limit).
 `reasons` mix model features (positive contributions to the stacked logit, largest first)
 and name signals (`name_dist1`, `name_contains_popular_token`, ...). In `monitor` mode the
 proxy records the verdict and serves the artifact anyway (`mode` says which applied).
@@ -497,6 +499,13 @@ min_age_days = 3            # versions published less recently hit min_age_days;
 min_age_severity = "block"  # or "warn"
 block_nonexistent = true    # requesting a name the registry does not know is recorded and denied in hooks
 block_install_scripts_from_new = true  # npm install scripts in packages younger than min_age_days
+# Release history rules: "off", "warn" or "block"
+provenance_dropped = "warn"    # npm: no provenance attestation, the previous release had one
+install_script_added = "warn"  # npm: install script added or its command changed
+publisher_changed = "warn"     # npm: publisher of none of the previous 5 releases
+dormant_revival = "warn"       # previous release is more than dormant_days older
+dormant_days = 365
+version_anomaly = "off"        # major version jump, or a release on a long-quiet old major
 allow = ["pypi:requests", "npm:react"]  # always allow (exact names)
 deny  = ["npm:event-stream@3.3.6"]
 [upstream]
@@ -515,6 +524,34 @@ turns nonexistent names into warnings. Unknown keys and bad values are rejected 
 key that holds them. Without `--config`, the server reads `./customs.toml`, then
 `<data-dir>/policy.toml`, and `PUT /api/policy` writes to the file it read (or
 `<data-dir>/policy.toml`).
+
+**Release history rules.** Account takeovers (the 2025 chalk/debug compromise, the
+Shai-Hulud worm) publish new versions of established libraries with a payload inside
+legitimate code, the classifier's weakest slice. These rules compare the requested version
+with the releases published before it, using only the registry metadata Customs already
+reads (`customs::history`). "Earlier releases" are the other versions with a strictly
+earlier publish time; prereleases among them are ignored unless the requested version is
+itself a prerelease. A version without a publish time gets no history rules.
+
+| Rule | Ecosystems | Fires when |
+|---|---|---|
+| `provenance_dropped` | npm | `dist.attestations` is absent but the previous release had it |
+| `install_script_added` | npm | a `preinstall`/`install`/`postinstall` script is new or its command changed since the previous release (the detail shows the command, cut at 120 characters) |
+| `publisher_changed` | npm | `_npmUser.name` differs from every known publisher of the previous 5 releases |
+| `dormant_revival` | npm, PyPI | the previous release is more than `dormant_days` (1 to 3650) older |
+| `version_anomaly` | npm, PyPI | the major version is more than one above the highest earlier version, or the release extends an older major line while a newer major exists and that line had no release for `dormant_days` (or never had one) |
+
+These are heuristics with known false positives: maintainers move publishing on or off CI
+(provenance comes and goes), add native builds (`install: node-gyp rebuild`), hand packages
+to new owners, and revive old projects. That is why they default to `warn` (and
+`version_anomaly`, the noisiest, to `off`); the model still judges the archive itself, and
+`block` is available for teams that would rather review such releases first. The npm rules
+read the full packument; PyPI's JSON API names neither uploaders nor attestations, so
+`provenance_dropped` and `publisher_changed` are npm only (PEP 740 attestations through
+PyPI's Integrity API are future work, since they cost a request per file). For PyPI
+downloads through the proxy, the project document `/pypi/<name>/json` is read instead of
+the per-release one while `dormant_revival` or `version_anomaly` is on. The rules apply
+both to proxied downloads and to `POST /api/check`.
 
 ## 9. Claude Code integration
 
