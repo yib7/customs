@@ -1,0 +1,234 @@
+@import 'tailwindcss';
+
+/*
+ * Color tokens. Light is the default; dark applies when the OS prefers dark and the user has
+ * not chosen light, or when the user picked dark explicitly (data-theme on <html>).
+ * Decision colors were checked for color-vision deficiency separation; they always ship with
+ * an icon and a text label as well.
+ */
+:root {
+  color-scheme: light;
+  --c-bg: #f5f6f8;
+  --c-surface: #ffffff;
+  --c-surface-2: #f0f2f5;
+  --c-surface-3: #e6e9ee;
+  --c-line: #e1e4e9;
+  --c-line-strong: #c9ced6;
+  --c-ink: #10161d;
+  --c-ink-2: #46505c;
+  --c-muted: #66707c;
+  --c-accent: #0d6b66;
+  --c-accent-hover: #0a5753;
+  --c-accent-ink: #ffffff;
+  --c-accent-soft: #e2f1ef;
+  --c-focus: #2563eb;
+  --c-grid: #e6e8ec;
+  --c-axis: #c3c8cf;
+  --c-code-bg: #f4f5f7;
+
+  --c-allow: #2a78d6;
+  --c-allow-ink: #1a59a6;
+  --c-allow-soft: #e7f0fb;
+  --c-warn: #eda100;
+  --c-warn-ink: #7d5400;
+  --c-warn-soft: #fdf3da;
+  --c-block: #d03b3b;
+  --c-block-ink: #b02a2a;
+  --c-block-soft: #fcebeb;
+  --c-ghost: #7a5cc2;
+  --c-ghost-ink: #5a3fa3;
+  --c-ghost-soft: #f0ebfa;
+
+  --c-pos: #d03b3b;
+  --c-neg: #2a78d6;
+  --shadow-card: 0 1px 2px rgb(16 22 29 / 0.04), 0 1px 1px rgb(16 22 29 / 0.03);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    color-scheme: dark;
+    --c-bg: #0d1116;
+    --c-surface: #151a21;
+    --c-surface-2: #1b2129;
+    --c-surface-3: #242b35;
+    --c-line: #262e38;
+    --c-line-strong: #36404c;
+    --c-ink: #e8ecf1;
+    --c-ink-2: #b3bcc7;
+    --c-muted: #8b95a2;
+    --c-accent: #3db8ad;
+    --c-accent-hover: #5fcac0;
+    --c-accent-ink: #062320;
+    --c-accent-soft: #12302e;
+    --c-focus: #7aa7ff;
+    --c-grid: #222a33;
+    --c-axis: #3a4450;
+    --c-code-bg: #0f1419;
+
+    --c-allow: #3987e5;
+    --c-allow-ink: #8dbaf3;
+    --c-allow-soft: #15263b;
+    --c-warn: #e0a400;
+    --c-warn-ink: #f2c95c;
+    --c-warn-soft: #2e2510;
+    --c-block: #d64545;
+    --c-block-ink: #f39a9a;
+    --c-block-soft: #351a1c;
+    --c-ghost: #9b85e6;
+    --c-ghost-ink: #c4b5f5;
+    --c-ghost-soft: #241e38;
+
+    --c-pos: #e05a5a;
+    --c-neg: #3987e5;
+    --shadow-card: 0 0 0 1px rgb(255 255 255 / 0.02);
+  }
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --c-bg: #0d1116;
+  --c-surface: #151a21;
+  --c-surface-2: #1b2129;
+  --c-surface-3: #242b35;
+  --c-line: #262e38;
+  --c-line-strong: #36404c;
+  --c-ink: #e8ecf1;
+  --c-ink-2: #b3bcc7;
+  --c-muted: #8b95a2;
+  --c-accent: #3db8ad;
+  --c-accent-hover: #5fcac0;
+  --c-accent-ink: #062320;
+  --c-accent-soft: #12302e;
+  --c-focus: #7aa7ff;
+  --c-grid: #222a33;
+  --c-axis: #3a4450;
+  --c-code-bg: #0f1419;
+
+  --c-allow: #3987e5;
+  --c-allow-ink: #8dbaf3;
+  --c-allow-soft: #15263b;
+  --c-warn: #e0a400;
+  --c-warn-ink: #f2c95c;
+  --c-warn-soft: #2e2510;
+  --c-block: #d64545;
+  --c-block-ink: #f39a9a;
+  --c-block-soft: #351a1c;
+  --c-ghost: #9b85e6;
+  --c-ghost-ink: #c4b5f5;
+  --c-ghost-soft: #241e38;
+
+  --c-pos: #e05a5a;
+  --c-neg: #3987e5;
+  --shadow-card: 0 0 0 1px rgb(255 255 255 / 0.02);
+}
+
+@theme inline {
+  --color-bg: var(--c-bg);
+  --color-surface: var(--c-surface);
+  --color-surface-2: var(--c-surface-2);
+  --color-surface-3: var(--c-surface-3);
+  --color-line: var(--c-line);
+  --color-line-strong: var(--c-line-strong);
+  --color-ink: var(--c-ink);
+  --color-ink-2: var(--c-ink-2);
+  --color-muted: var(--c-muted);
+  --color-accent: var(--c-accent);
+  --color-accent-hover: var(--c-accent-hover);
+  --color-accent-ink: var(--c-accent-ink);
+  --color-accent-soft: var(--c-accent-soft);
+  --color-focus: var(--c-focus);
+  --color-code: var(--c-code-bg);
+  --color-allow: var(--c-allow);
+  --color-allow-ink: var(--c-allow-ink);
+  --color-allow-soft: var(--c-allow-soft);
+  --color-warn: var(--c-warn);
+  --color-warn-ink: var(--c-warn-ink);
+  --color-warn-soft: var(--c-warn-soft);
+  --color-block: var(--c-block);
+  --color-block-ink: var(--c-block-ink);
+  --color-block-soft: var(--c-block-soft);
+  --color-ghost: var(--c-ghost);
+  --color-ghost-ink: var(--c-ghost-ink);
+  --color-ghost-soft: var(--c-ghost-soft);
+  --shadow-card: var(--shadow-card);
+  --font-sans: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+}
+
+html {
+  background: var(--c-bg);
+  color: var(--c-ink);
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--c-bg);
+  color: var(--c-ink);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+}
+
+:focus-visible {
+  outline: 2px solid var(--c-focus);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+.sr-only-focusable:not(:focus) {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+@keyframes feed-in {
+  from {
+    background-color: var(--c-accent-soft);
+  }
+  to {
+    background-color: transparent;
+  }
+}
+
+.feed-new {
+  animation: feed-in 2.4s ease-out;
+}
+
+@keyframes pulse-dot {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.pulse {
+  animation: pulse-dot 2s ease-in-out infinite;
+}
+
+@media (forced-colors: active) {
+  .decision-swatch {
+    forced-color-adjust: none;
+  }
+}

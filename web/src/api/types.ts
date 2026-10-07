@@ -1,0 +1,173 @@
+// Types mirroring docs/DESIGN.md sections 6 (Verdict), 7 (HTTP interface) and 8 (Policy).
+// Every value that originates from a package (name, version, file paths, snippets,
+// labels derived from registry metadata) is attacker-controlled and must only ever be
+// rendered as text.
+
+/** Known ecosystems. Unknown values from the server are passed through as strings. */
+export type KnownEcosystem = 'pypi' | 'npm';
+export type Ecosystem = KnownEcosystem | (string & {});
+
+export type Decision = 'allow' | 'warn' | 'block';
+
+export type EventKind = 'install' | 'check' | 'nonexistent_package';
+
+/** Per-model probabilities (DESIGN.md section 6, `scores`). Null when a model did not run. */
+export interface Scores {
+  code_gbdt: number | null;
+  code_nn: number | null;
+  name: number | null;
+}
+
+export interface PolicyHit {
+  rule: string;
+  severity: Decision;
+  detail: string;
+}
+
+export interface Reason {
+  feature: string;
+  value: number | null;
+  /** Signed contribution to the model logit. Positive pushes toward malicious. */
+  contribution: number;
+  label: string | null;
+}
+
+export interface Evidence {
+  indicator: string;
+  file: string;
+  line: number | null;
+  snippet: string;
+}
+
+export interface Thresholds {
+  warn: number;
+  block: number;
+  target_fpr_block?: number;
+}
+
+export interface Verdict {
+  /** Not part of the DESIGN.md verdict body; present when the server includes it. */
+  id: string | null;
+  ecosystem: Ecosystem;
+  name: string;
+  version: string | null;
+  artifact: string | null;
+  sha256: string | null;
+  decision: Decision;
+  /** Calibrated ensemble probability in [0, 1]. Null when no archive was scanned. */
+  risk: number | null;
+  scores: Scores;
+  policy_hits: PolicyHit[];
+  reasons: Reason[];
+  evidence: Evidence[];
+  scanned_ms: number | null;
+  model_version: string | null;
+  cached: boolean;
+  /** Optional extension: thresholds in effect when the verdict was made. */
+  thresholds: Thresholds | null;
+}
+
+export interface CustomsEvent {
+  id: string;
+  /** ISO 8601 timestamp. */
+  ts: string;
+  ecosystem: Ecosystem;
+  name: string;
+  version: string | null;
+  client: string | null;
+  kind: EventKind;
+  decision: Decision | null;
+  risk: number | null;
+  verdict_id: string | null;
+}
+
+export interface DecisionCounts {
+  allow: number;
+  warn: number;
+  block: number;
+}
+
+export interface DayCount {
+  /** YYYY-MM-DD */
+  date: string;
+  count: number;
+}
+
+export interface TopReason {
+  feature: string;
+  label: string | null;
+  count: number;
+}
+
+export interface Stats {
+  total: number;
+  by_decision: DecisionCounts;
+  by_ecosystem: Record<string, DecisionCounts>;
+  by_kind: Record<EventKind, number>;
+  blocks_per_day: DayCount[];
+  top_reasons: TopReason[];
+}
+
+export type Threshold = 'model' | number;
+export type PolicyMode = 'enforce' | 'monitor';
+
+export interface Policy {
+  mode: PolicyMode;
+  warn_threshold: Threshold;
+  block_threshold: Threshold;
+  min_age_days: number;
+  block_nonexistent: boolean;
+  block_install_scripts_from_new: boolean;
+  allow: string[];
+  deny: string[];
+  upstream: Record<string, string>;
+}
+
+export interface MetricValue {
+  value: number;
+  ci_low?: number;
+  ci_high?: number;
+}
+
+export interface GuardDogComparison {
+  /** False positive rate GuardDog achieved on the benign test set. */
+  fpr: number | null;
+  /** GuardDog recall at that FPR. */
+  recall: number | null;
+  /** Customs recall at the same (matched) FPR. */
+  customs_recall: number | null;
+}
+
+export interface ModelMetrics {
+  split: string | null;
+  roc_auc: MetricValue | null;
+  pr_auc: MetricValue | null;
+  recall_at_fpr_0_001: MetricValue | null;
+  recall_at_fpr_0_01: MetricValue | null;
+  brier: MetricValue | null;
+  n_test_malicious: number | null;
+  n_test_benign: number | null;
+  guarddog: GuardDogComparison | null;
+}
+
+export interface ModelInfo {
+  model_version: string;
+  feature_schema_version: number | null;
+  thresholds: Thresholds | null;
+  metrics: ModelMetrics | null;
+}
+
+export interface CheckRequest {
+  ecosystem: KnownEcosystem;
+  name: string;
+  version: string | null;
+}
+
+export interface EventQuery {
+  limit?: number;
+  before?: string;
+  decision?: Decision;
+  ecosystem?: KnownEcosystem;
+  kind?: EventKind;
+  q?: string;
+}

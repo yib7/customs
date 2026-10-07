@@ -1,0 +1,118 @@
+import type { Policy } from '../api/types';
+
+export type PolicyField =
+  | 'mode'
+  | 'warn_threshold'
+  | 'block_threshold'
+  | 'min_age_days'
+  | 'allow'
+  | 'deny';
+
+export type PolicyErrors = Partial<Record<PolicyField, string>>;
+
+/** Form state: thresholds are edited as text so partial input can be shown and validated. */
+export interface PolicyDraft {
+  mode: Policy['mode'];
+  warnModel: boolean;
+  warnValue: string;
+  blockModel: boolean;
+  blockValue: string;
+  minAgeDays: string;
+  block_nonexistent: boolean;
+  block_install_scripts_from_new: boolean;
+  allow: string[];
+  deny: string[];
+}
+
+const LIST_ENTRY = /^(pypi|npm):(@[a-z0-9~-][a-z0-9._~-]*\/)?[a-z0-9~-][a-z0-9._~-]*(@[A-Za-z0-9.+!_-]+)?$/i;
+const PYPI_ENTRY = /^pypi:[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?(@[A-Za-z0-9.+!_-]+)?$/;
+
+/** Validates an allow or deny entry: `ecosystem:name` or `ecosystem:name@version`. */
+export function validateListEntry(entry: string): string | null {
+  const s = entry.trim();
+  if (!s) return 'Entry is empty.';
+  if (s.length > 260) return 'Entry is too long.';
+  if (!s.includes(':')) return 'Use the form ecosystem:name, for example pypi:requests or npm:react.';
+  const eco = s.slice(0, s.indexOf(':')).toLowerCase();
+  if (eco !== 'pypi' && eco !== 'npm') return 'Ecosystem must be pypi or npm.';
+  const ok = eco === 'pypi' ? PYPI_ENTRY.test(s) : LIST_ENTRY.test(s);
+  if (!ok) return `Not a valid ${eco === 'pypi' ? 'PyPI' : 'npm'} package name. Optional version goes after @.`;
+  return null;
+}
+
+export function policyToDraft(p: Policy): PolicyDraft {
+  return {
+    mode: p.mode,
+    warnModel: p.warn_threshold === 'model',
+    warnValue: p.warn_threshold === 'model' ? '' : String(p.warn_threshold),
+    blockModel: p.block_threshold === 'model',
+    blockValue: p.block_threshold === 'model' ? '' : String(p.block_threshold),
+    minAgeDays: String(p.min_age_days),
+    block_nonexistent: p.block_nonexistent,
+    block_install_scripts_from_new: p.block_install_scripts_from_new,
+    allow: [...p.allow],
+    deny: [...p.deny],
+  };
+}
+
+function parseThresholdText(s: string): number | null {
+  const t = s.trim();
+  if (!/^(0(\.\d+)?|1(\.0+)?|\.\d+)$/.test(t)) return null;
+  return Number(t);
+}
+
+export interface DraftResult {
+  errors: PolicyErrors;
+  policy: Omit<Policy, 'upstream'> | null;
+}
+
+/** Validates a draft and converts it to a policy. `policy` is null when there are errors. */
+export function validateDraft(d: PolicyDraft): DraftResult {
+  const errors: PolicyErrors = {};
+  let warn: Policy['warn_threshold'] = 'model';
+  let block: Policy['block_threshold'] = 'model';
+
+  if (!d.warnModel) {
+    const n = parseThresholdText(d.warnValue);
+    if (n === null) errors.warn_threshold = 'Enter a probability between 0 and 1, for example 0.35.';
+    else warn = n;
+  }
+  if (!d.blockModel) {
+    const n = parseThresholdText(d.blockValue);
+    if (n === null) errors.block_threshold = 'Enter a probability between 0 and 1, for example 0.8.';
+    else block = n;
+  }
+  if (typeof warn === 'number' && typeof block === 'number' && !errors.warn_threshold && !errors.block_threshold) {
+    if (warn >= block) errors.block_threshold = 'Block threshold must be higher than the warn threshold.';
+  }
+
+  const ageText = d.minAgeDays.trim();
+  const age = Number(ageText);
+  if (!/^\d+$/.test(ageText) || !Number.isInteger(age)) errors.min_age_days = 'Enter a whole number of days (0 disables the rule).';
+  else if (age > 3650) errors.min_age_days = 'Use at most 3650 days.';
+
+  const badAllow = d.allow.find((e) => validateListEntry(e) !== null);
+  if (badAllow !== undefined) errors.allow = `Invalid entry: ${badAllow.slice(0, 80)}`;
+  const badDeny = d.deny.find((e) => validateListEntry(e) !== null);
+  if (badDeny !== undefined) errors.deny = `Invalid entry: ${badDeny.slice(0, 80)}`;
+  if (!errors.allow && !errors.deny) {
+    const allowSet = new Set(d.allow.map((e) => e.toLowerCase()));
+    const both = d.deny.find((e) => allowSet.has(e.toLowerCase()));
+    if (both) errors.deny = `${both.slice(0, 80)} is also on the allow list. Remove it from one list.`;
+  }
+
+  if (Object.keys(errors).length > 0) return { errors, policy: null };
+  return {
+    errors,
+    policy: {
+      mode: d.mode,
+      warn_threshold: warn,
+      block_threshold: block,
+      min_age_days: age,
+      block_nonexistent: d.block_nonexistent,
+      block_install_scripts_from_new: d.block_install_scripts_from_new,
+      allow: d.allow.map((e) => e.trim()),
+      deny: d.deny.map((e) => e.trim()),
+    },
+  };
+}

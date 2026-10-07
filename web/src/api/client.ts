@@ -1,0 +1,166 @@
+import {
+  isRecord,
+  parseEventList,
+  parseModelInfo,
+  parsePolicy,
+  parseStats,
+  parseVerdict,
+} from './parse';
+import type {
+  CheckRequest,
+  CustomsEvent,
+  EventQuery,
+  ModelInfo,
+  Policy,
+  Stats,
+  Verdict,
+} from './types';
+
+export class ApiError extends Error {
+  readonly status: number;
+  /** Machine-readable error code from the server body, if any. */
+  readonly code: string | null;
+  /** Field-level validation messages keyed by field name. */
+  readonly fieldErrors: Record<string, string>;
+
+  constructor(status: number, message: string, code: string | null = null, fieldErrors: Record<string, string> = {}) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+    this.code = code;
+    this.fieldErrors = fieldErrors;
+  }
+}
+
+const MAX_ERROR_LEN = 500;
+const UNREACHABLE = 'Could not reach the Customs server. Is `customs serve` running?';
+
+/**
+ * Builds an ApiError from an error response body. Accepts the shapes
+ * `{ error: "msg" }`, `{ message: "msg" }`, `{ errors: [{ field, message }] }`,
+ * `{ errors: { field: "msg" } }`, and plain text.
+ */
+export function errorFromBody(status: number, body: unknown, statusText = ''): ApiError {
+  let message = '';
+  let code: string | null = null;
+  const fieldErrors: Record<string, string> = {};
+  if (typeof body === 'string') {
+    message = body.trim();
+  } else if (isRecord(body)) {
+    const err = body.error;
+    if (typeof err === 'string') message = err;
+    else if (isRecord(err) && typeof err.message === 'string') message = err.message;
+    if (!message && typeof body.message === 'string') message = body.message;
+    if (typeof body.code === 'string') code = body.code;
+    else if (typeof body.kind === 'string') code = body.kind;
+    const errors = body.errors;
+    if (Array.isArray(errors)) {
+      for (const e of errors) {
+        if (isRecord(e) && typeof e.message === 'string') {
+          const field = typeof e.field === 'string' ? e.field : '_';
+          fieldErrors[field] = e.message.slice(0, MAX_ERROR_LEN);
+        } else if (typeof e === 'string' && !message) {
+          message = e;
+        }
+      }
+    } else if (isRecord(errors)) {
+      for (const [field, msg] of Object.entries(errors)) {
+        if (typeof msg === 'string') fieldErrors[field] = msg.slice(0, MAX_ERROR_LEN);
+      }
+    }
+  }
+  if (!message) {
+    const firstField = Object.values(fieldErrors)[0];
+    message = firstField ?? `Request failed (${status}${statusText ? ` ${statusText}` : ''})`;
+  }
+  return new ApiError(status, message.slice(0, MAX_ERROR_LEN), code, fieldErrors);
+}
+
+async function readBody(res: Response): Promise<unknown> {
+  const text = await res.text();
+  if (!text) return null;
+  const type = res.headers.get('content-type') ?? '';
+  if (type.includes('json') || /^\s*[[{]/.test(text)) {
+    try {
+      return JSON.parse(text) as unknown;
+    } catch {
+      return text;
+    }
+  }
+  return text;
+}
+
+async function request<T>(path: string, parse: (v: unknown) => T, init: RequestInit = {}): Promise<T> {
+  let res: Response;
+  try {
+    res = await fetch(path, {
+      ...init,
+      headers: { Accept: 'application/json', ...(init.body ? { 'Content-Type': 'application/json' } : {}), ...init.headers },
+    });
+  } catch (e) {
+    if (e instanceof DOMException && e.name === 'AbortError') throw e;
+    throw new ApiError(0, UNREACHABLE);
+  }
+  const body = await readBody(res);
+  if (!res.ok) {
+    // A dev proxy or load balancer answers 502 to 504 with no body when the server is down.
+    if (res.status >= 502 && res.status <= 504 && (body === null || body === '')) throw new ApiError(res.status, UNREACHABLE);
+    throw errorFromBody(res.status, body, res.statusText);
+  }
+  return parse(body);
+}
+
+export function eventsPath(q: EventQuery = {}): string {
+  const params = new URLSearchParams();
+  if (q.limit !== undefined) params.set('limit', String(q.limit));
+  if (q.before) params.set('before', q.before);
+  if (q.decision) params.set('decision', q.decision);
+  if (q.ecosystem) params.set('ecosystem', q.ecosystem);
+  if (q.kind) params.set('kind', q.kind);
+  if (q.q) params.set('q', q.q);
+  const s = params.toString();
+  return s ? `/api/events?${s}` : '/api/events';
+}
+
+export const api = {
+  events(q: EventQuery = {}, signal?: AbortSignal): Promise<CustomsEvent[]> {
+    return request(eventsPath(q), parseEventList, { signal });
+  },
+  verdict(id: string, signal?: AbortSignal): Promise<Verdict> {
+    return request(`/api/verdicts/${encodeURIComponent(id)}`, parseVerdict, { signal });
+  },
+  stats(signal?: AbortSignal): Promise<Stats> {
+    return request('/api/stats', parseStats, { signal });
+  },
+  policy(signal?: AbortSignal): Promise<Policy> {
+    return request('/api/policy', parsePolicy, { signal });
+  },
+  /**
+   * Saves the policy. `base` is the raw object last received from the server so that
+   * fields this client does not know about are sent back unchanged.
+   */
+  savePolicy(policy: Policy, base: Record<string, unknown> = {}): Promise<Policy> {
+    return request('/api/policy', parsePolicy, {
+      method: 'PUT',
+      body: JSON.stringify({ ...base, ...policy }),
+    });
+  },
+  /** Fetches the policy along with the raw body (used as the merge base when saving). */
+  async policyWithRaw(signal?: AbortSignal): Promise<{ policy: Policy; raw: Record<string, unknown> }> {
+    return request(
+      '/api/policy',
+      (v) => ({ policy: parsePolicy(v), raw: isRecord(v) ? (isRecord(v.policy) ? v.policy : v) : {} }),
+      { signal },
+    );
+  },
+  model(signal?: AbortSignal): Promise<ModelInfo> {
+    return request('/api/model', parseModelInfo, { signal });
+  },
+  check(req: CheckRequest, signal?: AbortSignal): Promise<Verdict> {
+    return request('/api/check', parseVerdict, {
+      method: 'POST',
+      body: JSON.stringify(req),
+      signal,
+    });
+  },
+};
