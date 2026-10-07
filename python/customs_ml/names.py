@@ -96,7 +96,9 @@ def build(n_pypi_neg: int = 250_000, seed: int = 5) -> pd.DataFrame:
     ]
     npm_names = npm_search_names(default_npm_queries())
     npm_names |= set(popular_npm(20000))
-    npm_neg = [n for n in npm_names if ("npm", n.lower()) not in bad]
+    # Sorted: set order follows the process's string hash seed, and the name model's
+    # training sample is drawn by position from this table.
+    npm_neg = [n for n in sorted(npm_names) if ("npm", n.lower()) not in bad]
 
     neg = pd.DataFrame(
         [("pypi", n, "pypi_index") for n in pypi_neg] + [("npm", n, "npm_search") for n in npm_neg],
