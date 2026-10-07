@@ -10,12 +10,17 @@ Nothing here writes models or touches ``dataset.parquet``: results go to
 models keep the pipeline's fixed seed.
 
     python -m customs_ml.variance 7 11 23 42 101
+    python -m customs_ml.variance compare old=path/to/models new=path/to/models
+
+``compare`` scores exported model directories on the current features, which separates
+what a scanner change did to the test data from what retraining did to the model.
 """
 
 from __future__ import annotations
 
 import json
 import sys
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -123,7 +128,39 @@ def run(seeds: tuple[int, ...] = DEFAULT_SEEDS, scheme: str = SCHEME) -> dict:
     return res
 
 
+def score_exported(df: pd.DataFrame, models: Path) -> tuple[np.ndarray, dict]:
+    """Risk for every row from an exported model directory (gbdt, cnn, ensemble JSON)."""
+    g_m = json.loads((models / "code_gbdt.json").read_text())
+    n_m = json.loads((models / "code_nn.json").read_text())
+    ens = json.loads((models / "ensemble.json").read_text())
+    X = df[["f_" + n for n in g_m["feature_names"]]].to_numpy(dtype=float)
+    g = gbdt.predict_raw_exported(g_m, X)
+    c = np.array([cnn.numpy_forward(n_m, list(t)) for t in df.tokens])
+    w, b = ens["weights"], ens.get("clip") or np.inf
+    g, c, n = (np.clip(x, -b, b) for x in (g, c, df.name_logit.to_numpy()))
+    z = ens["bias"] + w["code_gbdt"] * g + w["code_nn"] * c + w["name"] * n
+    thr = {"warn": ens["thresholds"]["warn"], "block": ens["thresholds"]["block"]}
+    return gbdt.apply_calibration(ens["calibration"], 1 / (1 + np.exp(-z))), thr
+
+
+def compare(models: dict[str, Path], scheme: str = SCHEME) -> dict:
+    df = load_table()
+    if "augmented" in df:
+        df = df[df.augmented.isna()]
+    df = df[df[f"split_{scheme}"] == splits.TEST].reset_index(drop=True)
+    out = {}
+    for label, path in models.items():
+        risk, thr = score_exported(df, path)
+        out[label] = test_metrics(df, risk, thr, scheme)
+        log("compare", label, {k: round(v, 4) for k, v in out[label].items()})
+    (work() / "model_compare.json").write_text(json.dumps(out, indent=1))
+    return out
+
+
 def main(argv: list[str]) -> None:
+    if argv[:1] == ["compare"]:
+        compare({a.split("=", 1)[0]: Path(a.split("=", 1)[1]) for a in argv[1:]})
+        return
     seeds = tuple(int(a) for a in argv) or DEFAULT_SEEDS
     res = run(seeds)
     for k, v in res["spread"].items():

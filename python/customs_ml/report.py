@@ -419,8 +419,8 @@ def render(scheme: str = SCHEME) -> str:
             )
             + f"). When {sf['clients_per_package']} clients request the same uncached "
             f"archive at once, {sf['packages']} such bursts ({sf['requests']} requests) "
-            f"cost {sf['scans']} scans: the other {sf['joins']} requests waited on the "
-            "scan already in flight.\n"
+            f"cost {sf['scans']} scans: {sf['joins']} requests waited on the scan already "
+            "in flight and the rest arrived after it finished and hit the cache.\n"
         )
 
     ext = _load("external_malregistry.json")
@@ -627,7 +627,11 @@ def render(scheme: str = SCHEME) -> str:
             )
             + ". The diff model is therefore not part of the shipped decision: "
             + (
-                f"the gain at looser rates is a handful of releases out of {rt['n_pos']}, "
+                f"the only gain is {max(gains.values()) * 100:.1f} points at "
+                f"{pct(float(max(gains, key=gains.get)))} FPR on {rt['n_pos']} releases, "
+                "and the loss lands on the decision that blocks.\n"
+                if max(gains.values()) > 0 and sum(g > 0 for g in gains.values()) == 1
+                else f"the gains at looser rates are a handful of releases out of {rt['n_pos']}, "
                 "and the loss lands on the decision that blocks.\n"
                 if max(gains.values()) > 0
                 else "the combination loses recall at every rate measured.\n"
@@ -705,11 +709,32 @@ def render(scheme: str = SCHEME) -> str:
                     f"{v['max']:.3f} |"
                 )
         add(
-            "\nThe block threshold sits at the 0.1% tail of about 2,000 benign validation "
-            "packages, so it rests on two or three scores and moves with every retrain; "
-            "recall at block inherits that movement. The threshold-free row shows how "
-            "much of the spread is the model and how much is the threshold.\n"
+            "\nROC AUC and recall at warn barely move between seeds. Everything at 0.1% "
+            "FPR is a tail statistic: the block threshold rests on two or three of about "
+            "2,000 benign validation packages, and the threshold-free row on four of 4,217 "
+            "benign test packages, so both move several points between retrains. A "
+            "difference at the block rate between two runs needs to exceed about 5 points "
+            "before it says anything about the model.\n"
         )
+        cmp_ = _load("model_compare.json")
+        if cmp_:
+            add(
+                "Exported model sets scored on today's features (the current scanner's "
+                "view of the test set), which separates what a scanner change did to the "
+                "test data from what retraining did to the model:\n"
+            )
+            add(
+                "| Models | ROC AUC | Recall at block | FPR at block | Recall at exactly "
+                "0.1% FPR | Compromised libraries ROC AUC |"
+            )
+            add("|---|---:|---:|---:|---:|---:|")
+            for label, m in cmp_.items():
+                add(
+                    f"| {label} | {m['roc_auc']:.4f} | {pct(m['recall_block'])} | "
+                    f"{pct(m['fpr_block'], 2)} | {pct(m['roc_recall_0_001'])} | "
+                    f"{m['compromised_lib_roc_auc']:.3f} |"
+                )
+            add("")
 
     add("## Calibration\n")
     add("![Calibration](figures/calibration.png)\n")
