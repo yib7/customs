@@ -1,0 +1,13 @@
+[package]
+name = "customs-py"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "customs_scan"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+customs-scan = { path = "../customs-scan" }
