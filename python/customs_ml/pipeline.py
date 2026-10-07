@@ -111,7 +111,7 @@ def _xy(df: pd.DataFrame, cols: list[str], split: pd.Series, which: str):
     return df.loc[m, cols].to_numpy(dtype=float), df.label.to_numpy()[m], m
 
 
-def _fit_gbdt(df: pd.DataFrame, split: pd.Series, cols: list[str]):
+def _fit_gbdt(df: pd.DataFrame, split: pd.Series, cols: list[str], seed: int | None = None):
     names_ = [c[2:] for c in cols]
     w = splits.sample_weights(df, split)
     Xtr, ytr, mtr = _xy(df, cols, split, splits.TRAIN)
@@ -127,7 +127,8 @@ def _fit_gbdt(df: pd.DataFrame, split: pd.Series, cols: list[str]):
                 yva,
                 w[mva],
                 names_,
-                {"num_leaves": leaves, "min_data_in_leaf": min_leaf},
+                {"num_leaves": leaves, "min_data_in_leaf": min_leaf}
+                | ({} if seed is None else {"seed": seed}),
             )
             ap = average_precision_score(yva, gbdt.predict_raw(t, Xva))
             log(
@@ -169,10 +170,7 @@ def stage_gbdt(scheme: str = SCHEME) -> None:
     df.to_parquet(work() / "dataset.parquet")
 
 
-def stage_cnn(scheme: str = SCHEME, cfg: cnn.Config | None = None) -> None:
-    df = load_table()
-    split = df[f"split_{scheme}"]
-    cfg = cfg or cnn.Config()
+def _fit_cnn(df: pd.DataFrame, split: pd.Series, cfg: cnn.Config):
     docs = [list(t) for t in df.tokens]
     tr = (split == splits.TRAIN).to_numpy()
     va = (split == splits.VAL).to_numpy()
@@ -182,10 +180,17 @@ def stage_cnn(scheme: str = SCHEME, cfg: cnn.Config | None = None) -> None:
     w = splits.sample_weights(df, split)
     log(f"cnn vocab {len(vocab)}, train {tr.sum()}, val {va.sum()}")
     model, hist = cnn.train(X[tr], y[tr], w[tr], X[va], y[va], len(vocab), cfg, log=log)
-    exported = cnn.export(model, vocab, cfg)
+    return model, cnn.export(model, vocab, cfg), cnn.predict_logits(model, X), hist, docs
+
+
+def stage_cnn(scheme: str = SCHEME, cfg: cnn.Config | None = None) -> None:
+    df = load_table()
+    split = df[f"split_{scheme}"]
+    cfg = cfg or cnn.Config()
+    _, exported, logits, hist, docs = _fit_cnn(df, split, cfg)
     cnn.save(exported, work() / f"code_nn_{scheme}.json")
     (work() / f"cnn_history_{scheme}.json").write_text(json.dumps(hist))
-    df[f"cnn_logit_{scheme}"] = cnn.predict_logits(model, X)
+    df[f"cnn_logit_{scheme}"] = logits
     # Parity fixtures for the Rust forward pass, from real data.
     rng = np.random.default_rng(0)
     pick = rng.choice(len(docs), size=min(25, len(docs)), replace=False)
@@ -321,14 +326,13 @@ def _fit_stacker(Z: np.ndarray, y: np.ndarray, w: np.ndarray) -> LogisticRegress
     return clf
 
 
-def stage_ensemble(scheme: str = SCHEME) -> None:
+def fit_ensemble(df: pd.DataFrame, scheme: str = SCHEME) -> tuple[dict, np.ndarray]:
     """Stack component logits on the validation split with cluster-grouped cross-fitting.
 
     Out-of-fold stacked scores on validation are used to fit the calibration (Platt, see
     gbdt.fit_platt) and to pick thresholds, so neither is tuned on scores the stacker was
-    fit to.
+    fit to. Returns the ensemble artifact and the calibrated risk of every row.
     """
-    df = load_table()
     split = df[f"split_{scheme}"]
     va = (split == splits.VAL).to_numpy()
     Z = _component_matrix(df, scheme)
@@ -393,10 +397,16 @@ def stage_ensemble(scheme: str = SCHEME) -> None:
             "target_fpr_block": FPR_BLOCK,
         },
     }
-    (work() / f"ensemble_{scheme}.json").write_text(json.dumps(ens, indent=1))
     z = final.decision_function(Z)
-    df[f"ens_risk_{scheme}"] = gbdt.apply_calibration(cal, 1 / (1 + np.exp(-z)))
     log("ensemble weights", ens["weights"], "thresholds", ens["thresholds"])
+    return ens, gbdt.apply_calibration(cal, 1 / (1 + np.exp(-z)))
+
+
+def stage_ensemble(scheme: str = SCHEME) -> None:
+    df = load_table()
+    ens, risk = fit_ensemble(df, scheme)
+    (work() / f"ensemble_{scheme}.json").write_text(json.dumps(ens, indent=1))
+    df[f"ens_risk_{scheme}"] = risk
     df.to_parquet(work() / "dataset.parquet")
 
 
