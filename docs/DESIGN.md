@@ -403,7 +403,7 @@ treated as 1). Features are defined in 4.5. The model outputs the logit and an e
 `code_nn.json` (format `customs-code-cnn-v1`): a small convolutional network over the
 install-surface tokens (`ScanReport.tokens`, scanned with `tokens: true`):
 ```json
-{ "format": "customs-code-cnn-v1", "max_len": 512, "vocab": { "<pad>": 0, "<unk>": 1, "os": 2, ... },
+{ "format": "customs-code-cnn-v1", "max_len": 768, "vocab": { "<pad>": 0, "<unk>": 1, "os": 2, ... },
   "embedding": T [V, D],
   "convs": [ { "kernel": 3, "weight": T [C, D, k], "bias": T [C] }, ... ],
   "dense": [ { "weight": T [out, in], "bias": T [out], "activation": "relu" | "none" }, ... ] }
@@ -674,6 +674,13 @@ As implemented; results are in `docs/EVALUATION.md` and `models/metrics.json`.
   tokens (early stopping on validation PR AUC), the name model, and a logistic stacker fit
   on validation with 5-fold cluster-grouped cross-fitting; Platt calibration and the
   warn and block thresholds (target FPR 1% and 0.1%) come from out-of-fold scores.
+- **CNN input length.** The CNN reads the first 768 install-surface tokens; the stream
+  itself stops at 4,096, and 55% of compromised-library releases in test run past 768
+  (22% of benign packages do). Scoring the same trained CNN on the full stream (its
+  global max-pool accepts any length) lowered its own test ROC AUC from 0.912 to 0.909,
+  and on compromised releases longer than 768 tokens from 0.707 to 0.668: over more
+  legitimate code the max-pool finds more payload-like fragments in benign packages too.
+  Restacked, the headline and compromised-library numbers stayed within seed noise.
 - **Bounded stacking.** Component logits are clipped to `[-c, c]` before stacking, with `c`
   chosen from {none, 16, 12, 8, 6, 4, 3, 2} by out-of-fold recall averaged over every
   validation threshold up to 1% FPR. The block threshold sits at the 0.1% FPR point of
