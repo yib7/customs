@@ -10,7 +10,7 @@ use crate::cnn::CodeCnn;
 use crate::ensemble::{decide, Ensemble, EnsembleOutput, Logits, Thresholds};
 use crate::gbdt::TreeEnsemble;
 use crate::labels;
-use crate::name::{NameModel, NameScore, PopularIndex};
+use crate::name::{NameModel, NameScore};
 use crate::{sigmoid, Decision, ModelError};
 
 /// `models/manifest.json`. Component entries are file names relative to the manifest; a
@@ -27,6 +27,7 @@ pub struct Manifest {
     pub code_nn: Option<String>,
     #[serde(default)]
     pub ensemble: Option<String>,
+    /// Informational; the name model names its own popular lists.
     #[serde(default)]
     pub popular_names: BTreeMap<String, String>,
     /// True for placeholder artifacts that were not trained on data (`models/dev`).
@@ -40,29 +41,6 @@ pub struct Manifest {
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
-/// Popular-package lists per ecosystem.
-#[derive(Debug, Clone, Default)]
-pub struct PopularLists {
-    pub pypi: Option<PopularIndex>,
-    pub npm: Option<PopularIndex>,
-}
-
-impl PopularLists {
-    pub fn get(&self, eco: &Ecosystem) -> Option<&PopularIndex> {
-        match eco {
-            Ecosystem::Pypi => self.pypi.as_ref(),
-            Ecosystem::Npm => self.npm.as_ref(),
-        }
-    }
-
-    pub fn set(&mut self, eco: Ecosystem, idx: PopularIndex) {
-        match eco {
-            Ecosystem::Pypi => self.pypi = Some(idx),
-            Ecosystem::Npm => self.npm = Some(idx),
-        }
-    }
-}
-
 /// Everything needed to score packages.
 #[derive(Debug, Clone)]
 pub struct Models {
@@ -74,7 +52,6 @@ pub struct Models {
     pub ensemble: Ensemble,
     /// False when `ensemble.json` was absent and equal weights are in use.
     pub ensemble_shipped: bool,
-    pub popular: PopularLists,
     pub metrics: Option<serde_json::Value>,
 }
 
@@ -144,7 +121,6 @@ impl Models {
             code_nn: None,
             ensemble: Ensemble::unweighted(),
             ensemble_shipped: false,
-            popular: PopularLists::default(),
             metrics: None,
         }
     }
@@ -180,7 +156,7 @@ impl Models {
         let name_model = manifest
             .name_model
             .as_deref()
-            .map(|f| NameModel::from_json(&read("name_model", f)?))
+            .map(|f| NameModel::from_json(&read("name_model", f)?, |p| read("popular_names", p)))
             .transpose()?;
         let code_nn = manifest
             .code_nn
@@ -191,20 +167,6 @@ impl Models {
             Some(f) => (Ensemble::from_json(&read("ensemble", f)?)?, true),
             None => (Ensemble::unweighted(), false),
         };
-        let mut popular = PopularLists::default();
-        for (eco, file) in &manifest.popular_names {
-            let e = match eco.as_str() {
-                "pypi" => Ecosystem::Pypi,
-                "npm" => Ecosystem::Npm,
-                other => {
-                    return Err(ModelError::invalid(
-                        "manifest",
-                        format!("popular_names: unknown ecosystem '{other}'"),
-                    ))
-                }
-            };
-            popular.set(e, PopularIndex::from_text(e, &read("popular_names", file)?));
-        }
         let metrics_file = manifest.metrics.clone().or_else(|| {
             dir.join("metrics.json")
                 .exists()
@@ -225,7 +187,6 @@ impl Models {
             code_nn,
             ensemble,
             ensemble_shipped,
-            popular,
             metrics,
         })
     }
@@ -240,9 +201,16 @@ impl Models {
 
     /// Score the name alone (used for packages that do not exist on the registry).
     pub fn score_name(&self, eco: Ecosystem, name: &str) -> Option<NameScore> {
+        self.name_model.as_ref().and_then(|m| m.score(eco, name))
+    }
+
+    /// Size of the popular-name list for an ecosystem.
+    pub fn popular_count(&self, eco: Ecosystem) -> usize {
         self.name_model
             .as_ref()
-            .map(|m| m.score(eco, name, self.popular.get(&eco)))
+            .and_then(|m| m.ecosystem(eco))
+            .map(|e| e.popular.len())
+            .unwrap_or(0)
     }
 
     /// Run every component that has inputs and combine them.
@@ -251,7 +219,11 @@ impl Models {
     }
 
     /// Like [`Models::assess`] with explicit thresholds (policy overrides).
-    pub fn assess_with(&self, input: &ScoreInput<'_>, thresholds: Option<Thresholds>) -> Assessment {
+    pub fn assess_with(
+        &self,
+        input: &ScoreInput<'_>,
+        thresholds: Option<Thresholds>,
+    ) -> Assessment {
         let thresholds = thresholds.unwrap_or(self.ensemble.thresholds);
         let mut scores = Scores::default();
         let mut logits = Logits::default();

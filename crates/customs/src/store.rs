@@ -166,8 +166,7 @@ pub struct Store {
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)
-                .with_context(|| format!("creating {}", dir.display()))?;
+            std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
         }
         let conn = Connection::open(path).with_context(|| format!("opening {}", path.display()))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
@@ -215,8 +214,10 @@ impl Store {
 
     pub fn verdict(&self, id: i64) -> Result<Option<Verdict>> {
         let json: Option<String> = self.with(|c| {
-            c.query_row("SELECT json FROM verdicts WHERE id = ?1", [id], |r| r.get(0))
-                .optional()
+            c.query_row("SELECT json FROM verdicts WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .optional()
         })?;
         match json {
             Some(j) => {
@@ -276,7 +277,14 @@ impl Store {
                  ORDER BY id DESC LIMIT ?6",
             )?;
             let rows = stmt.query_map(
-                params![f.before.unwrap_or(i64::MAX), f.decision, f.ecosystem, f.kind, f.q, limit],
+                params![
+                    f.before.unwrap_or(i64::MAX),
+                    f.decision,
+                    f.ecosystem,
+                    f.kind,
+                    f.q,
+                    limit
+                ],
                 |r| {
                     let eco: String = r.get(2)?;
                     let kind: String = r.get(6)?;
@@ -381,7 +389,11 @@ impl Store {
                  GROUP BY ecosystem, decision",
             )?;
             let rows = stmt.query_map([], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)? as u64))
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)? as u64,
+                ))
             })?;
             for row in rows {
                 let (eco, decision, n) = row?;
@@ -390,7 +402,9 @@ impl Store {
             }
             let mut by_kind = KindCounts::default();
             let mut stmt = c.prepare("SELECT kind, COUNT(*) FROM events GROUP BY kind")?;
-            let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64)))?;
+            let rows = stmt.query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64))
+            })?;
             for row in rows {
                 let (kind, n) = row?;
                 match kind.as_str() {
@@ -403,13 +417,22 @@ impl Store {
 
             let mut per_day: BTreeMap<String, u64> = (0..days)
                 .rev()
-                .map(|i| ((Utc::now() - Duration::days(i as i64)).format("%Y-%m-%d").to_string(), 0))
+                .map(|i| {
+                    (
+                        (Utc::now() - Duration::days(i as i64))
+                            .format("%Y-%m-%d")
+                            .to_string(),
+                        0,
+                    )
+                })
                 .collect();
             let mut stmt = c.prepare(
                 "SELECT substr(ts, 1, 10) AS day, COUNT(*) FROM events
                  WHERE ts >= ?1 AND decision = 'block' GROUP BY day",
             )?;
-            let rows = stmt.query_map([&since], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64)))?;
+            let rows = stmt.query_map([&since], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64))
+            })?;
             for row in rows {
                 let (day, n) = row?;
                 if let Some(d) = per_day.get_mut(&day) {
@@ -427,7 +450,11 @@ impl Store {
                 let Ok(v) = serde_json::from_str::<Verdict>(&json?) else {
                     continue;
                 };
-                for h in v.policy_hits.iter().filter(|h| h.severity >= Decision::Warn) {
+                for h in v
+                    .policy_hits
+                    .iter()
+                    .filter(|h| h.severity >= Decision::Warn)
+                {
                     let e = counts
                         .entry(h.rule.clone())
                         .or_insert_with(|| (rule_label(&h.rule), 0));

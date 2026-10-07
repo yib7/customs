@@ -1,0 +1,52 @@
+{
+ "format": "customs-code-cnn-v1",
+ "vocab": {
+  "<pad>": 0,
+  "<unk>": 1
+ },
+ "max_len": 64,
+ "embedding": {
+  "shape": [
+   2,
+   2
+  ],
+  "data": "AAAAAAAAAAAAAAAAAAAAAA=="
+ },
+ "convs": [
+  {
+   "kernel": 1,
+   "weight": {
+    "shape": [
+     1,
+     2,
+     1
+    ],
+    "data": "AAAAAAAAAAA="
+   },
+   "bias": {
+    "shape": [
+     1
+    ],
+    "data": "AAAAAA=="
+   }
+  }
+ ],
+ "dense": [
+  {
+   "weight": {
+    "shape": [
+     1,
+     1
+    ],
+    "data": "AAAAAA=="
+   },
+   "bias": {
+    "shape": [
+     1
+    ],
+    "data": "AACAwA=="
+   },
+   "activation": "none"
+  }
+ ]
+}

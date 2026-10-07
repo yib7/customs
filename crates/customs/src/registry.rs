@@ -157,7 +157,12 @@ impl Registry {
     }
 
     /// GET a page; any status is returned (the caller decides what a 404 means).
-    pub async fn get(&self, url: &str, accept: Option<&str>, kind: &str) -> Result<Page, FetchError> {
+    pub async fn get(
+        &self,
+        url: &str,
+        accept: Option<&str>,
+        kind: &str,
+    ) -> Result<Page, FetchError> {
         let start = Instant::now();
         let mut req = self.client.get(url);
         if let Some(a) = accept {
@@ -204,7 +209,12 @@ impl Registry {
         name: &str,
     ) -> Result<Option<Arc<PackageMeta>>, FetchError> {
         let key = format!("{}:{}", ecosystem_str(eco), normalize_name(eco, name));
-        if let Some((t, m)) = self.meta.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
+        if let Some((t, m)) = self
+            .meta
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&key)
+        {
             if t.elapsed() < META_TTL {
                 return Ok(Some(m.clone()));
             }
@@ -265,7 +275,12 @@ impl Registry {
     }
 
     /// Stream `url` into `dest`, hashing as it goes. Fails with `TooLarge` past `max_bytes`.
-    pub async fn download(&self, url: &str, dest: &Path, max_bytes: u64) -> Result<Download, FetchError> {
+    pub async fn download(
+        &self,
+        url: &str,
+        dest: &Path,
+        max_bytes: u64,
+    ) -> Result<Download, FetchError> {
         let start = Instant::now();
         let result = async {
             let mut resp = self.client.get(url).send().await?;
@@ -317,7 +332,9 @@ fn parse_pypi_file(f: &Value) -> Option<FileMeta> {
                 // Older responses carry only a naive `upload_time` in UTC.
                 f.get("upload_time")
                     .and_then(Value::as_str)
-                    .and_then(|s| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S").ok())
+                    .and_then(|s| {
+                        chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S").ok()
+                    })
                     .map(|n| n.and_utc())
             }),
         sha256: f
@@ -351,7 +368,10 @@ fn pypi_version(version: String, files: Vec<FileMeta>) -> VersionMeta {
 pub fn parse_pypi_project(v: &Value) -> Option<PackageMeta> {
     let info = v.get("info")?;
     let name = info.get("name")?.as_str()?.to_string();
-    let latest = info.get("version").and_then(Value::as_str).map(str::to_string);
+    let latest = info
+        .get("version")
+        .and_then(Value::as_str)
+        .map(str::to_string);
     let mut versions: Vec<VersionMeta> = v
         .get("releases")
         .and_then(Value::as_object)
@@ -437,7 +457,9 @@ pub fn parse_npm_packument(v: &Value) -> Option<PackageMeta> {
                             upload_time: published,
                             sha256: None,
                             packagetype: "tarball".into(),
-                            size: dist.and_then(|d| d.get("unpackedSize")).and_then(Value::as_u64),
+                            size: dist
+                                .and_then(|d| d.get("unpackedSize"))
+                                .and_then(Value::as_u64),
                             yanked: false,
                         }],
                         install_scripts,
@@ -477,7 +499,10 @@ mod tests {
         assert_eq!(m.latest.as_deref(), Some("1.1"));
         let v10 = m.version("1.0").unwrap();
         assert_eq!(v10.files[0].sha256.as_deref(), Some("ab"));
-        assert_eq!(v10.published.unwrap().to_rfc3339(), "2020-01-02T03:04:05.123456+00:00");
+        assert_eq!(
+            v10.published.unwrap().to_rfc3339(),
+            "2020-01-02T03:04:05.123456+00:00"
+        );
         let v11 = m.version("1.1").unwrap();
         assert!(v11.yanked);
         assert!(v11.published.is_some());

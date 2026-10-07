@@ -1,8 +1,9 @@
-//! Forward pass of the code CNN (DESIGN.md section 5, `code_nn.json`).
+//! Forward pass of the code CNN (DESIGN.md section 5, `code_nn.json`, format
+//! `customs-code-cnn-v1`).
 //!
 //! Architecture: token embedding, one 1D convolution per kernel size (valid padding),
-//! ReLU, global max pool over positions, concatenation, dense layers with ReLU between
-//! them, and a single output logit. Weights use PyTorch layouts (`Conv1d.weight` is
+//! ReLU, global max pool over positions, concatenation, dense layers each with its own
+//! activation (`relu` or `none`), and a single output logit. Weights use PyTorch layouts (`Conv1d.weight` is
 //! `[out_channels, in_channels, kernel]`, `Linear.weight` is `[out, in]`) so the exporter
 //! can dump tensors without reshaping.
 
@@ -16,6 +17,8 @@ use crate::{sigmoid, ModelError};
 const WHAT: &str = "code_nn";
 pub const PAD_ID: u32 = 0;
 pub const UNK_ID: u32 = 1;
+/// Short inputs are right-padded to at least this many positions.
+pub const MIN_LEN: usize = 16;
 
 /// A float32 tensor as stored on disk: little-endian bytes, base64-encoded.
 #[derive(Debug, Clone, Deserialize)]
@@ -46,7 +49,10 @@ impl TensorSpec {
             .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect();
         if v.iter().any(|x| !x.is_finite()) {
-            return Err(ModelError::invalid(WHAT, format!("{what}: non-finite weight")));
+            return Err(ModelError::invalid(
+                WHAT,
+                format!("{what}: non-finite weight"),
+            ));
         }
         Ok(v)
     }
@@ -54,7 +60,8 @@ impl TensorSpec {
 
 #[derive(Debug, Clone, Deserialize)]
 struct RawConv {
-    kernel_size: usize,
+    #[serde(alias = "kernel_size")]
+    kernel: usize,
     weight: TensorSpec,
     bias: TensorSpec,
 }
@@ -63,21 +70,20 @@ struct RawConv {
 struct RawDense {
     weight: TensorSpec,
     bias: TensorSpec,
+    /// `relu` or `none`; when absent, ReLU between layers and none after the last.
+    #[serde(default)]
+    activation: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 struct RawCnn {
+    #[serde(default)]
+    format: Option<String>,
     vocab: HashMap<String, u32>,
     max_len: usize,
-    #[serde(default = "yes")]
-    pad_to_max_len: bool,
     embedding: TensorSpec,
     convs: Vec<RawConv>,
     dense: Vec<RawDense>,
-}
-
-fn yes() -> bool {
-    true
 }
 
 #[derive(Debug, Clone)]
@@ -95,6 +101,7 @@ struct Dense {
     out: usize,
     weight: Vec<f32>,
     bias: Vec<f32>,
+    relu: bool,
 }
 
 /// A loaded code CNN.
@@ -102,7 +109,6 @@ struct Dense {
 pub struct CodeCnn {
     vocab: HashMap<String, u32>,
     max_len: usize,
-    pad_to_max_len: bool,
     vocab_rows: usize,
     dim: usize,
     embedding: Vec<f32>,
@@ -113,13 +119,24 @@ pub struct CodeCnn {
 impl CodeCnn {
     pub fn from_json(text: &str) -> Result<Self, ModelError> {
         let raw: RawCnn = serde_json::from_str(text).map_err(|e| ModelError::parse(WHAT, e))?;
+        if let Some(f) = &raw.format {
+            if f != "customs-code-cnn-v1" {
+                return Err(ModelError::invalid(
+                    WHAT,
+                    format!("unsupported format '{f}'"),
+                ));
+            }
+        }
         if raw.embedding.shape.len() != 2 {
             return Err(ModelError::invalid(WHAT, "embedding must be [vocab, dim]"));
         }
         let (vocab_rows, dim) = (raw.embedding.shape[0], raw.embedding.shape[1]);
         let embedding = raw.embedding.decode("embedding")?;
         if vocab_rows < 2 || dim == 0 {
-            return Err(ModelError::invalid(WHAT, "embedding needs at least <pad> and <unk>"));
+            return Err(ModelError::invalid(
+                WHAT,
+                "embedding needs at least <pad> and <unk>",
+            ));
         }
         if let Some((tok, id)) = raw.vocab.iter().find(|(_, id)| **id as usize >= vocab_rows) {
             return Err(ModelError::invalid(
@@ -131,7 +148,10 @@ impl CodeCnn {
             return Err(ModelError::invalid(WHAT, "max_len must be positive"));
         }
         if raw.convs.is_empty() {
-            return Err(ModelError::invalid(WHAT, "at least one conv layer is required"));
+            return Err(ModelError::invalid(
+                WHAT,
+                "at least one conv layer is required",
+            ));
         }
         let mut convs = Vec::with_capacity(raw.convs.len());
         for (i, c) in raw.convs.iter().enumerate() {
@@ -139,12 +159,18 @@ impl CodeCnn {
             let w = c.weight.decode(&format!("{at}.weight"))?;
             let b = c.bias.decode(&format!("{at}.bias"))?;
             let [out, ind, k] = c.weight.shape[..] else {
-                return Err(ModelError::invalid(WHAT, format!("{at}.weight must be 3-D")));
-            };
-            if ind != dim || k != c.kernel_size || k == 0 || b.len() != out {
                 return Err(ModelError::invalid(
                     WHAT,
-                    format!("{at}: weight {:?} does not fit dim {dim} / kernel {}", c.weight.shape, c.kernel_size),
+                    format!("{at}.weight must be 3-D"),
+                ));
+            };
+            if ind != dim || k != c.kernel || k == 0 || b.len() != out {
+                return Err(ModelError::invalid(
+                    WHAT,
+                    format!(
+                        "{at}: weight {:?} does not fit dim {dim} / kernel {}",
+                        c.weight.shape, c.kernel
+                    ),
                 ));
             }
             let mut weight = vec![0.0f32; out * k * dim];
@@ -155,7 +181,12 @@ impl CodeCnn {
                     }
                 }
             }
-            convs.push(Conv { k, out, weight, bias: b });
+            convs.push(Conv {
+                k,
+                out,
+                weight,
+                bias: b,
+            });
         }
         let mut input = convs.iter().map(|c| c.out).sum::<usize>();
         let mut dense = Vec::with_capacity(raw.dense.len());
@@ -164,24 +195,49 @@ impl CodeCnn {
             let w = d.weight.decode(&format!("{at}.weight"))?;
             let b = d.bias.decode(&format!("{at}.bias"))?;
             let [out, ind] = d.weight.shape[..] else {
-                return Err(ModelError::invalid(WHAT, format!("{at}.weight must be 2-D")));
+                return Err(ModelError::invalid(
+                    WHAT,
+                    format!("{at}.weight must be 2-D"),
+                ));
             };
             if ind != input || b.len() != out {
                 return Err(ModelError::invalid(
                     WHAT,
-                    format!("{at}: weight {:?} does not take {input} inputs", d.weight.shape),
+                    format!(
+                        "{at}: weight {:?} does not take {input} inputs",
+                        d.weight.shape
+                    ),
                 ));
             }
-            dense.push(Dense { input, out, weight: w, bias: b });
+            let relu = match d.activation.as_deref() {
+                Some("relu") => true,
+                Some("none") | Some("linear") => false,
+                None => i + 1 < raw.dense.len(),
+                Some(other) => {
+                    return Err(ModelError::invalid(
+                        WHAT,
+                        format!("{at}: unsupported activation '{other}'"),
+                    ))
+                }
+            };
+            dense.push(Dense {
+                input,
+                out,
+                weight: w,
+                bias: b,
+                relu,
+            });
             input = out;
         }
         if input != 1 {
-            return Err(ModelError::invalid(WHAT, "the last layer must have one output"));
+            return Err(ModelError::invalid(
+                WHAT,
+                "the last layer must have one output",
+            ));
         }
         Ok(Self {
             vocab: raw.vocab,
             max_len: raw.max_len,
-            pad_to_max_len: raw.pad_to_max_len,
             vocab_rows,
             dim,
             embedding,
@@ -206,12 +262,10 @@ impl CodeCnn {
             .take(self.max_len)
             .map(|t| self.vocab.get(t.as_ref()).copied().unwrap_or(UNK_ID))
             .collect();
-        let target = if self.pad_to_max_len {
-            self.max_len.max(max_k)
-        } else {
-            ids.len().max(max_k)
-        };
-        ids.resize(target, PAD_ID);
+        let target = MIN_LEN.max(max_k);
+        if ids.len() < target {
+            ids.resize(target, PAD_ID);
+        }
         ids
     }
 
@@ -250,12 +304,12 @@ impl CodeCnn {
         }
         let mut h = pooled;
         let mut next = Vec::new();
-        for (li, layer) in self.dense.iter().enumerate() {
+        for layer in &self.dense {
             next.clear();
             for o in 0..layer.out {
                 let w = &layer.weight[o * layer.input..(o + 1) * layer.input];
                 let mut v = layer.bias[o] + dot(w, &h);
-                if li + 1 < self.dense.len() {
+                if layer.relu {
                     v = v.max(0.0);
                 }
                 next.push(v);
@@ -296,10 +350,10 @@ mod tests {
     fn tiny_network_by_hand() {
         // vocab 3, dim 1, one conv k=1 with weight 2 bias -1, dense 1x1 weight 3 bias 0.5.
         let json = format!(
-            r#"{{"vocab": {{"<pad>": 0, "<unk>": 1, "x": 2}}, "max_len": 3, "pad_to_max_len": false,
+            r#"{{"format": "customs-code-cnn-v1", "vocab": {{"<pad>": 0, "<unk>": 1, "x": 2}}, "max_len": 3,
                "embedding": {{"shape": [3, 1], "data": "{}"}},
-               "convs": [{{"kernel_size": 1, "weight": {{"shape": [1, 1, 1], "data": "{}"}}, "bias": {{"shape": [1], "data": "{}"}}}}],
-               "dense": [{{"weight": {{"shape": [1, 1], "data": "{}"}}, "bias": {{"shape": [1], "data": "{}"}}}}]}}"#,
+               "convs": [{{"kernel": 1, "weight": {{"shape": [1, 1, 1], "data": "{}"}}, "bias": {{"shape": [1], "data": "{}"}}}}],
+               "dense": [{{"weight": {{"shape": [1, 1], "data": "{}"}}, "bias": {{"shape": [1], "data": "{}"}}, "activation": "none"}}]}}"#,
             b64(&[0.0, 0.5, 4.0]),
             b64(&[2.0]),
             b64(&[-1.0]),
@@ -309,9 +363,12 @@ mod tests {
         let m = CodeCnn::from_json(&json).unwrap();
         // max over tokens of 2*e - 1: "x" gives 7, then dense 3*7 + 0.5.
         assert_eq!(m.logit(&["y", "x"]), 21.5);
-        // Only unknown tokens: 2*0.5 - 1 = 0 -> 0.5.
+        // Unknown token gives 2*0.5 - 1 = 0 and padding gives -1, so ReLU(max) = 0 -> 0.5.
         assert_eq!(m.logit(&["y"]), 0.5);
-        assert_eq!(m.encode(&["x", "x", "x", "x"]), vec![2, 2, 2]);
+        // Truncated to max_len, then padded to the minimum length.
+        let ids = m.encode(&["x", "x", "x", "x"]);
+        assert_eq!(ids.len(), MIN_LEN);
+        assert_eq!(&ids[..4], &[2, 2, 2, 0]);
     }
 
     #[test]

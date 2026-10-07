@@ -85,10 +85,23 @@ fn parse_simple(words: &[String], cwd: &Path, out: &mut Vec<Install>, depth: usi
         let Some(first) = w.first() else { return };
         match basename(first) {
             "sudo" | "doas" => {
-                w = skip_opts(&w[1..], &["-u", "-g", "-h", "-p", "-C", "-D", "-r", "-t", "-U", "-T", "--user", "--group", "--chdir"])
+                w = skip_opts(
+                    &w[1..],
+                    &[
+                        "-u", "-g", "-h", "-p", "-C", "-D", "-r", "-t", "-U", "-T", "--user",
+                        "--group", "--chdir",
+                    ],
+                )
             }
-            "env" => w = skip_opts(&w[1..], &["-u", "-C", "--unset", "--chdir", "-S", "--split-string"]),
-            "time" | "nohup" | "exec" | "builtin" | "noglob" | "nocorrect" => w = skip_opts(&w[1..], &[]),
+            "env" => {
+                w = skip_opts(
+                    &w[1..],
+                    &["-u", "-C", "--unset", "--chdir", "-S", "--split-string"],
+                )
+            }
+            "time" | "nohup" | "exec" | "builtin" | "noglob" | "nocorrect" => {
+                w = skip_opts(&w[1..], &[])
+            }
             "command" => {
                 if w.get(1).is_some_and(|a| a == "-v" || a == "-V") {
                     return;
@@ -113,7 +126,10 @@ fn parse_simple(words: &[String], cwd: &Path, out: &mut Vec<Install>, depth: usi
     let prog = prog.strip_suffix(".exe").unwrap_or(&prog).to_string();
 
     // Shells and eval run their argument as a script.
-    if matches!(prog.as_str(), "bash" | "sh" | "zsh" | "dash" | "ksh" | "fish") {
+    if matches!(
+        prog.as_str(),
+        "bash" | "sh" | "zsh" | "dash" | "ksh" | "fish"
+    ) {
         let mut i = 0;
         while i < args.len() {
             let a = &args[i];
@@ -154,7 +170,9 @@ fn parse_simple(words: &[String], cwd: &Path, out: &mut Vec<Install>, depth: usi
             let module = if a == "-m" {
                 args.get(i + 1).map(|s| (s.as_str(), i + 2))
             } else {
-                a.strip_prefix("-m").filter(|m| !m.is_empty()).map(|m| (m, i + 1))
+                a.strip_prefix("-m")
+                    .filter(|m| !m.is_empty())
+                    .map(|m| (m, i + 1))
             };
             if let Some((m, rest)) = module {
                 let rest = &args[rest.min(args.len())..];
@@ -169,18 +187,27 @@ fn parse_simple(words: &[String], cwd: &Path, out: &mut Vec<Install>, depth: usi
             if !a.starts_with('-') || a == "-c" {
                 return; // running a script or inline code
             }
-            i += if matches!(a, "-W" | "-X" | "-Q") { 2 } else { 1 };
+            i += if matches!(a, "-W" | "-X" | "-Q") {
+                2
+            } else {
+                1
+            };
         }
     } else {
         match prog.as_str() {
             "uv" => uv(args, cwd, out),
             "uvx" => tool_run(args, cwd, out, "uvx"),
-            "poetry" => subcommand_install(args, &["add"], &["-C", "--directory", "-P", "--project"], |rest| {
-                out.push(Install {
-                    tool: "poetry add".into(),
-                    targets: pypi_args(rest, cwd),
-                })
-            }),
+            "poetry" => subcommand_install(
+                args,
+                &["add"],
+                &["-C", "--directory", "-P", "--project"],
+                |rest| {
+                    out.push(Install {
+                        tool: "poetry add".into(),
+                        targets: pypi_args(rest, cwd),
+                    })
+                },
+            ),
             "pdm" => subcommand_install(args, &["add"], &["-p", "--project"], |rest| {
                 out.push(Install {
                     tool: "pdm add".into(),
@@ -202,7 +229,12 @@ fn parse_simple(words: &[String], cwd: &Path, out: &mut Vec<Install>, depth: usi
 
 /// Find the subcommand after global options; call `f` with its arguments when it is one
 /// of `names`.
-fn subcommand_install(args: &[String], names: &[&str], global_with_value: &[&str], f: impl FnOnce(&[String])) {
+fn subcommand_install(
+    args: &[String],
+    names: &[&str],
+    global_with_value: &[&str],
+    f: impl FnOnce(&[String]),
+) {
     let rest = skip_opts(args, global_with_value);
     if let Some((sub, rest)) = rest.split_first() {
         if names.contains(&sub.as_str()) {
@@ -212,27 +244,51 @@ fn subcommand_install(args: &[String], names: &[&str], global_with_value: &[&str
 }
 
 const PIP_GLOBAL_VALUE: &[&str] = &[
-    "--log", "--log-file", "--proxy", "--retries", "--timeout", "--exists-action", "--trusted-host",
-    "--cert", "--client-cert", "--cache-dir", "--python", "--use-feature", "--use-deprecated",
+    "--log",
+    "--log-file",
+    "--proxy",
+    "--retries",
+    "--timeout",
+    "--exists-action",
+    "--trusted-host",
+    "--cert",
+    "--client-cert",
+    "--cache-dir",
+    "--python",
+    "--use-feature",
+    "--use-deprecated",
 ];
 
 fn pip(args: &[String], cwd: &Path, out: &mut Vec<Install>, tool: &str) {
-    subcommand_install(args, &["install", "download", "wheel"], PIP_GLOBAL_VALUE, |rest| {
-        out.push(Install {
-            tool: format!("{tool} install"),
-            targets: pypi_args(rest, cwd),
-        })
-    });
+    subcommand_install(
+        args,
+        &["install", "download", "wheel"],
+        PIP_GLOBAL_VALUE,
+        |rest| {
+            out.push(Install {
+                tool: format!("{tool} install"),
+                targets: pypi_args(rest, cwd),
+            })
+        },
+    );
 }
 
 const UV_GLOBAL_VALUE: &[&str] = &[
-    "--directory", "--project", "--cache-dir", "--config-file", "--color", "--python-preference",
-    "--python-fetch", "--allow-insecure-host",
+    "--directory",
+    "--project",
+    "--cache-dir",
+    "--config-file",
+    "--color",
+    "--python-preference",
+    "--python-fetch",
+    "--allow-insecure-host",
 ];
 
 fn uv(args: &[String], cwd: &Path, out: &mut Vec<Install>) {
     let rest = skip_opts(args, UV_GLOBAL_VALUE);
-    let Some((sub, rest)) = rest.split_first() else { return };
+    let Some((sub, rest)) = rest.split_first() else {
+        return;
+    };
     match sub.as_str() {
         "pip" => {
             let rest = skip_opts(rest, UV_GLOBAL_VALUE);
@@ -302,12 +358,27 @@ fn with_specs(args: &[String], cwd: &Path) -> Vec<Target> {
 }
 
 fn split_with(v: &str) -> Vec<Target> {
-    v.split(',').filter(|s| !s.trim().is_empty()).map(|s| parse_pypi_spec(s.trim())).collect()
+    v.split(',')
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| parse_pypi_spec(s.trim()))
+        .collect()
 }
 
 /// `uvx` / `uv tool run`: `--from SPEC` names the package, otherwise the command does.
 fn tool_run(args: &[String], cwd: &Path, out: &mut Vec<Install>, tool: &str) {
-    const VALUE: &[&str] = &["--python", "-p", "--index", "--default-index", "--index-url", "--extra-index-url", "--constraints", "-c", "--overrides", "--cache-dir", "--directory"];
+    const VALUE: &[&str] = &[
+        "--python",
+        "-p",
+        "--index",
+        "--default-index",
+        "--index-url",
+        "--extra-index-url",
+        "--constraints",
+        "-c",
+        "--overrides",
+        "--cache-dir",
+        "--directory",
+    ];
     let mut targets = Vec::new();
     let mut from = false;
     let mut i = 0;
@@ -377,7 +448,9 @@ fn tool_run(args: &[String], cwd: &Path, out: &mut Vec<Install>, tool: &str) {
 }
 
 fn pipx(args: &[String], cwd: &Path, out: &mut Vec<Install>) {
-    let Some((sub, rest)) = args.split_first() else { return };
+    let Some((sub, rest)) = args.split_first() else {
+        return;
+    };
     match sub.as_str() {
         "install" => out.push(Install {
             tool: "pipx install".into(),
@@ -433,22 +506,91 @@ fn pipx(args: &[String], cwd: &Path, out: &mut Vec<Install>) {
     }
 }
 
-const PIPX_VALUE: &[&str] = &["--python", "--suffix", "--pip-args", "--index-url", "-i", "--editable", "--preinstall"];
+const PIPX_VALUE: &[&str] = &[
+    "--python",
+    "--suffix",
+    "--pip-args",
+    "--index-url",
+    "-i",
+    "--editable",
+    "--preinstall",
+];
 
 /// Options of pip-compatible installers that take a value. Options not listed here are
 /// treated as flags; `--opt=value` forms are handled generically.
 const PYPI_VALUE: &[&str] = &[
-    "-t", "--target", "--prefix", "--root", "--platform", "--python-version", "--implementation", "--abi",
-    "--src", "--upgrade-strategy", "--progress-bar", "--log", "--log-file", "--cache-dir", "--trusted-host",
-    "--proxy", "--timeout", "--retries", "--exists-action", "--cert", "--client-cert", "--global-option",
-    "--install-option", "--config-settings", "-C", "--only-binary", "--no-binary", "--python", "-p", "--report",
-    "--python-platform", "--resolution", "--prerelease", "--index-strategy", "--keyring-provider", "--link-mode",
-    "--group", "-G", "--optional", "--extra", "-E", "--extras", "--package", "--script", "--branch", "--rev",
-    "--tag", "--source", "--suffix", "--pip-args", "--marker", "-m", "--refresh-package", "--reinstall-package",
-    "--upgrade-package", "-P", "--directory", "--project", "--config-file", "--use-feature", "--dependency-group",
+    "-t",
+    "--target",
+    "--prefix",
+    "--root",
+    "--platform",
+    "--python-version",
+    "--implementation",
+    "--abi",
+    "--src",
+    "--upgrade-strategy",
+    "--progress-bar",
+    "--log",
+    "--log-file",
+    "--cache-dir",
+    "--trusted-host",
+    "--proxy",
+    "--timeout",
+    "--retries",
+    "--exists-action",
+    "--cert",
+    "--client-cert",
+    "--global-option",
+    "--install-option",
+    "--config-settings",
+    "-C",
+    "--only-binary",
+    "--no-binary",
+    "--python",
+    "-p",
+    "--report",
+    "--python-platform",
+    "--resolution",
+    "--prerelease",
+    "--index-strategy",
+    "--keyring-provider",
+    "--link-mode",
+    "--group",
+    "-G",
+    "--optional",
+    "--extra",
+    "-E",
+    "--extras",
+    "--package",
+    "--script",
+    "--branch",
+    "--rev",
+    "--tag",
+    "--source",
+    "--suffix",
+    "--pip-args",
+    "--marker",
+    "-m",
+    "--refresh-package",
+    "--reinstall-package",
+    "--upgrade-package",
+    "-P",
+    "--directory",
+    "--project",
+    "--config-file",
+    "--use-feature",
+    "--dependency-group",
 ];
 
-const INDEX_OPTS: &[&str] = &["-i", "--index-url", "--extra-index-url", "--index", "--default-index", "-f", "--find-links"];
+const INDEX_OPTS: &[&str] = &[
+    "-i",
+    "--index-url",
+    "--extra-index-url",
+    "--index",
+    "--default-index",
+    "-f",
+    "--find-links",
+];
 
 fn custom_index(eco: Ecosystem, url: &str) -> Target {
     Target::Unverifiable {
@@ -553,10 +695,14 @@ fn editable(v: &str) -> Option<Target> {
 fn looks_like_url(s: &str) -> bool {
     let l = s.to_ascii_lowercase();
     l.contains("://")
-        || ["git+", "hg+", "svn+", "bzr+", "git@"].iter().any(|p| l.starts_with(p))
+        || ["git+", "hg+", "svn+", "bzr+", "git@"]
+            .iter()
+            .any(|p| l.starts_with(p))
 }
 
-const ARCHIVE_EXT: &[&str] = &[".whl", ".tar.gz", ".tgz", ".zip", ".tar.bz2", ".tar.xz", ".tar"];
+const ARCHIVE_EXT: &[&str] = &[
+    ".whl", ".tar.gz", ".tgz", ".zip", ".tar.bz2", ".tar.xz", ".tar",
+];
 
 fn looks_like_path(s: &str) -> bool {
     s == "."
@@ -567,7 +713,9 @@ fn looks_like_path(s: &str) -> bool {
         || s.starts_with('~')
         || s.contains('\\')
         || (s.len() > 2 && s.as_bytes()[1] == b':' && s.as_bytes()[0].is_ascii_alphabetic())
-        || ARCHIVE_EXT.iter().any(|e| s.to_ascii_lowercase().ends_with(e))
+        || ARCHIVE_EXT
+            .iter()
+            .any(|e| s.to_ascii_lowercase().ends_with(e))
 }
 
 /// Parse a PEP 508 requirement, a Poetry/uv `name@constraint`, or report why it cannot
@@ -587,7 +735,8 @@ pub fn parse_pypi_spec(raw: &str) -> Target {
     }
     static RE: OnceLock<Regex> = OnceLock::new();
     let re = RE.get_or_init(|| {
-        Regex::new(r"^([A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)\s*(\[[^\]]*\])?\s*(.*)$").unwrap()
+        Regex::new(r"^([A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)\s*(\[[^\]]*\])?\s*(.*)$")
+            .unwrap()
     });
     let Some(c) = re.captures(s) else {
         return unverifiable("could not parse the requirement");
@@ -607,13 +756,19 @@ pub fn parse_pypi_spec(raw: &str) -> Target {
         (!after.is_empty() && after != "latest").then(|| after.to_string())
     } else {
         let compact: String = rest.chars().filter(|c| !c.is_whitespace()).collect();
-        let compact = compact.trim_start_matches('(').trim_end_matches(')').to_string();
+        let compact = compact
+            .trim_start_matches('(')
+            .trim_end_matches(')')
+            .to_string();
         if compact.is_empty() {
             None
         } else if !compact.starts_with(['=', '!', '<', '>', '~', '^']) {
             return unverifiable("could not parse the requirement");
         } else {
-            match compact.strip_prefix("===").or_else(|| compact.strip_prefix("==")) {
+            match compact
+                .strip_prefix("===")
+                .or_else(|| compact.strip_prefix("=="))
+            {
                 Some(v) if !v.contains([',', '*']) => Some(v.to_string()),
                 _ => Some(compact),
             }
@@ -639,13 +794,19 @@ fn requirements_file(path: &Path, shown: &str, depth: usize) -> Vec<Target> {
             }]
         }
     };
-    let dir = path.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
+    let dir = path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
     let mut targets = Vec::new();
     let joined = text.replace("\\\r\n", "").replace("\\\n", "");
     static OPT: OnceLock<Regex> = OnceLock::new();
     let opt = OPT.get_or_init(|| Regex::new(r"\s+--?[A-Za-z]").unwrap());
     for line in joined.lines() {
-        let line = match line.find(" #").or_else(|| line.starts_with('#').then_some(0)) {
+        let line = match line
+            .find(" #")
+            .or_else(|| line.starts_with('#').then_some(0))
+        {
             Some(i) => &line[..i],
             None => line,
         }
@@ -657,12 +818,15 @@ fn requirements_file(path: &Path, shown: &str, depth: usize) -> Vec<Target> {
             let mut parts = line.splitn(2, |c: char| c.is_whitespace() || c == '=');
             let flag = parts.next().unwrap_or("");
             let value = parts.next().unwrap_or("").trim();
-            let (flag, value) = match (flag.len() > 2 && !flag.starts_with("--"), value.is_empty()) {
+            let (flag, value) = match (flag.len() > 2 && !flag.starts_with("--"), value.is_empty())
+            {
                 (true, true) => (&flag[..2], &flag[2..]),
                 _ => (flag, value),
             };
             match flag {
-                "-r" | "--requirement" => targets.extend(requirements_file(&dir.join(value), value, depth + 1)),
+                "-r" | "--requirement" => {
+                    targets.extend(requirements_file(&dir.join(value), value, depth + 1))
+                }
                 "-e" | "--editable" => targets.extend(editable(value)),
                 f if INDEX_OPTS.contains(&f) => targets.push(custom_index(Ecosystem::Pypi, value)),
                 _ => {}
@@ -680,11 +844,39 @@ fn requirements_file(path: &Path, shown: &str, depth: usize) -> Vec<Target> {
 }
 
 const NPM_VALUE: &[&str] = &[
-    "--prefix", "--tag", "-w", "--workspace", "--omit", "--include", "--install-strategy", "--cache", "--loglevel",
-    "--userconfig", "--globalconfig", "--before", "--filter", "--dir", "-C", "--cwd", "--network-timeout",
-    "--modules-folder", "--save-prefix", "--config", "--lockfile-dir", "--virtual-store-dir", "--store-dir",
-    "--reporter", "--mutex", "--cache-folder", "--global-folder", "--link-folder", "--network-concurrency",
-    "--child-concurrency", "--backend", "--cafile", "--ca",
+    "--prefix",
+    "--tag",
+    "-w",
+    "--workspace",
+    "--omit",
+    "--include",
+    "--install-strategy",
+    "--cache",
+    "--loglevel",
+    "--userconfig",
+    "--globalconfig",
+    "--before",
+    "--filter",
+    "--dir",
+    "-C",
+    "--cwd",
+    "--network-timeout",
+    "--modules-folder",
+    "--save-prefix",
+    "--config",
+    "--lockfile-dir",
+    "--virtual-store-dir",
+    "--store-dir",
+    "--reporter",
+    "--mutex",
+    "--cache-folder",
+    "--global-folder",
+    "--link-folder",
+    "--network-concurrency",
+    "--child-concurrency",
+    "--backend",
+    "--cafile",
+    "--ca",
 ];
 
 /// Arguments of `npm install` and friends (after the subcommand).
@@ -714,7 +906,8 @@ pub fn npm_args(args: &[String]) -> Vec<Target> {
 }
 
 const NPM_INSTALL: &[&str] = &[
-    "install", "i", "in", "ins", "inst", "insta", "instal", "isnt", "isnta", "isntal", "isntall", "add",
+    "install", "i", "in", "ins", "inst", "insta", "instal", "isnt", "isnta", "isntal", "isntall",
+    "add",
 ];
 
 /// First positional argument (the subcommand) after npm-style global options.
@@ -725,15 +918,25 @@ fn npm_subcommand(args: &[String]) -> Option<(&str, &[String])> {
         if !a.starts_with('-') {
             return Some((a, &args[i + 1..]));
         }
-        i += if NPM_VALUE.contains(&a) || a == "--registry" { 2 } else { 1 };
+        i += if NPM_VALUE.contains(&a) || a == "--registry" {
+            2
+        } else {
+            1
+        };
     }
     None
 }
 
 fn npm(args: &[String], out: &mut Vec<Install>) {
-    let Some((sub, rest)) = npm_subcommand(args) else { return };
+    let Some((sub, rest)) = npm_subcommand(args) else {
+        return;
+    };
     // Global options may sit before the subcommand (`npm --registry X install y`).
-    let pre: Vec<String> = args.iter().take_while(|a| a.as_str() != sub).cloned().collect();
+    let pre: Vec<String> = args
+        .iter()
+        .take_while(|a| a.as_str() != sub)
+        .cloned()
+        .collect();
     if NPM_INSTALL.contains(&sub) {
         let mut targets = npm_args(&pre);
         targets.extend(npm_args(rest));
@@ -749,7 +952,9 @@ fn npm(args: &[String], out: &mut Vec<Install>) {
 }
 
 fn pnpm(args: &[String], out: &mut Vec<Install>) {
-    let Some((sub, rest)) = npm_subcommand(args) else { return };
+    let Some((sub, rest)) = npm_subcommand(args) else {
+        return;
+    };
     match sub {
         "add" | "install" | "i" => {
             let targets = npm_args(rest);
@@ -766,7 +971,9 @@ fn pnpm(args: &[String], out: &mut Vec<Install>) {
 }
 
 fn yarn(args: &[String], out: &mut Vec<Install>) {
-    let Some((sub, rest)) = npm_subcommand(args) else { return };
+    let Some((sub, rest)) = npm_subcommand(args) else {
+        return;
+    };
     let (sub, rest) = if sub == "global" {
         match npm_subcommand(rest) {
             Some(x) => x,
@@ -791,7 +998,9 @@ fn yarn(args: &[String], out: &mut Vec<Install>) {
 }
 
 fn bun(args: &[String], out: &mut Vec<Install>) {
-    let Some((sub, rest)) = npm_subcommand(args) else { return };
+    let Some((sub, rest)) = npm_subcommand(args) else {
+        return;
+    };
     match sub {
         "add" | "a" | "install" | "i" => {
             let targets = npm_args(rest);
@@ -859,8 +1068,10 @@ fn npx_like(args: &[String], out: &mut Vec<Install>, tool: &str) {
 
 fn valid_npm_name(name: &str) -> bool {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"^(@[A-Za-z0-9][A-Za-z0-9._~-]*/)?[A-Za-z0-9_~-][A-Za-z0-9._~-]*$").unwrap())
-        .is_match(name)
+    RE.get_or_init(|| {
+        Regex::new(r"^(@[A-Za-z0-9][A-Za-z0-9._~-]*/)?[A-Za-z0-9_~-][A-Za-z0-9._~-]*$").unwrap()
+    })
+    .is_match(name)
         && name.len() <= 214
 }
 
@@ -881,13 +1092,23 @@ pub fn parse_npm_spec(raw: &str) -> Target {
     }
     let lower = s.to_ascii_lowercase();
     if looks_like_url(s)
-        || ["github:", "gitlab:", "bitbucket:", "gist:", "git:", "http:", "https:"]
-            .iter()
-            .any(|p| lower.starts_with(p))
+        || [
+            "github:",
+            "gitlab:",
+            "bitbucket:",
+            "gist:",
+            "git:",
+            "http:",
+            "https:",
+        ]
+        .iter()
+        .any(|p| lower.starts_with(p))
     {
         return unverifiable("installs from a git repository or URL, which Customs cannot check");
     }
-    if ["file:", "link:", "workspace:", "portal:", "patch:"].iter().any(|p| lower.starts_with(p))
+    if ["file:", "link:", "workspace:", "portal:", "patch:"]
+        .iter()
+        .any(|p| lower.starts_with(p))
         || s.starts_with('.')
         || s.starts_with('/')
         || s.starts_with('~')
@@ -904,7 +1125,9 @@ pub fn parse_npm_spec(raw: &str) -> Target {
         }
     } else {
         if s.contains('/') {
-            return unverifiable("GitHub shorthand (user/repo) installs from git, which Customs cannot check");
+            return unverifiable(
+                "GitHub shorthand (user/repo) installs from git, which Customs cannot check",
+            );
         }
         match s.split_once('@') {
             Some((n, r)) => (n, Some(r)),
@@ -957,7 +1180,10 @@ mod tests {
     }
 
     fn tools(cmd: &str) -> Vec<String> {
-        parse_command(cmd, Path::new("/")).into_iter().map(|i| i.tool).collect()
+        parse_command(cmd, Path::new("/"))
+            .into_iter()
+            .map(|i| i.tool)
+            .collect()
     }
 
     fn is_unverifiable(t: &Target) -> bool {
@@ -967,18 +1193,51 @@ mod tests {
     #[test]
     fn pip_basic_forms() {
         assert_eq!(targets("pip install requests"), vec![py("requests", None)]);
-        assert_eq!(targets("pip3 install requests==2.31.0"), vec![py("requests", Some("2.31.0"))]);
-        assert_eq!(targets("pip3.12 install 'requests>=2,<3'"), vec![py("requests", Some(">=2,<3"))]);
-        assert_eq!(targets("python -m pip install Flask[async]"), vec![py("flask", None)]);
-        assert_eq!(targets("python3.11 -m pip install -U pip setuptools"), vec![py("pip", None), py("setuptools", None)]);
-        assert_eq!(targets("/usr/bin/python3 -m pip install --user six"), vec![py("six", None)]);
+        assert_eq!(
+            targets("pip3 install requests==2.31.0"),
+            vec![py("requests", Some("2.31.0"))]
+        );
+        assert_eq!(
+            targets("pip3.12 install 'requests>=2,<3'"),
+            vec![py("requests", Some(">=2,<3"))]
+        );
+        assert_eq!(
+            targets("python -m pip install Flask[async]"),
+            vec![py("flask", None)]
+        );
+        assert_eq!(
+            targets("python3.11 -m pip install -U pip setuptools"),
+            vec![py("pip", None), py("setuptools", None)]
+        );
+        assert_eq!(
+            targets("/usr/bin/python3 -m pip install --user six"),
+            vec![py("six", None)]
+        );
         assert_eq!(targets("py -m pip install x"), vec![py("x", None)]);
-        assert_eq!(targets("pip install --upgrade 'Django ~= 4.2'"), vec![py("django", Some("~=4.2"))]);
-        assert_eq!(targets("pip install pkg===1.0"), vec![py("pkg", Some("1.0"))]);
-        assert_eq!(targets("pip install 'pkg==1.*'"), vec![py("pkg", Some("==1.*"))]);
-        assert_eq!(targets("pip install 'pkg; python_version<\"3.8\"'"), vec![py("pkg", None)]);
-        assert_eq!(targets("pip install Python_DateUtil"), vec![py("python-dateutil", None)]);
-        assert_eq!(targets("pip -q --disable-pip-version-check install a b c").len(), 3);
+        assert_eq!(
+            targets("pip install --upgrade 'Django ~= 4.2'"),
+            vec![py("django", Some("~=4.2"))]
+        );
+        assert_eq!(
+            targets("pip install pkg===1.0"),
+            vec![py("pkg", Some("1.0"))]
+        );
+        assert_eq!(
+            targets("pip install 'pkg==1.*'"),
+            vec![py("pkg", Some("==1.*"))]
+        );
+        assert_eq!(
+            targets("pip install 'pkg; python_version<\"3.8\"'"),
+            vec![py("pkg", None)]
+        );
+        assert_eq!(
+            targets("pip install Python_DateUtil"),
+            vec![py("python-dateutil", None)]
+        );
+        assert_eq!(
+            targets("pip -q --disable-pip-version-check install a b c").len(),
+            3
+        );
         assert!(targets("pip list").is_empty());
         assert!(targets("pip install").is_empty());
         assert!(targets("pip show requests").is_empty());
@@ -992,10 +1251,22 @@ mod tests {
             targets("pip install --target ./vendor --platform manylinux2014_x86_64 --only-binary=:all: --python-version 3.11 numpy"),
             vec![py("numpy", None)]
         );
-        assert_eq!(targets("pip install -t lib --no-deps pkg"), vec![py("pkg", None)]);
-        assert_eq!(targets("pip install -c constraints.txt pkg"), vec![py("pkg", None)]);
-        assert_eq!(targets("pip install --cache-dir /tmp/c --timeout 30 pkg"), vec![py("pkg", None)]);
-        assert_eq!(targets("pip install --config-settings key=val pkg"), vec![py("pkg", None)]);
+        assert_eq!(
+            targets("pip install -t lib --no-deps pkg"),
+            vec![py("pkg", None)]
+        );
+        assert_eq!(
+            targets("pip install -c constraints.txt pkg"),
+            vec![py("pkg", None)]
+        );
+        assert_eq!(
+            targets("pip install --cache-dir /tmp/c --timeout 30 pkg"),
+            vec![py("pkg", None)]
+        );
+        assert_eq!(
+            targets("pip install --config-settings key=val pkg"),
+            vec![py("pkg", None)]
+        );
     }
 
     #[test]
@@ -1042,11 +1313,19 @@ mod tests {
     fn custom_indexes_are_flagged() {
         let t = targets("pip install -i https://evil.example/simple pkg");
         assert_eq!(t.len(), 2);
-        assert!(matches!(&t[0], Target::Unverifiable { reason, .. } if reason.contains("evil.example")));
+        assert!(
+            matches!(&t[0], Target::Unverifiable { reason, .. } if reason.contains("evil.example"))
+        );
         assert_eq!(t[1], py("pkg", None));
-        assert!(is_unverifiable(&targets("pip install --extra-index-url=https://x/simple a")[0]));
-        assert!(is_unverifiable(&targets("npm install --registry https://r.example x")[0]));
-        assert!(is_unverifiable(&targets("npm --registry=https://r.example install x")[0]));
+        assert!(is_unverifiable(
+            &targets("pip install --extra-index-url=https://x/simple a")[0]
+        ));
+        assert!(is_unverifiable(
+            &targets("npm install --registry https://r.example x")[0]
+        ));
+        assert!(is_unverifiable(
+            &targets("npm --registry=https://r.example install x")[0]
+        ));
     }
 
     #[test]
@@ -1079,23 +1358,40 @@ mod tests {
             .collect();
         assert_eq!(t.len(), 7);
         let t = targets("pip install -r missing.txt");
-        assert!(matches!(&t[0], Target::Unverifiable { reason, .. } if reason.contains("missing.txt")));
+        assert!(
+            matches!(&t[0], Target::Unverifiable { reason, .. } if reason.contains("missing.txt"))
+        );
     }
 
     #[test]
     fn wrappers_and_env_prefixes() {
         assert_eq!(targets("FOO=1 BAR=2 pip install x"), vec![py("x", None)]);
         assert_eq!(targets("sudo -H pip install x"), vec![py("x", None)]);
-        assert_eq!(targets("sudo -u root -E pip3 install x"), vec![py("x", None)]);
-        assert_eq!(targets("env -i PATH=/bin pip install x"), vec![py("x", None)]);
+        assert_eq!(
+            targets("sudo -u root -E pip3 install x"),
+            vec![py("x", None)]
+        );
+        assert_eq!(
+            targets("env -i PATH=/bin pip install x"),
+            vec![py("x", None)]
+        );
         assert_eq!(targets("timeout 60 npm install y"), vec![js("y", None)]);
-        assert_eq!(targets("time nohup nice -n 5 pip install x"), vec![py("x", None)]);
+        assert_eq!(
+            targets("time nohup nice -n 5 pip install x"),
+            vec![py("x", None)]
+        );
         assert_eq!(targets("command pip install x"), vec![py("x", None)]);
         assert!(targets("command -v pip").is_empty());
-        assert_eq!(targets("bash -c 'pip install x && npm i y'"), vec![py("x", None), js("y", None)]);
+        assert_eq!(
+            targets("bash -c 'pip install x && npm i y'"),
+            vec![py("x", None), js("y", None)]
+        );
         assert_eq!(targets("sh -lc \"uv add z\""), vec![py("z", None)]);
         assert_eq!(targets("eval pip install x"), vec![py("x", None)]);
-        assert_eq!(targets("if true; then pip install x; fi"), vec![py("x", None)]);
+        assert_eq!(
+            targets("if true; then pip install x; fi"),
+            vec![py("x", None)]
+        );
     }
 
     #[test]
@@ -1106,54 +1402,123 @@ mod tests {
         );
         assert_eq!(targets("echo pip install x"), vec![]);
         assert_eq!(targets("git commit -m 'pip install x'"), vec![]);
-        assert_eq!(targets("echo $(pip install hidden)"), vec![py("hidden", None)]);
-        assert_eq!(targets("pip install a > log.txt 2>&1 && echo done"), vec![py("a", None)]);
+        assert_eq!(
+            targets("echo $(pip install hidden)"),
+            vec![py("hidden", None)]
+        );
+        assert_eq!(
+            targets("pip install a > log.txt 2>&1 && echo done"),
+            vec![py("a", None)]
+        );
     }
 
     #[test]
     fn uv_poetry_pipx_pdm() {
-        assert_eq!(targets("uv pip install requests"), vec![py("requests", None)]);
-        assert_eq!(targets("uv pip install --system -r /nonexistent/r.txt").len(), 1);
-        assert_eq!(targets("uv add 'httpx>=0.27' --dev"), vec![py("httpx", Some(">=0.27"))]);
+        assert_eq!(
+            targets("uv pip install requests"),
+            vec![py("requests", None)]
+        );
+        assert_eq!(
+            targets("uv pip install --system -r /nonexistent/r.txt").len(),
+            1
+        );
+        assert_eq!(
+            targets("uv add 'httpx>=0.27' --dev"),
+            vec![py("httpx", Some(">=0.27"))]
+        );
         assert_eq!(targets("uv add --group lint ruff"), vec![py("ruff", None)]);
         assert_eq!(targets("uv --directory sub add x"), vec![py("x", None)]);
-        assert_eq!(targets("uv tool install ruff@0.6.0"), vec![py("ruff", Some("0.6.0"))]);
+        assert_eq!(
+            targets("uv tool install ruff@0.6.0"),
+            vec![py("ruff", Some("0.6.0"))]
+        );
         assert_eq!(targets("uvx ruff check ."), vec![py("ruff", None)]);
-        assert_eq!(targets("uvx ruff@0.5.0 --version"), vec![py("ruff", Some("0.5.0"))]);
-        assert_eq!(targets("uvx --from 'httpie==3.2' http GET example.com"), vec![py("httpie", Some("3.2"))]);
+        assert_eq!(
+            targets("uvx ruff@0.5.0 --version"),
+            vec![py("ruff", Some("0.5.0"))]
+        );
+        assert_eq!(
+            targets("uvx --from 'httpie==3.2' http GET example.com"),
+            vec![py("httpie", Some("3.2"))]
+        );
         assert_eq!(
             targets("uvx --with rich --python 3.12 pycowsay hi"),
             vec![py("rich", None), py("pycowsay", None)]
         );
         assert_eq!(targets("uv tool run black"), vec![py("black", None)]);
-        assert_eq!(targets("uv run --with pandas,numpy python x.py"), vec![py("pandas", None), py("numpy", None)]);
+        assert_eq!(
+            targets("uv run --with pandas,numpy python x.py"),
+            vec![py("pandas", None), py("numpy", None)]
+        );
         assert!(targets("uv run python x.py").is_empty());
         assert!(targets("uv sync").is_empty());
-        assert_eq!(targets("poetry add requests@^2.28"), vec![py("requests", Some("^2.28"))]);
-        assert_eq!(targets("poetry add -G dev pytest@latest"), vec![py("pytest", None)]);
-        assert_eq!(targets("poetry add 'django>=4,<5'"), vec![py("django", Some(">=4,<5"))]);
+        assert_eq!(
+            targets("poetry add requests@^2.28"),
+            vec![py("requests", Some("^2.28"))]
+        );
+        assert_eq!(
+            targets("poetry add -G dev pytest@latest"),
+            vec![py("pytest", None)]
+        );
+        assert_eq!(
+            targets("poetry add 'django>=4,<5'"),
+            vec![py("django", Some(">=4,<5"))]
+        );
         assert_eq!(targets("pdm add rich"), vec![py("rich", None)]);
         assert_eq!(targets("pipx install black"), vec![py("black", None)]);
-        assert_eq!(targets("pipx install --python python3.12 'black==24.1.0'"), vec![py("black", Some("24.1.0"))]);
+        assert_eq!(
+            targets("pipx install --python python3.12 'black==24.1.0'"),
+            vec![py("black", Some("24.1.0"))]
+        );
         assert_eq!(targets("pipx run cowsay moo"), vec![py("cowsay", None)]);
-        assert_eq!(targets("pipx run --spec httpie==3.2 http"), vec![py("httpie", Some("3.2"))]);
-        assert_eq!(targets("pipx inject black black-plugin"), vec![py("black-plugin", None)]);
+        assert_eq!(
+            targets("pipx run --spec httpie==3.2 http"),
+            vec![py("httpie", Some("3.2"))]
+        );
+        assert_eq!(
+            targets("pipx inject black black-plugin"),
+            vec![py("black-plugin", None)]
+        );
         assert_eq!(targets("python -m pipx install x"), vec![py("x", None)]);
     }
 
     #[test]
     fn npm_family() {
         assert_eq!(targets("npm install left-pad"), vec![js("left-pad", None)]);
-        assert_eq!(targets("npm i lodash@4.17.21 -D"), vec![js("lodash", Some("4.17.21"))]);
-        assert_eq!(targets("npm install --save-dev @types/node@^20"), vec![js("@types/node", Some("^20"))]);
-        assert_eq!(targets("npm add -g typescript"), vec![js("typescript", None)]);
+        assert_eq!(
+            targets("npm i lodash@4.17.21 -D"),
+            vec![js("lodash", Some("4.17.21"))]
+        );
+        assert_eq!(
+            targets("npm install --save-dev @types/node@^20"),
+            vec![js("@types/node", Some("^20"))]
+        );
+        assert_eq!(
+            targets("npm add -g typescript"),
+            vec![js("typescript", None)]
+        );
         assert_eq!(targets("npm isntall chalk"), vec![js("chalk", None)]);
         assert_eq!(targets("npm install react@latest"), vec![js("react", None)]);
-        assert_eq!(targets("npm install 'react@>=18 <19'"), vec![js("react", Some(">=18 <19"))]);
-        assert_eq!(targets("npm install @babel/core"), vec![js("@babel/core", None)]);
-        assert_eq!(targets("npm install --prefix ./x --tag beta pkg"), vec![js("pkg", None)]);
-        assert_eq!(targets("npm --prefix ./x install pkg"), vec![js("pkg", None)]);
-        assert_eq!(targets("npm install my-alias@npm:real-pkg@1.0.0"), vec![js("real-pkg", Some("1.0.0"))]);
+        assert_eq!(
+            targets("npm install 'react@>=18 <19'"),
+            vec![js("react", Some(">=18 <19"))]
+        );
+        assert_eq!(
+            targets("npm install @babel/core"),
+            vec![js("@babel/core", None)]
+        );
+        assert_eq!(
+            targets("npm install --prefix ./x --tag beta pkg"),
+            vec![js("pkg", None)]
+        );
+        assert_eq!(
+            targets("npm --prefix ./x install pkg"),
+            vec![js("pkg", None)]
+        );
+        assert_eq!(
+            targets("npm install my-alias@npm:real-pkg@1.0.0"),
+            vec![js("real-pkg", Some("1.0.0"))]
+        );
         assert_eq!(targets("npm install Left-Pad"), vec![js("left-pad", None)]);
         assert!(targets("npm install").is_empty());
         assert!(targets("npm ci").is_empty());
@@ -1162,7 +1527,10 @@ mod tests {
         assert_eq!(targets("pnpm add -D vitest"), vec![js("vitest", None)]);
         assert_eq!(targets("pnpm --filter web add zod"), vec![js("zod", None)]);
         assert!(targets("pnpm install").is_empty());
-        assert_eq!(targets("yarn add react react-dom"), vec![js("react", None), js("react-dom", None)]);
+        assert_eq!(
+            targets("yarn add react react-dom"),
+            vec![js("react", None), js("react-dom", None)]
+        );
         assert_eq!(targets("yarn global add serve"), vec![js("serve", None)]);
         assert!(targets("yarn").is_empty());
         assert_eq!(targets("bun add elysia"), vec![js("elysia", None)]);
@@ -1192,28 +1560,58 @@ mod tests {
     #[test]
     fn npx_and_friends() {
         assert_eq!(targets("npx cowsay hello"), vec![js("cowsay", None)]);
-        assert_eq!(targets("npx -y create-react-app@5 my-app"), vec![js("create-react-app", Some("5"))]);
-        assert_eq!(targets("npx --yes @angular/cli@17 new app"), vec![js("@angular/cli", Some("17"))]);
-        assert_eq!(targets("npx -p typescript -p ts-node ts-node x.ts"), vec![js("typescript", None), js("ts-node", None)]);
-        assert_eq!(targets("npx --package=eslint -- eslint ."), vec![js("eslint", None)]);
-        assert_eq!(targets("npm exec -- prettier --write ."), vec![js("prettier", None)]);
+        assert_eq!(
+            targets("npx -y create-react-app@5 my-app"),
+            vec![js("create-react-app", Some("5"))]
+        );
+        assert_eq!(
+            targets("npx --yes @angular/cli@17 new app"),
+            vec![js("@angular/cli", Some("17"))]
+        );
+        assert_eq!(
+            targets("npx -p typescript -p ts-node ts-node x.ts"),
+            vec![js("typescript", None), js("ts-node", None)]
+        );
+        assert_eq!(
+            targets("npx --package=eslint -- eslint ."),
+            vec![js("eslint", None)]
+        );
+        assert_eq!(
+            targets("npm exec -- prettier --write ."),
+            vec![js("prettier", None)]
+        );
         assert_eq!(targets("npm x vite"), vec![js("vite", None)]);
         assert_eq!(targets("pnpm dlx degit user/repo"), vec![js("degit", None)]);
         assert_eq!(targets("pnpx serve"), vec![js("serve", None)]);
-        assert_eq!(targets("yarn dlx create-vite"), vec![js("create-vite", None)]);
+        assert_eq!(
+            targets("yarn dlx create-vite"),
+            vec![js("create-vite", None)]
+        );
         assert_eq!(targets("bunx cowsay"), vec![js("cowsay", None)]);
         assert_eq!(targets("bun x tsc"), vec![js("tsc", None)]);
-        assert_eq!(tools("npx a; uvx b; pip install c"), vec!["npx", "uvx", "pip install"]);
+        assert_eq!(
+            tools("npx a; uvx b; pip install c"),
+            vec!["npx", "uvx", "pip install"]
+        );
     }
 
     #[test]
     fn spec_parsers() {
-        assert_eq!(parse_pypi_spec("requests[security,socks]>=2.0"), py("requests", Some(">=2.0")));
-        assert_eq!(parse_pypi_spec("requests (>=2.0)"), py("requests", Some(">=2.0")));
+        assert_eq!(
+            parse_pypi_spec("requests[security,socks]>=2.0"),
+            py("requests", Some(">=2.0"))
+        );
+        assert_eq!(
+            parse_pypi_spec("requests (>=2.0)"),
+            py("requests", Some(">=2.0"))
+        );
         assert_eq!(parse_pypi_spec("x!=1.0"), py("x", Some("!=1.0")));
         assert!(is_unverifiable(&parse_pypi_spec("--bogus")));
         assert!(is_unverifiable(&parse_pypi_spec("pkg extra-word")));
-        assert_eq!(parse_npm_spec("@scope/pkg@^1"), js("@scope/pkg", Some("^1")));
+        assert_eq!(
+            parse_npm_spec("@scope/pkg@^1"),
+            js("@scope/pkg", Some("^1"))
+        );
         assert_eq!(parse_npm_spec("@scope/pkg"), js("@scope/pkg", None));
         assert_eq!(parse_npm_spec("pkg@next"), js("pkg", Some("next")));
         assert!(is_unverifiable(&parse_npm_spec("@scope")));

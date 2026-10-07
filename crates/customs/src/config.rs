@@ -264,9 +264,13 @@ impl fmt::Display for PackageRule {
 }
 
 fn check_url(key: &str, v: &str) -> Result<(), ConfigError> {
-    let u = url::Url::parse(v).map_err(|e| ConfigError::new(key, format!("'{v}' is not a URL: {e}")))?;
+    let u = url::Url::parse(v)
+        .map_err(|e| ConfigError::new(key, format!("'{v}' is not a URL: {e}")))?;
     if !matches!(u.scheme(), "http" | "https") {
-        return Err(ConfigError::new(key, format!("'{v}' must be an http or https URL")));
+        return Err(ConfigError::new(
+            key,
+            format!("'{v}' must be an http or https URL"),
+        ));
     }
     Ok(())
 }
@@ -283,14 +287,14 @@ impl Policy {
 
     /// Parse a JSON body (the `PUT /api/policy` shape) and validate it.
     pub fn from_json(text: &str) -> Result<Self, ConfigError> {
-        let p: Policy = serde_json::from_str(text).map_err(|e| ConfigError::new("", e.to_string()))?;
+        let p: Policy =
+            serde_json::from_str(text).map_err(|e| ConfigError::new("", e.to_string()))?;
         p.validated()
     }
 
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
-        let text = std::fs::read_to_string(path).map_err(|e| {
-            ConfigError::new("", format!("cannot read {}: {e}", path.display()))
-        })?;
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| ConfigError::new("", format!("cannot read {}: {e}", path.display())))?;
         Self::from_toml(&text).map_err(|e| ConfigError {
             key: e.key,
             message: format!("{}: {}", path.display(), e.message),
@@ -328,7 +332,8 @@ impl Policy {
         }
         for (list, key) in [(&self.allow, "allow"), (&self.deny, "deny")] {
             for (i, entry) in list.iter().enumerate() {
-                PackageRule::parse(entry).map_err(|m| ConfigError::new(format!("{key}[{i}]"), m))?;
+                PackageRule::parse(entry)
+                    .map_err(|m| ConfigError::new(format!("{key}[{i}]"), m))?;
             }
         }
         for (key, v) in [
@@ -346,11 +351,17 @@ impl Policy {
     }
 
     pub fn allow_rules(&self) -> Vec<PackageRule> {
-        self.allow.iter().filter_map(|s| PackageRule::parse(s).ok()).collect()
+        self.allow
+            .iter()
+            .filter_map(|s| PackageRule::parse(s).ok())
+            .collect()
     }
 
     pub fn deny_rules(&self) -> Vec<PackageRule> {
-        self.deny.iter().filter_map(|s| PackageRule::parse(s).ok()).collect()
+        self.deny
+            .iter()
+            .filter_map(|s| PackageRule::parse(s).ok())
+            .collect()
     }
 }
 

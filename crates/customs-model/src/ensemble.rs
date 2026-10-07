@@ -1,9 +1,10 @@
-//! Logistic stacking of the component logits (DESIGN.md section 5, `ensemble.json`).
+//! Logistic stacking of the component logits (DESIGN.md section 5, `ensemble.json`,
+//! format `customs-ensemble-v1`).
 //!
-//! `risk = calibrate(sigmoid(bias + sum_i w_i * logit_i))` over the components that ran.
+//! `risk = isotonic(sigmoid(bias + sum_c w_c * logit_c))` over the components that ran.
 //! When a component cannot run for an input (no token stream for the CNN, no name, no
-//! features), the stacker uses a fallback weight set fitted for exactly the available
-//! components, looked up in `fallbacks` by the canonical key, e.g. `"code_gbdt+name"`.
+//! features), the stacker uses the entry of `fallbacks` whose `missing` set equals the set
+//! of unavailable components; those weights were fitted for exactly that situation.
 
 use std::collections::BTreeMap;
 
@@ -12,15 +13,17 @@ use serde::{Deserialize, Serialize};
 use crate::calibration::Calibration;
 use crate::{sigmoid, Decision, ModelError};
 
-/// Component names in canonical order. Fallback keys join the available ones with `+`.
+/// Component names in canonical order.
 pub const COMPONENTS: [&str; 3] = ["code_gbdt", "code_nn", "name"];
 
+/// Weights for a set of missing components.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct WeightSet {
+pub struct Fallback {
+    pub missing: Vec<String>,
     pub weights: BTreeMap<String, f64>,
     #[serde(default)]
     pub bias: f64,
-    /// Optional calibration specific to this weight set; the top-level one is used if absent.
+    /// Optional calibration for this weight set; the top-level one is used when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub calibration: Option<Calibration>,
 }
@@ -30,6 +33,8 @@ pub struct Thresholds {
     pub warn: f64,
     pub block: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_fpr_warn: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_fpr_block: Option<f64>,
 }
 
@@ -38,6 +43,7 @@ impl Default for Thresholds {
         Self {
             warn: 0.5,
             block: 0.9,
+            target_fpr_warn: None,
             target_fpr_block: None,
         }
     }
@@ -45,11 +51,15 @@ impl Default for Thresholds {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Ensemble {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub components: Option<Vec<String>>,
     pub weights: BTreeMap<String, f64>,
     #[serde(default)]
     pub bias: f64,
     #[serde(default)]
-    pub fallbacks: BTreeMap<String, WeightSet>,
+    pub fallbacks: Vec<Fallback>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub calibration: Option<Calibration>,
     #[serde(default)]
@@ -74,14 +84,13 @@ impl Logits {
         }
     }
 
-    /// Canonical key of the available components, e.g. `code_gbdt+name`.
-    pub fn key(&self) -> String {
+    /// Components that did not run, in canonical order.
+    pub fn missing(&self) -> Vec<&'static str> {
         COMPONENTS
             .iter()
-            .filter(|c| self.get(c).is_some())
+            .filter(|c| self.get(c).is_none())
             .copied()
-            .collect::<Vec<_>>()
-            .join("+")
+            .collect()
     }
 }
 
@@ -93,47 +102,61 @@ pub struct EnsembleOutput {
     pub raw: f64,
     /// Calibrated risk in [0, 1].
     pub risk: f64,
-    /// Which weights were used: `"primary"`, a fallback key, or `"partial:<key>"` when no
-    /// fallback was shipped and the primary weights were restricted to what ran.
+    /// Which weights were used: `"primary"`, `"missing:<components>"` for a fallback entry,
+    /// or `"partial:<components>"` when no fallback matched and the primary weights were
+    /// applied to the components that ran.
     pub weight_set: String,
+}
+
+fn same_set(a: &[String], b: &[&str]) -> bool {
+    a.len() == b.len() && b.iter().all(|x| a.iter().any(|y| y == x))
 }
 
 impl Ensemble {
     pub fn from_json(text: &str) -> Result<Self, ModelError> {
         const WHAT: &str = "ensemble";
         let e: Ensemble = serde_json::from_str(text).map_err(|e| ModelError::parse(WHAT, e))?;
-        let check_keys = |ws: &BTreeMap<String, f64>, at: &str| -> Result<(), ModelError> {
+        if let Some(f) = &e.format {
+            if f != "customs-ensemble-v1" {
+                return Err(ModelError::invalid(
+                    WHAT,
+                    format!("unsupported format '{f}'"),
+                ));
+            }
+        }
+        let known = |k: &str, at: &str| -> Result<(), ModelError> {
+            if COMPONENTS.contains(&k) {
+                Ok(())
+            } else {
+                Err(ModelError::invalid(
+                    WHAT,
+                    format!("{at}: unknown component '{k}' (expected one of {COMPONENTS:?})"),
+                ))
+            }
+        };
+        for c in e.components.iter().flatten() {
+            known(c, "components")?;
+        }
+        let check_weights = |ws: &BTreeMap<String, f64>, at: &str| -> Result<(), ModelError> {
             for (k, v) in ws {
-                if !COMPONENTS.contains(&k.as_str()) {
-                    return Err(ModelError::invalid(
-                        WHAT,
-                        format!("{at}: unknown component '{k}' (expected one of {COMPONENTS:?})"),
-                    ));
-                }
+                known(k, at)?;
                 if !v.is_finite() {
                     return Err(ModelError::invalid(WHAT, format!("{at}.{k} is not finite")));
                 }
             }
             Ok(())
         };
-        check_keys(&e.weights, "weights")?;
+        check_weights(&e.weights, "weights")?;
         if let Some(c) = &e.calibration {
             c.validate(WHAT)?;
         }
-        for (key, ws) in &e.fallbacks {
-            check_keys(&ws.weights, &format!("fallbacks.{key}.weights"))?;
-            let canon: Vec<&str> = COMPONENTS
-                .iter()
-                .filter(|c| key.split('+').any(|k| k == **c))
-                .copied()
-                .collect();
-            if canon.join("+") != *key {
-                return Err(ModelError::invalid(
-                    WHAT,
-                    format!("fallbacks key '{key}' is not in canonical form (components joined by '+' in the order {COMPONENTS:?})"),
-                ));
+        for (i, f) in e.fallbacks.iter().enumerate() {
+            let at = format!("fallbacks[{i}]");
+            for m in &f.missing {
+                known(m, &format!("{at}.missing"))?;
             }
-            if let Some(c) = &ws.calibration {
+            check_weights(&f.weights, &format!("{at}.weights"))?;
+            if let Some(c) = &f.calibration {
                 c.validate(WHAT)?;
             }
         }
@@ -150,24 +173,30 @@ impl Ensemble {
     /// Equal-weight stacker used when no `ensemble.json` is shipped.
     pub fn unweighted() -> Self {
         Self {
+            format: None,
+            components: None,
             weights: COMPONENTS.iter().map(|c| (c.to_string(), 1.0)).collect(),
             bias: 0.0,
-            fallbacks: BTreeMap::new(),
+            fallbacks: Vec::new(),
             calibration: None,
             thresholds: Thresholds::default(),
         }
     }
 
-    /// Stacking weight for a component under the set that would be used for `logits`.
+    fn fallback_for(&self, missing: &[&str]) -> Option<&Fallback> {
+        self.fallbacks
+            .iter()
+            .find(|f| same_set(&f.missing, missing))
+    }
+
+    /// Stacking weight of a component under the weight set used for `logits`.
     pub fn weight_for(&self, logits: &Logits, component: &str) -> f64 {
-        let key = logits.key();
-        let all = COMPONENTS.join("+");
-        let ws = if key == all {
+        let missing = logits.missing();
+        let ws = if missing.is_empty() {
             &self.weights
         } else {
-            self.fallbacks
-                .get(&key)
-                .map(|w| &w.weights)
+            self.fallback_for(&missing)
+                .map(|f| &f.weights)
                 .unwrap_or(&self.weights)
         };
         ws.get(component).copied().unwrap_or(0.0)
@@ -175,26 +204,30 @@ impl Ensemble {
 
     /// Combine the available logits. `None` when no component ran.
     pub fn combine(&self, logits: &Logits) -> Option<EnsembleOutput> {
-        let key = logits.key();
-        if key.is_empty() {
+        let missing = logits.missing();
+        if missing.len() == COMPONENTS.len() {
             return None;
         }
-        let all = COMPONENTS.join("+");
-        let (weights, bias, calibration, weight_set) = if key == all {
-            (&self.weights, self.bias, self.calibration.as_ref(), "primary".to_string())
-        } else if let Some(ws) = self.fallbacks.get(&key) {
+        let (weights, bias, calibration, weight_set) = if missing.is_empty() {
             (
-                &ws.weights,
-                ws.bias,
-                ws.calibration.as_ref().or(self.calibration.as_ref()),
-                key.clone(),
+                &self.weights,
+                self.bias,
+                self.calibration.as_ref(),
+                "primary".to_string(),
+            )
+        } else if let Some(f) = self.fallback_for(&missing) {
+            (
+                &f.weights,
+                f.bias,
+                f.calibration.as_ref().or(self.calibration.as_ref()),
+                format!("missing:{}", missing.join("+")),
             )
         } else {
             (
                 &self.weights,
                 self.bias,
                 self.calibration.as_ref(),
-                format!("partial:{key}"),
+                format!("partial:{}", missing.join("+")),
             )
         };
         let mut z = bias;
@@ -231,10 +264,11 @@ mod tests {
 
     fn ens() -> Ensemble {
         Ensemble::from_json(
-            r#"{"weights": {"code_gbdt": 1.0, "code_nn": 0.5, "name": 2.0}, "bias": -1.0,
-                "fallbacks": {"code_gbdt+name": {"weights": {"code_gbdt": 1.5, "name": 2.0}, "bias": -0.5}},
+            r#"{"format": "customs-ensemble-v1", "components": ["code_gbdt", "code_nn", "name"],
+                "weights": {"code_gbdt": 1.0, "code_nn": 0.5, "name": 2.0}, "bias": -1.0,
+                "fallbacks": [{"missing": ["code_nn"], "weights": {"code_gbdt": 1.5, "name": 2.0}, "bias": -0.5}],
                 "calibration": {"method": "isotonic", "x": [0.0, 1.0], "y": [0.0, 1.0]},
-                "thresholds": {"warn": 0.5, "block": 0.9, "target_fpr_block": 0.001}}"#,
+                "thresholds": {"warn": 0.5, "block": 0.9, "target_fpr_warn": 0.01, "target_fpr_block": 0.001}}"#,
         )
         .unwrap()
     }
@@ -256,17 +290,19 @@ mod tests {
             ..all
         };
         let o = e.combine(&no_nn).unwrap();
-        assert_eq!(o.weight_set, "code_gbdt+name");
+        assert_eq!(o.weight_set, "missing:code_nn");
         assert!((o.z - (-0.5 + 1.5 + 1.0)).abs() < 1e-12);
+        assert_eq!(e.weight_for(&no_nn, "code_gbdt"), 1.5);
 
         let only_name = Logits {
             name: Some(0.5),
             ..Default::default()
         };
         let o = e.combine(&only_name).unwrap();
-        assert_eq!(o.weight_set, "partial:name");
+        assert_eq!(o.weight_set, "partial:code_gbdt+code_nn");
         assert!((o.z - 0.0).abs() < 1e-12);
         assert!(e.combine(&Logits::default()).is_none());
+        assert_eq!(e.thresholds.target_fpr_warn, Some(0.01));
     }
 
     #[test]
@@ -281,9 +317,13 @@ mod tests {
     fn validation() {
         assert!(Ensemble::from_json(r#"{"weights": {"bogus": 1.0}}"#).is_err());
         assert!(Ensemble::from_json(
-            r#"{"weights": {}, "fallbacks": {"name+code_gbdt": {"weights": {}}}}"#
+            r#"{"weights": {}, "fallbacks": [{"missing": ["cnn"], "weights": {}}]}"#
         )
         .is_err());
-        assert!(Ensemble::from_json(r#"{"weights": {}, "thresholds": {"warn": 0.9, "block": 0.5}}"#).is_err());
+        assert!(Ensemble::from_json(
+            r#"{"weights": {}, "thresholds": {"warn": 0.9, "block": 0.5}}"#
+        )
+        .is_err());
+        assert!(Ensemble::from_json(r#"{"format": "v9", "weights": {}}"#).is_err());
     }
 }

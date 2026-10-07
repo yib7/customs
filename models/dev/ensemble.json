@@ -1,0 +1,72 @@
+{
+ "format": "customs-ensemble-v1",
+ "components": [
+  "code_gbdt",
+  "code_nn",
+  "name"
+ ],
+ "weights": {
+  "code_gbdt": 1.0,
+  "code_nn": 0.0,
+  "name": 1.0
+ },
+ "bias": 2.0,
+ "fallbacks": [
+  {
+   "missing": [
+    "code_nn"
+   ],
+   "weights": {
+    "code_gbdt": 1.0,
+    "name": 1.0
+   },
+   "bias": 2.0
+  },
+  {
+   "missing": [
+    "name"
+   ],
+   "weights": {
+    "code_gbdt": 1.0,
+    "code_nn": 0.0
+   },
+   "bias": 0.0
+  },
+  {
+   "missing": [
+    "code_nn",
+    "name"
+   ],
+   "weights": {
+    "code_gbdt": 1.0
+   },
+   "bias": 0.0
+  },
+  {
+   "missing": [
+    "code_gbdt"
+   ],
+   "weights": {
+    "code_nn": 0.0,
+    "name": 1.0
+   },
+   "bias": 0.0
+  },
+  {
+   "missing": [
+    "code_gbdt",
+    "code_nn"
+   ],
+   "weights": {
+    "name": 1.0
+   },
+   "bias": 0.0
+  }
+ ],
+ "thresholds": {
+  "warn": 0.5,
+  "block": 0.9,
+  "target_fpr_warn": 0.01,
+  "target_fpr_block": 0.001
+ }
+}

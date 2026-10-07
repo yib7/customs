@@ -87,7 +87,10 @@ async fn track(State(state): State<AppState>, req: Request, next: Next) -> Respo
 
 async fn metrics(State(state): State<AppState>) -> Response {
     (
-        [(header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+        [(
+            header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
         state.engine.metrics.render(),
     )
         .into_response()
@@ -120,12 +123,15 @@ pub async fn serve_on(
         shutdown: rx,
     };
     let app = router(state, ui_dir.as_deref());
-    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
-        .with_graceful_shutdown(async move {
-            shutdown.await;
-            let _ = tx.send(true);
-        })
-        .await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move {
+        shutdown.await;
+        let _ = tx.send(true);
+    })
+    .await?;
     Ok(())
 }
 

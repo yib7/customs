@@ -1,4 +1,3 @@
-# fixture list, most popular first
 boto3
 urllib3
 requests
@@ -28,7 +27,7 @@ pytest
 pydantic
 scipy
 matplotlib
-Pillow
+pillow
 sqlalchemy
 colorama
 tqdm

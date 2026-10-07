@@ -12,7 +12,10 @@ const FAMILIES: &[(&str, &str)] = &[
     ("decode_obf", "Decodes obfuscated or encoded data"),
     ("env_access", "Reads environment variables"),
     ("secret_paths", "References credential files or stores"),
-    ("persistence", "Sets up persistence (cron, shell profiles, autoruns)"),
+    (
+        "persistence",
+        "Sets up persistence (cron, shell profiles, autoruns)",
+    ),
     ("recon", "Collects host and user information"),
     ("download_exec", "Downloads and executes a payload"),
     ("exfil_endpoint", "Contacts a known exfiltration endpoint"),
@@ -42,16 +45,37 @@ const OTHER: &[(&str, &str)] = &[
     ("all_n_lines", "Size of all code (lines)"),
     ("inst_max_line_len", "Very long lines in install-time code"),
     ("all_max_line_len", "Very long lines in code"),
-    ("inst_max_str_entropy", "High-entropy strings in install-time code"),
+    (
+        "inst_max_str_entropy",
+        "High-entropy strings in install-time code",
+    ),
     ("all_max_str_entropy", "High-entropy strings in code"),
-    ("inst_mean_str_entropy", "Random-looking strings in install-time code"),
-    ("inst_longest_b64_run", "Long base64 blob in install-time code"),
+    (
+        "inst_mean_str_entropy",
+        "Random-looking strings in install-time code",
+    ),
+    (
+        "inst_longest_b64_run",
+        "Long base64 blob in install-time code",
+    ),
     ("all_longest_b64_run", "Long base64 blob in code"),
-    ("inst_hex_escape_count", "Hex-escaped strings in install-time code"),
+    (
+        "inst_hex_escape_count",
+        "Hex-escaped strings in install-time code",
+    ),
     ("all_hex_escape_count", "Hex-escaped strings in code"),
-    ("inst_obf_ident_ratio", "Obfuscated identifiers in install-time code"),
-    ("inst_nonascii_ratio", "Non-ASCII characters in install-time code"),
-    ("inst_long_line_ratio", "Many extremely long lines in install-time code"),
+    (
+        "inst_obf_ident_ratio",
+        "Obfuscated identifiers in install-time code",
+    ),
+    (
+        "inst_nonascii_ratio",
+        "Non-ASCII characters in install-time code",
+    ),
+    (
+        "inst_long_line_ratio",
+        "Many extremely long lines in install-time code",
+    ),
     ("meta_desc_len", "Length of the package description"),
     ("meta_has_homepage", "Declares a homepage"),
     ("meta_has_repo", "Declares a source repository"),
@@ -60,20 +84,34 @@ const OTHER: &[(&str, &str)] = &[
     ("meta_n_deps", "Number of dependencies"),
     ("meta_readme_bytes", "README size"),
     ("meta_version_major", "Major version number"),
-    ("meta_version_is_zero", "Placeholder version (0.0.0 or 0.0.1)"),
-    ("meta_version_huge", "Suspiciously high version (dependency confusion)"),
+    (
+        "meta_version_is_zero",
+        "Placeholder version (0.0.0 or 0.0.1)",
+    ),
+    (
+        "meta_version_huge",
+        "Suspiciously high version (dependency confusion)",
+    ),
     ("meta_n_keywords", "Number of keywords"),
     ("name_len", "Name length"),
     ("name_n_digits", "Digits in the name"),
     ("name_n_hyphens", "Hyphens in the name"),
     ("name_n_underscores", "Underscores in the name"),
     ("name_n_dots", "Dots in the name"),
-    ("name_min_edit_distance", "Name is close to a popular package"),
+    ("name_has_scope", "Name has an npm scope"),
     ("name_is_popular", "Is a popular package"),
-    ("name_contains_popular_token", "Name wraps a popular package name"),
-    ("name_scope_squat", "npm scope imitates a popular scope"),
-    ("name_keyboard_typo", "Name is a keyboard typo of a popular package"),
-    ("name_char_ngram_score", "Name has unusual character patterns"),
+    ("name_dist1", "Name is 1 edit from a popular package"),
+    ("name_dist2", "Name is 2 edits from a popular package"),
+    ("name_dist3", "Name is 3 edits from a popular package"),
+    (
+        "name_contains_popular_token",
+        "Name wraps a popular package name",
+    ),
+    ("name_digit_suffix", "Name ends in a digit"),
+    (
+        "name_char_ngram_score",
+        "Name has unusual character patterns",
+    ),
 ];
 
 /// Phrase for a feature, or `None` when the name is unknown.
@@ -83,10 +121,8 @@ pub fn label(feature: &str) -> Option<String> {
     }
     let (rest, suffix) = if let Some(r) = feature.strip_prefix("inst_") {
         (r, " at install time")
-    } else if let Some(r) = feature.strip_prefix("all_") {
-        (r, "")
     } else {
-        return None;
+        (feature.strip_prefix("all_")?, "")
     };
     FAMILIES
         .iter()

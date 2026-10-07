@@ -20,7 +20,10 @@ use crate::verdict::EventKind;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NpmPath {
     /// `/{name}` or `/{name}/{version}`.
-    Packument { name: String, version: Option<String> },
+    Packument {
+        name: String,
+        version: Option<String>,
+    },
     /// `/{name}/-/{file}.tgz`.
     Tarball { name: String, file: String },
     /// Registry endpoints such as `/-/npm/v1/security/advisories/bulk` (npm audit).
@@ -38,7 +41,8 @@ fn valid_name(name: &str) -> bool {
     let ok = |s: &str| {
         !s.is_empty()
             && !s.starts_with('.')
-            && s.chars().all(|c| c.is_ascii_alphanumeric() || "-._~".contains(c))
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || "-._~".contains(c))
     };
     scope.is_none_or(ok) && ok(bare)
 }
@@ -90,7 +94,11 @@ pub fn rewrite_packument(v: &mut Value, proxy_base: &str) {
             .or_else(|| fallback.map(str::to_string));
         let Some(name) = name else { return };
         if let Some(t) = doc.get_mut("dist").and_then(|d| d.get_mut("tarball")) {
-            if let Some(file) = t.as_str().and_then(|s| s.rsplit('/').next()).map(str::to_string) {
+            if let Some(file) = t
+                .as_str()
+                .and_then(|s| s.rsplit('/').next())
+                .map(str::to_string)
+            {
                 *t = Value::String(format!("{proxy_base}/npm/{name}/-/{file}"));
             }
         }
@@ -118,16 +126,24 @@ pub async fn npm_any(
     };
     match parsed {
         NpmPath::Special(p) => passthrough(&state, method, &p, &headers, body).await,
-        _ if method != Method::GET && method != Method::HEAD => {
-            (StatusCode::METHOD_NOT_ALLOWED, r#"{"error":"customs is a read-only registry proxy"}"#)
-                .into_response()
+        _ if method != Method::GET && method != Method::HEAD => (
+            StatusCode::METHOD_NOT_ALLOWED,
+            r#"{"error":"customs is a read-only registry proxy"}"#,
+        )
+            .into_response(),
+        NpmPath::Packument { name, version } => {
+            packument(&state, &headers, &name, version.as_deref()).await
         }
-        NpmPath::Packument { name, version } => packument(&state, &headers, &name, version.as_deref()).await,
         NpmPath::Tarball { name, file } => tarball(&state, &headers, &name, &file).await,
     }
 }
 
-async fn packument(state: &AppState, headers: &HeaderMap, name: &str, version: Option<&str>) -> Response {
+async fn packument(
+    state: &AppState,
+    headers: &HeaderMap,
+    name: &str,
+    version: Option<&str>,
+) -> Response {
     let policy = state.engine.policy();
     let mut url = format!("{}/{}", policy.upstream.npm, npm_escape(name));
     if let Some(v) = version {
@@ -138,7 +154,12 @@ async fn packument(state: &AppState, headers: &HeaderMap, name: &str, version: O
         .get(header::ACCEPT)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("application/json");
-    let page = match state.engine.registry.get(&url, Some(accept), "npm_packument").await {
+    let page = match state
+        .engine
+        .registry
+        .get(&url, Some(accept), "npm_packument")
+        .await
+    {
         Ok(p) => p,
         Err(e) => {
             tracing::warn!(%url, error = %e, "upstream packument failed");
@@ -151,11 +172,18 @@ async fn packument(state: &AppState, headers: &HeaderMap, name: &str, version: O
         }
     };
     if page.status == 404 && version.is_none() {
-        if let Err(e) = state.engine.record_nonexistent(Ecosystem::Npm, name, client_from_headers(headers)) {
+        if let Err(e) =
+            state
+                .engine
+                .record_nonexistent(Ecosystem::Npm, name, client_from_headers(headers))
+        {
             tracing::error!(error = %e, "recording nonexistent package failed");
         }
     }
-    let ct = page.content_type.clone().unwrap_or_else(|| "application/json".into());
+    let ct = page
+        .content_type
+        .clone()
+        .unwrap_or_else(|| "application/json".into());
     if page.status != 200 {
         return (
             StatusCode::from_u16(page.status).unwrap_or(StatusCode::BAD_GATEWAY),
@@ -169,7 +197,11 @@ async fn packument(state: &AppState, headers: &HeaderMap, name: &str, version: O
             rewrite_packument(&mut v, &proxy_base(headers));
             ([(header::CONTENT_TYPE, ct)], v.to_string()).into_response()
         }
-        Err(_) => (StatusCode::BAD_GATEWAY, r#"{"error":"customs: invalid upstream JSON"}"#).into_response(),
+        Err(_) => (
+            StatusCode::BAD_GATEWAY,
+            r#"{"error":"customs: invalid upstream JSON"}"#,
+        )
+            .into_response(),
     }
 }
 
@@ -194,21 +226,32 @@ async fn tarball(state: &AppState, headers: &HeaderMap, name: &str, file: &str) 
 }
 
 /// Forward registry service endpoints (audit, search) unchanged.
-async fn passthrough(state: &AppState, method: Method, path: &str, headers: &HeaderMap, body: Bytes) -> Response {
+async fn passthrough(
+    state: &AppState,
+    method: Method,
+    path: &str,
+    headers: &HeaderMap,
+    body: Bytes,
+) -> Response {
     let policy = state.engine.policy();
     let url = format!("{}/{}", policy.upstream.npm, path);
     let Ok(m) = reqwest::Method::from_bytes(method.as_str().as_bytes()) else {
         return StatusCode::METHOD_NOT_ALLOWED.into_response();
     };
     let mut req = state.engine.registry.client().request(m, &url).body(body);
-    for h in [header::CONTENT_TYPE, header::ACCEPT, header::CONTENT_ENCODING] {
+    for h in [
+        header::CONTENT_TYPE,
+        header::ACCEPT,
+        header::CONTENT_ENCODING,
+    ] {
         if let Some(v) = headers.get(&h).and_then(|v| v.to_str().ok()) {
             req = req.header(h.as_str(), v);
         }
     }
     match req.send().await {
         Ok(resp) => {
-            let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+            let status =
+                StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
             let ct = resp
                 .headers()
                 .get(reqwest::header::CONTENT_TYPE)
@@ -218,7 +261,11 @@ async fn passthrough(state: &AppState, method: Method, path: &str, headers: &Hea
             let bytes = resp.bytes().await.unwrap_or_default();
             (status, [(header::CONTENT_TYPE, ct)], bytes).into_response()
         }
-        Err(e) => (StatusCode::BAD_GATEWAY, format!("customs: upstream error: {e}\n")).into_response(),
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            format!("customs: upstream error: {e}\n"),
+        )
+            .into_response(),
     }
 }
 
@@ -230,33 +277,57 @@ mod tests {
     fn parses_paths() {
         assert_eq!(
             parse_npm_path("left-pad"),
-            Some(NpmPath::Packument { name: "left-pad".into(), version: None })
+            Some(NpmPath::Packument {
+                name: "left-pad".into(),
+                version: None
+            })
         );
         assert_eq!(
             parse_npm_path("@babel%2fcore"),
-            Some(NpmPath::Packument { name: "@babel/core".into(), version: None })
+            Some(NpmPath::Packument {
+                name: "@babel/core".into(),
+                version: None
+            })
         );
         assert_eq!(
             parse_npm_path("@babel/core"),
-            Some(NpmPath::Packument { name: "@babel/core".into(), version: None })
+            Some(NpmPath::Packument {
+                name: "@babel/core".into(),
+                version: None
+            })
         );
         assert_eq!(
             parse_npm_path("@babel/core/7.24.0"),
-            Some(NpmPath::Packument { name: "@babel/core".into(), version: Some("7.24.0".into()) })
+            Some(NpmPath::Packument {
+                name: "@babel/core".into(),
+                version: Some("7.24.0".into())
+            })
         );
         assert_eq!(
             parse_npm_path("left-pad/-/left-pad-1.3.0.tgz"),
-            Some(NpmPath::Tarball { name: "left-pad".into(), file: "left-pad-1.3.0.tgz".into() })
+            Some(NpmPath::Tarball {
+                name: "left-pad".into(),
+                file: "left-pad-1.3.0.tgz".into()
+            })
         );
         assert_eq!(
             parse_npm_path("@babel/core/-/core-7.24.0.tgz"),
-            Some(NpmPath::Tarball { name: "@babel/core".into(), file: "core-7.24.0.tgz".into() })
+            Some(NpmPath::Tarball {
+                name: "@babel/core".into(),
+                file: "core-7.24.0.tgz".into()
+            })
         );
         assert_eq!(
             parse_npm_path("@babel%2Fcore/-/core-7.24.0.tgz"),
-            Some(NpmPath::Tarball { name: "@babel/core".into(), file: "core-7.24.0.tgz".into() })
+            Some(NpmPath::Tarball {
+                name: "@babel/core".into(),
+                file: "core-7.24.0.tgz".into()
+            })
         );
-        assert!(matches!(parse_npm_path("-/npm/v1/security/advisories/bulk"), Some(NpmPath::Special(_))));
+        assert!(matches!(
+            parse_npm_path("-/npm/v1/security/advisories/bulk"),
+            Some(NpmPath::Special(_))
+        ));
         assert_eq!(parse_npm_path("@scopeonly"), None);
         assert_eq!(parse_npm_path("../etc/passwd"), None);
         assert_eq!(parse_npm_path("a/b/c"), None);
@@ -300,6 +371,9 @@ mod tests {
         )
         .unwrap();
         rewrite_packument(&mut v, "http://h");
-        assert_eq!(v["dist"]["tarball"], "http://h/npm/left-pad/-/left-pad-1.3.0.tgz");
+        assert_eq!(
+            v["dist"]["tarball"],
+            "http://h/npm/left-pad/-/left-pad-1.3.0.tgz"
+        );
     }
 }

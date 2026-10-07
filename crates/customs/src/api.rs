@@ -60,20 +60,30 @@ pub struct CheckRequest {
     pub client: Option<String>,
 }
 
-async fn check(State(state): State<AppState>, body: Result<Json<CheckRequest>, axum::extract::rejection::JsonRejection>) -> Response {
+async fn check(
+    State(state): State<AppState>,
+    body: Result<Json<CheckRequest>, axum::extract::rejection::JsonRejection>,
+) -> Response {
     let Json(req) = match body {
         Ok(b) => b,
         Err(e) => return api_error(StatusCode::BAD_REQUEST, e.body_text()),
     };
     let Some(eco) = parse_ecosystem(&req.ecosystem) else {
-        return api_error(StatusCode::BAD_REQUEST, format!("unknown ecosystem '{}'", req.ecosystem));
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            format!("unknown ecosystem '{}'", req.ecosystem),
+        );
     };
     let name = req.name.trim();
     if name.is_empty() || name.len() > 214 || name.chars().any(char::is_whitespace) {
         return api_error(StatusCode::BAD_REQUEST, "invalid package name");
     }
     let client = req.client.or_else(|| Some("api".into()));
-    match state.engine.check(eco, name, req.version.as_deref(), client).await {
+    match state
+        .engine
+        .check(eco, name, req.version.as_deref(), client)
+        .await
+    {
         // A name the registry does not know is a 404, with the verdict attached so the hook
         // and CLI can show the policy decision and the nearest popular name.
         Ok(v) if v.policy_hits.iter().any(|h| h.rule == "block_nonexistent") => (
@@ -116,7 +126,9 @@ async fn events(State(state): State<AppState>, Query(q): Query<EventsQuery>) -> 
     }
 }
 
-async fn events_stream(State(state): State<AppState>) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>> {
+async fn events_stream(
+    State(state): State<AppState>,
+) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>> {
     let rx = state.engine.subscribe();
     let mut shutdown = state.shutdown.clone();
     let stream = BroadcastStream::new(rx)
@@ -124,7 +136,10 @@ async fn events_stream(State(state): State<AppState>) -> Sse<impl Stream<Item = 
             match msg {
                 Ok(ev) => {
                     let data = serde_json::to_string(&ev).ok()?;
-                    Some(Ok(SseEvent::default().event("install").id(ev.id.to_string()).data(data)))
+                    Some(Ok(SseEvent::default()
+                        .event("install")
+                        .id(ev.id.to_string())
+                        .data(data)))
                 }
                 // A slow client missed some events; it can refetch /api/events.
                 Err(BroadcastStreamRecvError::Lagged(n)) => {
@@ -178,7 +193,10 @@ async fn put_policy(State(state): State<AppState>, body: String) -> Response {
         }
     };
     if let Err(e) = state.engine.set_policy(policy) {
-        return api_error(StatusCode::INTERNAL_SERVER_ERROR, format!("saving policy: {e}"));
+        return api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("saving policy: {e}"),
+        );
     }
     tracing::info!(path = %state.engine.policy_path().display(), "policy updated");
     Json(&*state.engine.policy()).into_response()
@@ -197,13 +215,24 @@ async fn model(State(state): State<AppState>) -> Response {
         }
         v
     };
+    // metrics.json is either the evaluation summary itself or a document with a `metrics`
+    // key plus extra top-level fields; either way it ends up under `metrics`.
+    let mut out = serde_json::Map::new();
+    match &m.metrics {
+        Some(Value::Object(o)) if o.contains_key("metrics") => out.extend(o.clone()),
+        Some(v) => {
+            out.insert("metrics".into(), v.clone());
+        }
+        None => {
+            out.insert("metrics".into(), Value::Null);
+        }
+    }
     let body = json!({
         "model_version": m.model_version(),
         "feature_schema_version": m.manifest.feature_schema_version,
         "untrained": m.manifest.untrained,
         "thresholds": eff,
         "model_thresholds": m.thresholds(),
-        "metrics": m.metrics,
         "manifest": m.manifest,
         "models_dir": m.dir.display().to_string(),
         "components": {
@@ -212,10 +241,13 @@ async fn model(State(state): State<AppState>) -> Response {
             "code_nn": component(m.code_nn.is_some(), m.code_nn.as_ref().map(|c| json!({
                 "vocab_size": c.vocab_size(), "max_len": c.max_len() })).unwrap_or(Value::Null)),
             "name_model": component(m.name_model.is_some(), json!({
-                "popular_pypi": m.popular.pypi.as_ref().map(|p| p.len()).unwrap_or(0),
-                "popular_npm": m.popular.npm.as_ref().map(|p| p.len()).unwrap_or(0) })),
+                "popular_pypi": m.popular_count(customs_scan::Ecosystem::Pypi),
+                "popular_npm": m.popular_count(customs_scan::Ecosystem::Npm) })),
             "ensemble": component(m.ensemble_shipped, json!({ "weights": m.ensemble.weights, "bias": m.ensemble.bias })),
         },
     });
-    Json(body).into_response()
+    if let Value::Object(b) = body {
+        out.extend(b);
+    }
+    Json(Value::Object(out)).into_response()
 }

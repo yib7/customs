@@ -47,7 +47,11 @@ impl Histogram {
                 self.counts[i]
             );
         }
-        let _ = writeln!(out, "{name}_bucket{{{labels}{sep}le=\"+Inf\"}} {}", self.count);
+        let _ = writeln!(
+            out,
+            "{name}_bucket{{{labels}{sep}le=\"+Inf\"}} {}",
+            self.count
+        );
         let braces = if labels.is_empty() {
             String::new()
         } else {
@@ -75,7 +79,9 @@ pub struct Metrics {
 }
 
 fn escape(v: &str) -> String {
-    v.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n")
+    v.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
 }
 
 impl Metrics {
@@ -114,7 +120,11 @@ impl Metrics {
     }
 
     pub fn scan_latency(&self, d: Duration) {
-        self.with(|m| m.scan.get_or_insert_with(Histogram::new).observe(d.as_secs_f64()));
+        self.with(|m| {
+            m.scan
+                .get_or_insert_with(Histogram::new)
+                .observe(d.as_secs_f64())
+        });
     }
 
     pub fn upstream_latency(&self, kind: &str, d: Duration) {
@@ -192,7 +202,9 @@ mod tests {
         m.scan_latency(Duration::from_millis(30));
         m.upstream_latency("artifact", Duration::from_millis(200));
         let t = m.render();
-        assert!(t.contains("customs_http_requests_total{route=\"/pypi/files/{*path}\",status=\"200\"} 2"));
+        assert!(t.contains(
+            "customs_http_requests_total{route=\"/pypi/files/{*path}\",status=\"200\"} 2"
+        ));
         assert!(t.contains("customs_verdicts_total{decision=\"block\",ecosystem=\"npm\"} 1"));
         assert!(t.contains("customs_scan_duration_seconds_bucket{le=\"0.05\"} 1"));
         assert!(t.contains("customs_scan_duration_seconds_bucket{le=\"0.025\"} 0"));

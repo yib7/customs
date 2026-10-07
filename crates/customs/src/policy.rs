@@ -148,7 +148,7 @@ pub fn effective_thresholds(policy: &Policy, model: Thresholds) -> Thresholds {
     Thresholds {
         warn: pick(policy.warn_threshold, model.warn),
         block: pick(policy.block_threshold, model.block),
-        target_fpr_block: model.target_fpr_block,
+        ..model
     }
 }
 
@@ -197,10 +197,16 @@ mod tests {
 
     #[test]
     fn deny_beats_allow() {
-        let o = evaluate(&policy(), &ctx(Ecosystem::Npm, "event-stream", Some("3.3.6")));
+        let o = evaluate(
+            &policy(),
+            &ctx(Ecosystem::Npm, "event-stream", Some("3.3.6")),
+        );
         assert!(o.denied && !o.allowed);
         assert_eq!(o.decide(Decision::Allow), Decision::Block);
-        let o = evaluate(&policy(), &ctx(Ecosystem::Npm, "event-stream", Some("4.0.0")));
+        let o = evaluate(
+            &policy(),
+            &ctx(Ecosystem::Npm, "event-stream", Some("4.0.0")),
+        );
         assert!(o.allowed);
         let o = evaluate(&policy(), &ctx(Ecosystem::Pypi, "evil_pkg", None));
         assert!(o.denied);
@@ -263,6 +269,7 @@ mod tests {
             warn: 0.5,
             block: 0.9,
             target_fpr_block: Some(0.001),
+            target_fpr_warn: None,
         };
         let p = Policy {
             block_threshold: Threshold::Value(0.8),

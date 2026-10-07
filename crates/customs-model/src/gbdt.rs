@@ -269,7 +269,10 @@ fn build_tree(ti: usize, t: RawTree, n_features: usize) -> Result<Tree, ModelErr
         let at = || format!("tree {ti} node {ni}");
         if let Some(leaf) = rn.leaf {
             if !leaf.is_finite() {
-                return Err(ModelError::invalid(WHAT, format!("{}: leaf is not finite", at())));
+                return Err(ModelError::invalid(
+                    WHAT,
+                    format!("{}: leaf is not finite", at()),
+                ));
             }
             nodes.push(Node::Leaf { value: leaf });
             continue;

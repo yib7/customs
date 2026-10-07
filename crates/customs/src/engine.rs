@@ -24,7 +24,9 @@ use crate::policy::{effective_thresholds, evaluate, PolicyContext};
 use crate::registry::{FetchError, FileMeta, Registry, VersionMeta};
 use crate::resolve::resolve_version;
 use crate::store::{ArtifactRow, NewEvent, ScanKey, Store};
-use crate::util::{ecosystem_str, normalize_name, now, now_ts, parse_npm_tarball, parse_pypi_filename};
+use crate::util::{
+    ecosystem_str, normalize_name, now, now_ts, parse_npm_tarball, parse_pypi_filename,
+};
 use crate::verdict::{Event, EventKind, PolicyHit, Verdict};
 
 /// The scanner, injectable so tests can stand in for `customs-scan`.
@@ -189,7 +191,11 @@ fn install_scripts_from_report(r: &ScanReport) -> Vec<String> {
         .filter(|s| INSTALL_SCRIPT_NAMES.contains(s))
         .map(str::to_string)
         .collect();
-    if out.is_empty() && r.features.get("n_npm_install_scripts").is_some_and(|n| *n > 0.0) {
+    if out.is_empty()
+        && r.features
+            .get("n_npm_install_scripts")
+            .is_some_and(|n| *n > 0.0)
+    {
         out.push("install script".into());
     }
     out
@@ -218,7 +224,10 @@ impl Engine {
     }
 
     pub fn policy(&self) -> Arc<Policy> {
-        self.policy.read().unwrap_or_else(|e| e.into_inner()).clone()
+        self.policy
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     pub fn policy_path(&self) -> &Path {
@@ -248,7 +257,10 @@ impl Engine {
     }
 
     /// Evaluate one artifact; concurrent calls for the same URL share a single evaluation.
-    pub async fn evaluate_artifact(self: &Arc<Self>, req: ArtifactRequest) -> Result<Outcome, EngineError> {
+    pub async fn evaluate_artifact(
+        self: &Arc<Self>,
+        req: ArtifactRequest,
+    ) -> Result<Outcome, EngineError> {
         let key = req.url.clone();
         let cell = {
             let mut map = self.inflight.lock().unwrap_or_else(|e| e.into_inner());
@@ -282,7 +294,10 @@ impl Engine {
         result
     }
 
-    async fn evaluate_uncoalesced(self: Arc<Self>, req: ArtifactRequest) -> Result<Outcome, EngineError> {
+    async fn evaluate_uncoalesced(
+        self: Arc<Self>,
+        req: ArtifactRequest,
+    ) -> Result<Outcome, EngineError> {
         let policy = self.policy();
         let meta_fut = async {
             match &req.meta {
@@ -293,7 +308,15 @@ impl Engine {
         let (meta, fetched) = tokio::join!(meta_fut, self.fetch_artifact(&req.url, &req.filename));
         let (path, sha256, size) = fetched?;
         let (summary, cached) = self
-            .scan_cached(req.ecosystem, &req.name, req.version.as_deref(), &sha256, &path, &req.filename, size)
+            .scan_cached(
+                req.ecosystem,
+                &req.name,
+                req.version.as_deref(),
+                &sha256,
+                &path,
+                &req.filename,
+                size,
+            )
             .await?;
         let verdict = self.build_verdict(
             &policy,
@@ -325,7 +348,11 @@ impl Engine {
             return facts;
         };
         let result: Result<Option<VersionMeta>, FetchError> = match req.ecosystem {
-            Ecosystem::Pypi => self.registry.pypi_release(&policy.upstream, &req.name, version).await,
+            Ecosystem::Pypi => {
+                self.registry
+                    .pypi_release(&policy.upstream, &req.name, version)
+                    .await
+            }
             Ecosystem::Npm => self
                 .registry
                 .package_meta(&policy.upstream, Ecosystem::Npm, &req.name)
@@ -346,13 +373,19 @@ impl Engine {
             Ok(None) => {
                 tracing::debug!(name = %req.name, version, "no registry metadata for version")
             }
-            Err(e) => tracing::warn!(name = %req.name, version, error = %e, "registry metadata lookup failed"),
+            Err(e) => {
+                tracing::warn!(name = %req.name, version, error = %e, "registry metadata lookup failed")
+            }
         }
         facts
     }
 
     /// Cached archive path, sha256, and size; downloads on a cache miss.
-    async fn fetch_artifact(&self, url: &str, filename: &str) -> Result<(PathBuf, String, u64), EngineError> {
+    async fn fetch_artifact(
+        &self,
+        url: &str,
+        filename: &str,
+    ) -> Result<(PathBuf, String, u64), EngineError> {
         if let Some(row) = self.store.artifact_get(url).map_err(internal)? {
             let p = self.blob_path(&row.sha256);
             if p.exists() {
@@ -362,11 +395,16 @@ impl Engine {
         }
         self.metrics.cache("artifact_miss");
         let n = self.tmp_counter.fetch_add(1, Ordering::Relaxed);
-        let tmp = self
-            .cache_dir
-            .join("tmp")
-            .join(format!("{}-{}-{n}.part", std::process::id(), Utc::now().timestamp_nanos_opt().unwrap_or(0)));
-        let dl = match self.registry.download(url, &tmp, self.limits.max_download_bytes).await {
+        let tmp = self.cache_dir.join("tmp").join(format!(
+            "{}-{}-{n}.part",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+        let dl = match self
+            .registry
+            .download(url, &tmp, self.limits.max_download_bytes)
+            .await
+        {
             Ok(d) => d,
             Err(e) => {
                 let _ = tokio::fs::remove_file(&tmp).await;
@@ -432,9 +470,11 @@ impl Engine {
             let scanner = self.scanner.clone();
             let models = self.models.clone();
             let (name, filename) = (name.to_string(), filename.to_string());
-            tokio::task::spawn_blocking(move || scan_and_score(&scanner, &models, &bytes, &filename, eco, &name))
-                .await
-                .map_err(internal)?
+            tokio::task::spawn_blocking(move || {
+                scan_and_score(&scanner, &models, &bytes, &filename, eco, &name)
+            })
+            .await
+            .map_err(internal)?
         };
         self.metrics.scan_latency(started.elapsed());
         let json = serde_json::to_string(&summary).map_err(internal)?;
@@ -442,7 +482,12 @@ impl Engine {
         Ok((summary, false))
     }
 
-    fn name_only_summary(&self, eco: Ecosystem, name: &str, not_scanned: Option<String>) -> ScanSummary {
+    fn name_only_summary(
+        &self,
+        eco: Ecosystem,
+        name: &str,
+        not_scanned: Option<String>,
+    ) -> ScanSummary {
         let a = self.models.assess(&ScoreInput {
             ecosystem: eco,
             name: Some(name),
@@ -519,7 +564,9 @@ impl Engine {
         } else if outcome.allowed {
             Decision::Allow
         } else {
-            hits.iter().map(|h| h.severity).fold(model_decision, std::cmp::max)
+            hits.iter()
+                .map(|h| h.severity)
+                .fold(model_decision, std::cmp::max)
         };
         Verdict {
             id: None,
@@ -547,7 +594,12 @@ impl Engine {
     }
 
     /// Store a verdict and its event, update metrics, and notify subscribers.
-    fn record(&self, mut v: Verdict, kind: EventKind, client: Option<String>) -> Result<Verdict, EngineError> {
+    fn record(
+        &self,
+        mut v: Verdict,
+        kind: EventKind,
+        client: Option<String>,
+    ) -> Result<Verdict, EngineError> {
         let id = self.store.insert_verdict(&v).map_err(internal)?;
         v.id = Some(id);
         let event = self
@@ -563,7 +615,8 @@ impl Engine {
                 verdict_id: Some(id),
             })
             .map_err(internal)?;
-        self.metrics.verdict(v.decision.as_str(), ecosystem_str(v.ecosystem));
+        self.metrics
+            .verdict(v.decision.as_str(), ecosystem_str(v.ecosystem));
         self.metrics.event(kind.as_str());
         tracing::info!(
             kind = kind.as_str(),
@@ -582,11 +635,26 @@ impl Engine {
     }
 
     /// Record a request for a name the registry does not know (from the proxy).
-    pub fn record_nonexistent(&self, eco: Ecosystem, name: &str, client: Option<String>) -> Result<Verdict, EngineError> {
+    pub fn record_nonexistent(
+        &self,
+        eco: Ecosystem,
+        name: &str,
+        client: Option<String>,
+    ) -> Result<Verdict, EngineError> {
         let policy = self.policy();
         let name = normalize_name(eco, name);
         let s = self.name_only_summary(eco, &name, None);
-        let v = self.build_verdict(&policy, eco, &name, None, None, None, &s, false, &MetaFacts::default());
+        let v = self.build_verdict(
+            &policy,
+            eco,
+            &name,
+            None,
+            None,
+            None,
+            &s,
+            false,
+            &MetaFacts::default(),
+        );
         self.record(v, EventKind::NonexistentPackage, client)
     }
 
@@ -600,7 +668,11 @@ impl Engine {
     ) -> Result<Verdict, EngineError> {
         let policy = self.policy();
         let name = normalize_name(eco, name);
-        let Some(meta) = self.registry.package_meta(&policy.upstream, eco, &name).await? else {
+        let Some(meta) = self
+            .registry
+            .package_meta(&policy.upstream, eco, &name)
+            .await?
+        else {
             return self.record_nonexistent(eco, &name, client);
         };
         let version = resolve_version(&meta, version).map_err(EngineError::Unresolvable)?;
@@ -614,7 +686,9 @@ impl Engine {
             install_scripts: vm.install_scripts.clone(),
         };
         let Some(file) = choose_file(eco, &vm.files) else {
-            return Err(EngineError::NotFound(format!("{name} {version} has no downloadable files")));
+            return Err(EngineError::NotFound(format!(
+                "{name} {version} has no downloadable files"
+            )));
         };
         if file.size.is_some_and(|s| s > self.limits.max_check_bytes) {
             let s = self.name_only_summary(
@@ -656,7 +730,13 @@ impl Engine {
     }
 
     /// Scan a local archive without network access or persistence (`customs scan`).
-    pub fn scan_local(&self, bytes: &[u8], filename: &str, eco: Ecosystem, name: Option<&str>) -> Verdict {
+    pub fn scan_local(
+        &self,
+        bytes: &[u8],
+        filename: &str,
+        eco: Ecosystem,
+        name: Option<&str>,
+    ) -> Verdict {
         let policy = self.policy();
         let guessed = match eco {
             Ecosystem::Pypi => parse_pypi_filename(filename),
@@ -668,7 +748,8 @@ impl Engine {
             bytes,
             filename,
             eco,
-            name.or(guessed.as_ref().map(|g| g.0.as_str())).unwrap_or(""),
+            name.or(guessed.as_ref().map(|g| g.0.as_str()))
+                .unwrap_or(""),
         );
         local_verdict(self, &policy, bytes, filename, eco, name, guessed, s)
     }
@@ -691,7 +772,9 @@ fn local_verdict(
         .map(str::to_string)
         .or(guessed.as_ref().map(|g| g.0.clone()))
         .unwrap_or_else(|| filename.to_string());
-    let version = guessed.map(|g| g.1).or_else(|| parse_npm_tarball(&name, filename));
+    let version = guessed
+        .map(|g| g.1)
+        .or_else(|| parse_npm_tarball(&name, filename));
     let facts = MetaFacts {
         exists: true,
         ..Default::default()
@@ -776,7 +859,12 @@ pub fn choose_file(eco: Ecosystem, files: &[FileMeta]) -> Option<&FileMeta> {
             .iter()
             .filter(usable)
             .find(|f| f.packagetype == "sdist" || f.filename.ends_with(".tar.gz"))
-            .or_else(|| files.iter().filter(usable).find(|f| f.filename.ends_with("-none-any.whl")))
+            .or_else(|| {
+                files
+                    .iter()
+                    .filter(usable)
+                    .find(|f| f.filename.ends_with("-none-any.whl"))
+            })
             .or_else(|| {
                 files
                     .iter()
@@ -822,7 +910,8 @@ pub fn find_models_dir(explicit: Option<&Path>) -> Option<PathBuf> {
 pub fn load_models(explicit: Option<&Path>) -> anyhow::Result<Models> {
     match find_models_dir(explicit) {
         Some(dir) => {
-            let m = Models::load(&dir).map_err(|e| anyhow::anyhow!("loading models from {}: {e}", dir.display()))?;
+            let m = Models::load(&dir)
+                .map_err(|e| anyhow::anyhow!("loading models from {}: {e}", dir.display()))?;
             if m.manifest.untrained {
                 tracing::warn!(dir = %dir.display(), version = m.model_version(), "using UNTRAINED placeholder models");
             } else {
@@ -863,7 +952,10 @@ mod tests {
             f("p-1.0-py3-none-any.whl", "bdist_wheel", 20),
             f("p-1.0.tar.gz", "sdist", 30),
         ];
-        assert_eq!(choose_file(Ecosystem::Pypi, &files).unwrap().filename, "p-1.0.tar.gz");
+        assert_eq!(
+            choose_file(Ecosystem::Pypi, &files).unwrap().filename,
+            "p-1.0.tar.gz"
+        );
         assert_eq!(
             choose_file(Ecosystem::Pypi, &files[..2]).unwrap().filename,
             "p-1.0-py3-none-any.whl"

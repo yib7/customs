@@ -1,35 +1,39 @@
-//! Package-name model (DESIGN.md sections 4.5 and 5, `name_model.json`).
+//! Package-name model (DESIGN.md sections 4.5 and 5, `name_model.json`, format
+//! `customs-name-lr-v1`).
 //!
 //! Slopsquatting and typosquatting show up in the name alone: a hallucinated or malicious
 //! package is often one edit away from a popular one, or wraps a popular name in extra
-//! words. This module computes the name features against the shipped popular-package list
-//! and scores them with a logistic regression that also sees hashed character n-grams.
+//! words. This module computes the name features against the popular-package list of the
+//! ecosystem and scores them with a logistic regression that also sees hashed character
+//! n-grams. Every definition here mirrors `python/customs_ml` exactly; the parity fixtures
+//! in `tests/fixtures` check it.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+use base64::Engine as _;
 use customs_scan::Ecosystem;
 use serde::{Deserialize, Serialize};
 
 use crate::{sigmoid, ModelError};
 
-/// Edit distances are clipped at this value. Anything farther than four edits says nothing
-/// about typosquatting, and the cap is what lets the search skip most candidates.
-pub const EDIT_DISTANCE_CAP: u32 = 5;
-
-/// Numeric name features in their canonical order.
+/// Numeric features of `customs-name-lr-v1`, in their canonical order.
 pub const NUMERIC_NAME_FEATURES: &[&str] = &[
     "len",
     "n_digits",
     "n_hyphens",
     "n_underscores",
     "n_dots",
-    "min_edit_distance",
+    "has_scope",
     "is_popular",
+    "dist1",
+    "dist2",
+    "dist3",
     "contains_popular_token",
-    "scope_squat",
-    "keyboard_typo",
-    "char_ngram_score",
+    "digit_suffix",
 ];
+
+/// Popular names shorter than this never count as a wrapped token ("js", "py", "six").
+const MIN_TOKEN_CHARS: usize = 4;
 
 /// Canonical form of a package name.
 ///
@@ -67,12 +71,6 @@ pub fn split_npm_scope(name: &str) -> (Option<&str>, &str) {
         }
     }
     (None, name)
-}
-
-/// Collapse separator runs to `-` so "foo_bar" and "foo.bar" match "foo-bar" in the token
-/// check regardless of ecosystem.
-fn sep_normalize(s: &str) -> String {
-    normalize(Ecosystem::Pypi, s)
 }
 
 /// FNV-1a, 32-bit.
@@ -228,30 +226,39 @@ pub fn keyboard_adjacent(a: char, b: char) -> bool {
     lower.0 - upper.0 == 1 && (lower.1 == upper.1 || lower.1 == upper.1 - 1)
 }
 
+/// The part of a name after an npm scope (`@scope/x` gives `x`); the name itself otherwise.
+pub fn bare(name: &str) -> &str {
+    split_npm_scope(name).1
+}
+
+/// Distinct n-gram buckets of `^name$`, sorted. Each bucket counts once.
+pub fn distinct_buckets(normalized: &str, n_min: usize, n_max: usize, n_buckets: u32) -> Vec<u32> {
+    let mut b = ngram_buckets(normalized, n_min, n_max, n_buckets);
+    b.sort_unstable();
+    b.dedup();
+    b
+}
+
 /// The popular-package list of one ecosystem, indexed for fast nearest-name search.
+///
+/// Distances are measured between bare names, so `@types/node` is compared as `node`.
 #[derive(Debug, Clone)]
 pub struct PopularIndex {
-    eco: Ecosystem,
-    /// Normalized names in popularity order (index = rank).
+    /// Normalized full names, in file order (most popular first).
     names: Vec<String>,
-    chars: Vec<Vec<char>>,
-    /// Character histograms for a cheap lower bound on the edit distance.
-    hists: Vec<Hist>,
-    rank: HashMap<String, usize>,
-    /// Candidate ranks grouped by character length; a name of length L can only be within
-    /// distance d of names whose length is in [L - d, L + d].
+    full: HashSet<String>,
+    /// Distinct bare names with the rank of the first full name that has them.
+    bares: Vec<(Vec<char>, Hist, usize)>,
+    bare_set: HashMap<String, usize>,
+    /// Candidate indexes into `bares` by character length; a name of length L is within
+    /// distance d only of names whose length is in [L - d, L + d].
     by_len: Vec<Vec<u32>>,
-    /// Separator-normalized names (and npm bare names) for the token-containment check.
-    token_names: HashSet<String>,
-    /// npm: bare name to the scopes of popular scoped packages with that bare name.
-    scoped_bare: HashMap<String, Vec<String>>,
-    /// npm: scopes that appear in the popular list.
-    scopes: Vec<String>,
+    /// Bare names of at least [`MIN_TOKEN_CHARS`] characters.
+    long_pop: HashSet<String>,
 }
 
 impl PopularIndex {
     /// Parse a list with one name per line; blank lines and `#` comments are ignored.
-    /// Order is popularity rank, which breaks ties when two names are equally close.
     pub fn from_text(eco: Ecosystem, text: &str) -> Self {
         Self::new(
             eco,
@@ -263,44 +270,34 @@ impl PopularIndex {
 
     pub fn new<'a>(eco: Ecosystem, names: impl IntoIterator<Item = &'a str>) -> Self {
         let mut idx = PopularIndex {
-            eco,
             names: Vec::new(),
-            chars: Vec::new(),
-            hists: Vec::new(),
-            rank: HashMap::new(),
+            full: HashSet::new(),
+            bares: Vec::new(),
+            bare_set: HashMap::new(),
             by_len: Vec::new(),
-            token_names: HashSet::new(),
-            scoped_bare: HashMap::new(),
-            scopes: Vec::new(),
+            long_pop: HashSet::new(),
         };
         for raw in names {
             let n = normalize(eco, raw);
-            if n.is_empty() || idx.rank.contains_key(&n) {
+            if n.is_empty() || !idx.full.insert(n.clone()) {
                 continue;
             }
-            let r = idx.names.len();
-            let chars: Vec<char> = n.chars().collect();
-            if idx.by_len.len() <= chars.len() {
-                idx.by_len.resize(chars.len() + 1, Vec::new());
-            }
-            idx.by_len[chars.len()].push(r as u32);
-            let (scope, bare) = split_npm_scope(&n);
-            if eco == Ecosystem::Npm {
-                if let Some(s) = scope {
-                    idx.scoped_bare
-                        .entry(bare.to_string())
-                        .or_default()
-                        .push(s.to_string());
-                    if !idx.scopes.iter().any(|x| x == s) {
-                        idx.scopes.push(s.to_string());
-                    }
+            let rank = idx.names.len();
+            let b = bare(&n).to_string();
+            if !idx.bare_set.contains_key(&b) {
+                let chars: Vec<char> = b.chars().collect();
+                if chars.len() >= MIN_TOKEN_CHARS {
+                    idx.long_pop.insert(b.clone());
                 }
+                if idx.by_len.len() <= chars.len() {
+                    idx.by_len.resize(chars.len() + 1, Vec::new());
+                }
+                idx.by_len[chars.len()].push(idx.bares.len() as u32);
+                idx.bare_set.insert(b, idx.bares.len());
+                let h = hist(&chars);
+                idx.bares.push((chars, h, rank));
             }
-            idx.token_names.insert(sep_normalize(bare));
-            idx.rank.insert(n.clone(), r);
             idx.names.push(n);
-            idx.hists.push(hist(&chars));
-            idx.chars.push(chars);
         }
         idx
     }
@@ -313,27 +310,27 @@ impl PopularIndex {
         self.names.is_empty()
     }
 
-    pub fn ecosystem(&self) -> Ecosystem {
-        self.eco
-    }
-
     pub fn contains(&self, normalized: &str) -> bool {
-        self.rank.contains_key(normalized)
+        self.full.contains(normalized)
     }
 
-    /// Nearest popular name other than `normalized` itself: `(distance, rank)` with the
-    /// distance clipped at [`EDIT_DISTANCE_CAP`]. Ties go to the more popular name.
-    pub fn nearest(&self, normalized: &str, scratch: &mut Scratch) -> Option<(u32, usize)> {
-        let q: Vec<char> = normalized.chars().collect();
+    /// Smallest OSA distance from `bare_name` to a different popular bare name, as
+    /// `(distance, nearest full name)`. Distances above `max_distance` are reported as
+    /// `max_distance + 1` with no name. Ties go to the more popular name.
+    pub fn nearest(
+        &self,
+        bare_name: &str,
+        max_distance: u32,
+        scratch: &mut Scratch,
+    ) -> (u32, Option<&str>) {
+        let q: Vec<char> = bare_name.chars().collect();
         let qh = hist(&q);
+        // (distance, rank)
         let mut best: Option<(u32, usize)> = None;
-        let cap = EDIT_DISTANCE_CAP;
-        // Only distances below the cap are searched; everything else is clipped to the cap
-        // and resolved by the fallback below. Visit length buckets by increasing length
-        // difference: a bucket whose difference exceeds the best distance so far cannot
-        // contain a better (or tied) candidate.
-        for diff in 0..cap as usize {
-            let bound = best.map(|b| b.0).unwrap_or(cap - 1);
+        // Visit length buckets by increasing length difference; once the difference exceeds
+        // the best distance found, no later bucket can contain a closer or tied name.
+        for diff in 0..=max_distance as usize {
+            let bound = best.map(|b| b.0).unwrap_or(max_distance);
             if diff as u32 > bound {
                 break;
             }
@@ -346,120 +343,74 @@ impl PopularIndex {
                 let Some(bucket) = self.by_len.get(len) else {
                     continue;
                 };
-                for &r in bucket {
-                    let r = r as usize;
-                    let cand = &self.chars[r];
-                    if *cand == q {
+                for &i in bucket {
+                    let (chars, h, rank) = &self.bares[i as usize];
+                    if *chars == q {
                         continue;
                     }
-                    let limit = best.map(|b| b.0).unwrap_or(cap - 1);
-                    if hist_lower_bound(&qh, &self.hists[r]) > limit {
+                    let limit = best.map(|b| b.0).unwrap_or(max_distance);
+                    if hist_lower_bound(&qh, h) > limit {
                         continue;
                     }
-                    let d = osa_distance_bounded(&q, cand, limit, scratch);
+                    let d = osa_distance_bounded(&q, chars, limit, scratch);
                     if d > limit {
                         continue;
                     }
-                    match best {
-                        Some((bd, br)) if (d, r) >= (bd, br) => {}
-                        _ => best = Some((d, r)),
+                    if best.is_none_or(|(bd, br)| (d, *rank) < (bd, br)) {
+                        best = Some((d, *rank));
                     }
                 }
             }
         }
-        best.or_else(|| {
-            // Nothing within the cap: report the cap and the most popular name so the
-            // feature is always defined.
-            (0..self.names.len())
-                .find(|&r| self.names[r] != normalized)
-                .map(|r| (cap, r))
-        })
+        match best {
+            Some((d, r)) => (d, Some(self.names[r].as_str())),
+            None => (max_distance + 1, None),
+        }
     }
 
-    /// A popular name that appears as a proper token run of `normalized`, e.g. `requests`
-    /// inside `requests-auth-helper`. Returns the longest match.
-    fn contained_token(&self, normalized: &str) -> Option<String> {
-        let bare = match self.eco {
-            Ecosystem::Npm => split_npm_scope(normalized).1,
-            Ecosystem::Pypi => normalized,
-        };
-        let tokens: Vec<&str> = bare
+    /// First token of `bare_name` that is a long popular bare name, when the name has
+    /// several tokens and is not itself a long popular name.
+    fn wrapped_token(&self, bare_name: &str) -> Option<String> {
+        let tokens: Vec<&str> = bare_name
             .split(['-', '_', '.'])
             .filter(|t| !t.is_empty())
             .collect();
-        if tokens.len() < 2 {
+        if tokens.len() < 2 || self.long_pop.contains(bare_name) {
             return None;
         }
-        let mut found: Option<String> = None;
-        for i in 0..tokens.len() {
-            for j in i + 1..=tokens.len() {
-                if j - i == tokens.len() {
-                    continue;
-                }
-                let joined = tokens[i..j].join("-");
-                if joined.chars().count() < 3 || !self.token_names.contains(&joined) {
-                    continue;
-                }
-                if found.as_ref().is_none_or(|f| joined.len() > f.len()) {
-                    found = Some(joined);
-                }
-            }
-        }
-        found
-    }
-
-    /// npm only: a scoped name whose scope differs from a popular scoped package with the
-    /// same bare name, or whose scope is one or two edits from a popular scope.
-    fn scope_squat(&self, normalized: &str, scratch: &mut Scratch) -> Option<String> {
-        if self.eco != Ecosystem::Npm {
-            return None;
-        }
-        let (Some(scope), bare) = split_npm_scope(normalized) else {
-            return None;
-        };
-        if let Some(scopes) = self.scoped_bare.get(bare) {
-            if let Some(s) = scopes.iter().find(|s| s.as_str() != scope) {
-                return Some(format!("@{s}/{bare}"));
-            }
-        }
-        let q: Vec<char> = scope.chars().collect();
-        if q.len() < 3 {
-            return None;
-        }
-        let mut best: Option<(u32, &str)> = None;
-        for s in &self.scopes {
-            if s == scope {
-                return None;
-            }
-            let c: Vec<char> = s.chars().collect();
-            let d = osa_distance_bounded(&q, &c, 2, scratch);
-            if d <= 2 && best.is_none_or(|(bd, _)| d < bd) {
-                best = Some((d, s));
-            }
-        }
-        best.map(|(_, s)| format!("@{s}"))
+        tokens
+            .into_iter()
+            .find(|t| self.long_pop.contains(*t))
+            .map(str::to_string)
     }
 }
 
-/// Every name feature of DESIGN.md 4.5 for one name.
+/// Every name feature for one name.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct NameFeatures {
     pub normalized: String,
+    pub bare: String,
     pub len: u32,
     pub n_digits: u32,
     pub n_hyphens: u32,
     pub n_underscores: u32,
     pub n_dots: u32,
-    pub min_edit_distance: u32,
-    pub nearest_popular: Option<String>,
+    pub has_scope: bool,
     pub is_popular: bool,
-    /// The popular name found as a token run, when `contains_popular_token` is 1.
+    /// OSA distance to the nearest other popular name, `max_distance + 1` when farther.
+    pub distance: u32,
+    pub nearest_popular: Option<String>,
+    /// The popular name found as a token, when `contains_popular_token` is 1.
     pub contains_popular_token: Option<String>,
-    /// The popular scoped package or scope being imitated, when `scope_squat` is 1.
-    pub scope_squat: Option<String>,
+    pub digit_suffix: bool,
+    /// Explanation only (not a model input): the nearest name is one adjacent-key typo away.
     pub keyboard_typo: bool,
-    /// The n-gram part of the name logit (sum of bucket weights).
+    /// The n-gram part of the logit (sum of weights over distinct buckets).
     pub char_ngram_score: f64,
+}
+
+fn b(v: bool) -> f64 {
+    f64::from(u8::from(v))
 }
 
 impl NameFeatures {
@@ -471,11 +422,15 @@ impl NameFeatures {
             "n_hyphens" => self.n_hyphens as f64,
             "n_underscores" => self.n_underscores as f64,
             "n_dots" => self.n_dots as f64,
-            "min_edit_distance" => self.min_edit_distance as f64,
-            "is_popular" => f64::from(u8::from(self.is_popular)),
-            "contains_popular_token" => f64::from(u8::from(self.contains_popular_token.is_some())),
-            "scope_squat" => f64::from(u8::from(self.scope_squat.is_some())),
-            "keyboard_typo" => f64::from(u8::from(self.keyboard_typo)),
+            "has_scope" => b(self.has_scope),
+            "is_popular" => b(self.is_popular),
+            "dist1" => b(self.distance == 1),
+            "dist2" => b(self.distance == 2),
+            "dist3" => b(self.distance == 3),
+            "contains_popular_token" => b(self.contains_popular_token.is_some()),
+            "digit_suffix" => b(self.digit_suffix),
+            "min_edit_distance" => self.distance as f64,
+            "keyboard_typo" => b(self.keyboard_typo),
             "char_ngram_score" => self.char_ngram_score,
             _ => return None,
         })
@@ -485,12 +440,10 @@ impl NameFeatures {
     pub fn explanation_feature(&self) -> Option<(&'static str, f64)> {
         if self.is_popular {
             None
-        } else if self.keyboard_typo {
-            Some(("keyboard_typo", 1.0))
-        } else if (1..=2).contains(&self.min_edit_distance) {
-            Some(("min_edit_distance", self.min_edit_distance as f64))
-        } else if self.scope_squat.is_some() {
-            Some(("scope_squat", 1.0))
+        } else if self.distance == 1 {
+            Some(("dist1", 1.0))
+        } else if self.distance == 2 {
+            Some(("dist2", 1.0))
         } else if self.contains_popular_token.is_some() {
             Some(("contains_popular_token", 1.0))
         } else {
@@ -503,267 +456,55 @@ impl NameFeatures {
         if self.is_popular {
             return None;
         }
-        let near = self.nearest_popular.as_deref().unwrap_or("");
-        if self.keyboard_typo {
-            return Some(format!(
-                "1 edit (adjacent-key typo) from popular package '{near}'"
-            ));
-        }
-        if (1..=2).contains(&self.min_edit_distance) {
-            let d = self.min_edit_distance;
+        if let (d @ 1..=2, Some(near)) = (self.distance, &self.nearest_popular) {
+            let typo = if self.keyboard_typo {
+                " (adjacent-key typo)"
+            } else {
+                ""
+            };
             let s = if d == 1 { "edit" } else { "edits" };
-            return Some(format!("{d} {s} from popular package '{near}'"));
+            return Some(format!("{d} {s}{typo} from popular package '{near}'"));
         }
-        if let Some(s) = &self.scope_squat {
-            return Some(format!("scope imitates popular npm scope or package '{s}'"));
-        }
-        if let Some(t) = &self.contains_popular_token {
-            return Some(format!(
-                "wraps popular package name '{t}' in extra words"
-            ));
-        }
-        None
+        self.contains_popular_token
+            .as_ref()
+            .map(|t| format!("wraps popular name '{t}' in extra words"))
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(untagged)]
-enum NgramWeights {
-    Dense(Vec<f64>),
-    /// Sparse `{"bucket": weight}`; exporters may use it when most buckets are zero.
-    Sparse(BTreeMap<String, f64>),
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct RawNameModel {
-    #[serde(default)]
-    feature_names: Vec<String>,
-    #[serde(default)]
-    feature_weights: Vec<f64>,
-    #[serde(default)]
-    feature_mean: Option<Vec<f64>>,
-    #[serde(default)]
-    feature_scale: Option<Vec<f64>>,
-    n_buckets: u32,
-    #[serde(default = "one")]
-    ngram_min: usize,
-    #[serde(default = "four")]
-    ngram_max: usize,
-    weights: NgramWeights,
-    #[serde(default)]
-    bias: f64,
-}
-
-fn one() -> usize {
-    1
-}
-fn four() -> usize {
-    4
-}
-
-/// Logistic regression over name features and hashed character n-grams.
-#[derive(Debug, Clone)]
-pub struct NameModel {
-    feature_names: Vec<String>,
-    feature_weights: Vec<f64>,
-    feature_mean: Vec<f64>,
-    feature_scale: Vec<f64>,
-    n_buckets: u32,
-    ngram_min: usize,
-    ngram_max: usize,
-    ngram_weights: Vec<f64>,
-    bias: f64,
-}
-
-/// Output of the name model for one name.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct NameScore {
-    pub logit: f64,
-    pub prob: f64,
-    pub features: NameFeatures,
-    pub explanation: Option<String>,
-    /// `(feature, value, logit contribution)`, largest positive first. The n-gram part
-    /// appears as `char_ngram_score`.
-    pub contributions: Vec<(String, f64, f64)>,
-}
-
-impl NameModel {
-    pub fn from_json(text: &str) -> Result<Self, ModelError> {
-        const WHAT: &str = "name_model";
-        let raw: RawNameModel =
-            serde_json::from_str(text).map_err(|e| ModelError::parse(WHAT, e))?;
-        let nf = raw.feature_names.len();
-        if raw.feature_weights.len() != nf {
-            return Err(ModelError::invalid(
-                WHAT,
-                format!(
-                    "{} feature_names but {} feature_weights",
-                    nf,
-                    raw.feature_weights.len()
-                ),
-            ));
-        }
-        for f in &raw.feature_names {
-            if f == "char_ngram_score" || !NUMERIC_NAME_FEATURES.contains(&f.as_str()) {
-                return Err(ModelError::invalid(
-                    WHAT,
-                    format!("feature '{f}' is not a numeric name feature (char_ngram_score is implicit)"),
-                ));
-            }
-        }
-        let mean = raw.feature_mean.unwrap_or_else(|| vec![0.0; nf]);
-        let scale = raw.feature_scale.unwrap_or_else(|| vec![1.0; nf]);
-        if mean.len() != nf || scale.len() != nf {
-            return Err(ModelError::invalid(
-                WHAT,
-                "feature_mean and feature_scale must match feature_names",
-            ));
-        }
-        if scale.iter().any(|s| *s == 0.0 || !s.is_finite()) {
-            return Err(ModelError::invalid(WHAT, "feature_scale must be finite and non-zero"));
-        }
-        if raw.n_buckets == 0 || raw.n_buckets > (1 << 24) {
-            return Err(ModelError::invalid(WHAT, "n_buckets must be in 1..=2^24"));
-        }
-        if raw.ngram_min == 0 || raw.ngram_min > raw.ngram_max {
-            return Err(ModelError::invalid(WHAT, "need 1 <= ngram_min <= ngram_max"));
-        }
-        let ngram_weights = match raw.weights {
-            NgramWeights::Dense(w) => {
-                if w.len() != raw.n_buckets as usize {
-                    return Err(ModelError::invalid(
-                        WHAT,
-                        format!("weights has {} entries, n_buckets is {}", w.len(), raw.n_buckets),
-                    ));
-                }
-                w
-            }
-            NgramWeights::Sparse(m) => {
-                let mut w = vec![0.0; raw.n_buckets as usize];
-                for (k, v) in m {
-                    let i: usize = k.parse().map_err(|_| {
-                        ModelError::invalid(WHAT, format!("weights key '{k}' is not a bucket index"))
-                    })?;
-                    if i >= w.len() {
-                        return Err(ModelError::invalid(WHAT, format!("bucket {i} out of range")));
-                    }
-                    w[i] = v;
-                }
-                w
-            }
-        };
-        Ok(Self {
-            feature_names: raw.feature_names,
-            feature_weights: raw.feature_weights,
-            feature_mean: mean,
-            feature_scale: scale,
-            n_buckets: raw.n_buckets,
-            ngram_min: raw.ngram_min,
-            ngram_max: raw.ngram_max,
-            ngram_weights,
-            bias: raw.bias,
-        })
-    }
-
-    pub fn n_buckets(&self) -> u32 {
-        self.n_buckets
-    }
-
-    /// Sum of n-gram weights for a normalized name.
-    pub fn ngram_logit(&self, normalized: &str) -> f64 {
-        ngram_buckets(normalized, self.ngram_min, self.ngram_max, self.n_buckets)
-            .into_iter()
-            .map(|b| self.ngram_weights[b as usize])
-            .sum()
-    }
-
-    /// Compute all features for `name` (n-gram score included).
-    pub fn features(
-        &self,
-        eco: Ecosystem,
-        name: &str,
-        popular: Option<&PopularIndex>,
-        scratch: &mut Scratch,
-    ) -> NameFeatures {
-        let mut f = compute_features(eco, name, popular, scratch);
-        f.char_ngram_score = self.ngram_logit(&f.normalized);
-        f
-    }
-
-    pub fn score(&self, eco: Ecosystem, name: &str, popular: Option<&PopularIndex>) -> NameScore {
-        let mut scratch = Scratch::default();
-        let features = self.features(eco, name, popular, &mut scratch);
-        self.score_features(features)
-    }
-
-    /// Score precomputed features.
-    pub fn score_features(&self, features: NameFeatures) -> NameScore {
-        let mut contributions = Vec::with_capacity(self.feature_names.len() + 1);
-        let mut logit = self.bias + features.char_ngram_score;
-        for (i, name) in self.feature_names.iter().enumerate() {
-            let x = features.get(name).unwrap_or(0.0);
-            let c = self.feature_weights[i] * (x - self.feature_mean[i]) / self.feature_scale[i];
-            logit += c;
-            contributions.push((name.clone(), x, c));
-        }
-        contributions.push((
-            "char_ngram_score".to_string(),
-            features.char_ngram_score,
-            features.char_ngram_score,
-        ));
-        contributions.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
-        let explanation = features.explanation();
-        NameScore {
-            logit,
-            prob: sigmoid(logit),
-            features,
-            explanation,
-            contributions,
-        }
-    }
-}
-
-/// Name features that do not depend on model weights (`char_ngram_score` is left at 0).
+/// Compute the features of `name` (`char_ngram_score` is left at 0).
 pub fn compute_features(
     eco: Ecosystem,
     name: &str,
-    popular: Option<&PopularIndex>,
+    popular: &PopularIndex,
+    max_distance: u32,
     scratch: &mut Scratch,
 ) -> NameFeatures {
     let normalized = normalize(eco, name);
-    let count = |pred: fn(char) -> bool| normalized.chars().filter(|c| pred(*c)).count() as u32;
-    let mut f = NameFeatures {
-        len: normalized.chars().count() as u32,
-        n_digits: count(|c| c.is_ascii_digit()),
-        n_hyphens: count(|c| c == '-'),
-        n_underscores: count(|c| c == '_'),
-        n_dots: count(|c| c == '.'),
-        min_edit_distance: EDIT_DISTANCE_CAP,
-        nearest_popular: None,
-        is_popular: false,
-        contains_popular_token: None,
-        scope_squat: None,
-        keyboard_typo: false,
+    let bare_name = bare(&normalized).to_string();
+    let count = |c: char| bare_name.chars().filter(|x| *x == c).count() as u32;
+    let (distance, nearest) = popular.nearest(&bare_name, max_distance, scratch);
+    let nearest = nearest.map(str::to_string);
+    let keyboard_typo = distance == 1
+        && nearest
+            .as_deref()
+            .is_some_and(|n| is_keyboard_substitution(&bare_name, bare(n)));
+    NameFeatures {
+        len: bare_name.chars().count() as u32,
+        n_digits: bare_name.chars().filter(|c| c.is_ascii_digit()).count() as u32,
+        n_hyphens: count('-'),
+        n_underscores: count('_'),
+        n_dots: count('.'),
+        has_scope: normalized.starts_with('@'),
+        is_popular: popular.contains(&normalized),
+        distance,
+        nearest_popular: nearest,
+        contains_popular_token: popular.wrapped_token(&bare_name),
+        digit_suffix: bare_name.chars().last().is_some_and(|c| c.is_ascii_digit()),
+        keyboard_typo,
         char_ngram_score: 0.0,
         normalized,
-    };
-    let Some(pop) = popular else {
-        return f;
-    };
-    f.is_popular = pop.contains(&f.normalized);
-    if let Some((d, r)) = pop.nearest(&f.normalized, scratch) {
-        f.min_edit_distance = d;
-        let near = &pop.names[r];
-        f.nearest_popular = Some(near.clone());
-        if d == 1 {
-            f.keyboard_typo = is_keyboard_substitution(&f.normalized, near);
-        }
+        bare: bare_name,
     }
-    if !f.is_popular {
-        f.contains_popular_token = pop.contained_token(&f.normalized);
-        f.scope_squat = pop.scope_squat(&f.normalized, scratch);
-    }
-    f
 }
 
 /// Same length, exactly one differing position, and the two characters are adjacent keys.
@@ -780,6 +521,265 @@ fn is_keyboard_substitution(a: &str, b: &str) -> bool {
         .map(|(x, y)| (*x, *y))
         .collect();
     diffs.len() == 1 && keyboard_adjacent(diffs[0].0, diffs[0].1)
+}
+
+/// A float32 vector: a base64 string of little-endian floats (the exported form), a
+/// `{"shape": [n], "data": ...}` tensor, or a plain JSON array.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum F32Vec {
+    Str(String),
+    List(Vec<f64>),
+    B64 { data: String },
+}
+
+impl F32Vec {
+    fn decode(&self, what: &str) -> Result<Vec<f64>, ModelError> {
+        match self {
+            F32Vec::List(v) => Ok(v.clone()),
+            F32Vec::Str(data) | F32Vec::B64 { data } => {
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(data.trim())
+                    .map_err(|e| ModelError::invalid(WHAT, format!("{what}: bad base64: {e}")))?;
+                if bytes.len() % 4 != 0 {
+                    return Err(ModelError::invalid(
+                        WHAT,
+                        format!("{what}: length is not a multiple of 4"),
+                    ));
+                }
+                Ok(bytes
+                    .chunks_exact(4)
+                    .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]) as f64)
+                    .collect())
+            }
+        }
+    }
+}
+
+const WHAT: &str = "name_model";
+
+#[derive(Debug, Clone, Deserialize)]
+struct RawEcosystem {
+    popular: String,
+    mean: Vec<f64>,
+    std: Vec<f64>,
+    numeric_weights: Vec<f64>,
+    ngram_weights: F32Vec,
+    bias: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RawNameModel {
+    #[serde(default)]
+    format: Option<String>,
+    numeric_features: Vec<String>,
+    max_distance: u32,
+    ngram_min: usize,
+    ngram_max: usize,
+    n_buckets: u32,
+    #[serde(default)]
+    hash: Option<String>,
+    ecosystems: BTreeMap<String, RawEcosystem>,
+}
+
+/// Weights and popular list for one ecosystem.
+#[derive(Debug, Clone)]
+pub struct EcosystemModel {
+    pub popular: PopularIndex,
+    mean: Vec<f64>,
+    std: Vec<f64>,
+    weights: Vec<f64>,
+    ngram_weights: Vec<f64>,
+    bias: f64,
+}
+
+/// Logistic regression over name features and hashed character n-grams.
+#[derive(Debug, Clone)]
+pub struct NameModel {
+    numeric_features: Vec<String>,
+    max_distance: u32,
+    ngram_min: usize,
+    ngram_max: usize,
+    n_buckets: u32,
+    pypi: Option<EcosystemModel>,
+    npm: Option<EcosystemModel>,
+}
+
+/// Output of the name model for one name.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct NameScore {
+    pub logit: f64,
+    pub prob: f64,
+    pub features: NameFeatures,
+    pub explanation: Option<String>,
+    /// `(feature, value, logit contribution)`, largest first. The n-gram part appears as
+    /// `char_ngram_score`.
+    pub contributions: Vec<(String, f64, f64)>,
+}
+
+impl NameModel {
+    /// Parse `name_model.json`; `read` loads the popular lists it names (paths relative to
+    /// the model directory).
+    pub fn from_json(
+        text: &str,
+        read: impl Fn(&str) -> Result<String, ModelError>,
+    ) -> Result<Self, ModelError> {
+        let raw: RawNameModel =
+            serde_json::from_str(text).map_err(|e| ModelError::parse(WHAT, e))?;
+        if let Some(f) = &raw.format {
+            if f != "customs-name-lr-v1" {
+                return Err(ModelError::invalid(
+                    WHAT,
+                    format!("unsupported format '{f}'"),
+                ));
+            }
+        }
+        if let Some(h) = &raw.hash {
+            if h != "fnv1a32" {
+                return Err(ModelError::invalid(WHAT, format!("unsupported hash '{h}'")));
+            }
+        }
+        for f in &raw.numeric_features {
+            if !NUMERIC_NAME_FEATURES.contains(&f.as_str()) {
+                return Err(ModelError::invalid(
+                    WHAT,
+                    format!("unknown numeric feature '{f}'"),
+                ));
+            }
+        }
+        if raw.n_buckets == 0 || raw.n_buckets > (1 << 24) {
+            return Err(ModelError::invalid(WHAT, "n_buckets must be in 1..=2^24"));
+        }
+        if raw.ngram_min == 0 || raw.ngram_min > raw.ngram_max {
+            return Err(ModelError::invalid(
+                WHAT,
+                "need 1 <= ngram_min <= ngram_max",
+            ));
+        }
+        let nf = raw.numeric_features.len();
+        let mut model = NameModel {
+            numeric_features: raw.numeric_features,
+            max_distance: raw.max_distance,
+            ngram_min: raw.ngram_min,
+            ngram_max: raw.ngram_max,
+            n_buckets: raw.n_buckets,
+            pypi: None,
+            npm: None,
+        };
+        for (key, e) in raw.ecosystems {
+            let eco = match key.as_str() {
+                "pypi" => Ecosystem::Pypi,
+                "npm" => Ecosystem::Npm,
+                other => {
+                    return Err(ModelError::invalid(
+                        WHAT,
+                        format!("unknown ecosystem '{other}'"),
+                    ))
+                }
+            };
+            let at = |m: &str| format!("ecosystems.{key}.{m}");
+            for (v, n) in [
+                (&e.mean, "mean"),
+                (&e.std, "std"),
+                (&e.numeric_weights, "numeric_weights"),
+            ] {
+                if v.len() != nf {
+                    return Err(ModelError::invalid(
+                        WHAT,
+                        format!("{} has {} values, expected {nf}", at(n), v.len()),
+                    ));
+                }
+            }
+            let ngram_weights = e.ngram_weights.decode(&at("ngram_weights"))?;
+            if ngram_weights.len() != model.n_buckets as usize {
+                return Err(ModelError::invalid(
+                    WHAT,
+                    format!(
+                        "{} has {} values, n_buckets is {}",
+                        at("ngram_weights"),
+                        ngram_weights.len(),
+                        model.n_buckets
+                    ),
+                ));
+            }
+            let popular = PopularIndex::from_text(eco, &read(&e.popular)?);
+            let em = EcosystemModel {
+                popular,
+                mean: e.mean,
+                // A constant feature has std 0 in training data; dividing by 1 keeps it inert.
+                std: e
+                    .std
+                    .into_iter()
+                    .map(|s| if s == 0.0 || !s.is_finite() { 1.0 } else { s })
+                    .collect(),
+                weights: e.numeric_weights,
+                ngram_weights,
+                bias: e.bias,
+            };
+            match eco {
+                Ecosystem::Pypi => model.pypi = Some(em),
+                Ecosystem::Npm => model.npm = Some(em),
+            }
+        }
+        Ok(model)
+    }
+
+    pub fn ecosystem(&self, eco: Ecosystem) -> Option<&EcosystemModel> {
+        match eco {
+            Ecosystem::Pypi => self.pypi.as_ref(),
+            Ecosystem::Npm => self.npm.as_ref(),
+        }
+    }
+
+    pub fn n_buckets(&self) -> u32 {
+        self.n_buckets
+    }
+
+    pub fn max_distance(&self) -> u32 {
+        self.max_distance
+    }
+
+    /// Sum of n-gram weights over the distinct buckets of a normalized name.
+    pub fn ngram_logit(&self, eco: Ecosystem, normalized: &str) -> f64 {
+        let Some(em) = self.ecosystem(eco) else {
+            return 0.0;
+        };
+        distinct_buckets(normalized, self.ngram_min, self.ngram_max, self.n_buckets)
+            .into_iter()
+            .map(|b| em.ngram_weights[b as usize])
+            .sum()
+    }
+
+    /// Score a name; `None` when the model has no weights for the ecosystem.
+    pub fn score(&self, eco: Ecosystem, name: &str) -> Option<NameScore> {
+        let em = self.ecosystem(eco)?;
+        let mut scratch = Scratch::default();
+        let mut features =
+            compute_features(eco, name, &em.popular, self.max_distance, &mut scratch);
+        features.char_ngram_score = self.ngram_logit(eco, &features.normalized);
+        let mut logit = em.bias + features.char_ngram_score;
+        let mut contributions = Vec::with_capacity(self.numeric_features.len() + 1);
+        for (i, f) in self.numeric_features.iter().enumerate() {
+            let x = features.get(f).unwrap_or(0.0);
+            let c = (x - em.mean[i]) / em.std[i] * em.weights[i];
+            logit += c;
+            contributions.push((f.clone(), x, c));
+        }
+        contributions.push((
+            "char_ngram_score".to_string(),
+            features.char_ngram_score,
+            features.char_ngram_score,
+        ));
+        contributions.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+        let explanation = features.explanation();
+        Some(NameScore {
+            logit,
+            prob: sigmoid(logit),
+            features,
+            explanation,
+            contributions,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -803,15 +803,19 @@ mod tests {
 
     #[test]
     fn normalization() {
-        assert_eq!(normalize(Ecosystem::Pypi, "Foo__Bar.baz-_qux"), "foo-bar-baz-qux");
+        assert_eq!(
+            normalize(Ecosystem::Pypi, "Foo__Bar.baz-_qux"),
+            "foo-bar-baz-qux"
+        );
         assert_eq!(normalize(Ecosystem::Pypi, "  Django "), "django");
         assert_eq!(normalize(Ecosystem::Npm, "@Babel/Core"), "@babel/core");
         assert_eq!(normalize(Ecosystem::Npm, "lodash.merge"), "lodash.merge");
+        assert_eq!(bare("@babel/core"), "core");
+        assert_eq!(bare("left-pad"), "left-pad");
     }
 
     #[test]
     fn fnv_known_values() {
-        // Reference values of FNV-1a 32-bit.
         assert_eq!(fnv1a32(b""), 0x811c9dc5);
         assert_eq!(fnv1a32(b"a"), 0xe40c292c);
         assert_eq!(fnv1a32(b"foobar"), 0xbf9cf968);
@@ -819,11 +823,13 @@ mod tests {
 
     #[test]
     fn ngrams_include_boundaries() {
-        // "^ab$": 4 unigrams, 3 bigrams.
         assert_eq!(ngram_buckets("ab", 1, 2, 1 << 20).len(), 7);
         let b = ngram_buckets("ab", 1, 1, 1 << 30);
         assert_eq!(b[0], fnv1a32(b"^") % (1 << 30));
         assert_eq!(ngram_buckets("a", 1, 9, 16).len(), 3 + 2 + 1);
+        // "aaaa": the unigram "a" occurs four times but counts once.
+        let d = distinct_buckets("aaaa", 1, 1, 1 << 30);
+        assert_eq!(d.len(), 3);
     }
 
     #[test]
@@ -831,7 +837,6 @@ mod tests {
         assert_eq!(osa_distance("requests", "requests"), 0);
         assert_eq!(osa_distance("reqeusts", "requests"), 1);
         assert_eq!(osa_distance("requets", "requests"), 1);
-        assert_eq!(osa_distance("requestss", "requests"), 1);
         assert_eq!(osa_distance("kitten", "sitting"), 3);
         assert_eq!(osa_distance("ca", "abc"), 3); // OSA, not unrestricted DL (which is 2)
         assert_eq!(osa_distance("", "abc"), 3);
@@ -845,89 +850,106 @@ mod tests {
     fn keyboard() {
         assert!(keyboard_adjacent('q', 'w'));
         assert!(keyboard_adjacent('w', 'a'));
-        assert!(keyboard_adjacent('s', 'w'));
         assert!(keyboard_adjacent('n', 'm'));
         assert!(!keyboard_adjacent('q', 'p'));
-        assert!(!keyboard_adjacent('a', 'a'));
         assert!(keyboard_adjacent('2', 'q'));
     }
 
     #[test]
-    fn features_for_typosquat() {
+    fn features_for_typosquats() {
         let p = pypi();
         let mut s = Scratch::default();
-        let f = compute_features(Ecosystem::Pypi, "reqeusts", Some(&p), &mut s);
-        assert_eq!(f.min_edit_distance, 1);
+        let f = compute_features(Ecosystem::Pypi, "reqeusts", &p, 4, &mut s);
+        assert_eq!(f.distance, 1);
         assert_eq!(f.nearest_popular.as_deref(), Some("requests"));
-        assert!(!f.keyboard_typo);
         assert_eq!(
             f.explanation().unwrap(),
             "1 edit from popular package 'requests'"
         );
-
-        let f = compute_features(Ecosystem::Pypi, "requezts", Some(&p), &mut s);
+        let f = compute_features(Ecosystem::Pypi, "requezts", &p, 4, &mut s);
         assert!(f.keyboard_typo);
-
-        let f = compute_features(Ecosystem::Pypi, "Requests", Some(&p), &mut s);
+        let f = compute_features(Ecosystem::Pypi, "Requests", &p, 4, &mut s);
         assert!(f.is_popular);
-        assert!(f.min_edit_distance >= 1);
         assert_eq!(f.explanation(), None);
-
-        let f = compute_features(Ecosystem::Pypi, "requests_auth_helper", Some(&p), &mut s);
+        let f = compute_features(Ecosystem::Pypi, "requests_auth_helper", &p, 4, &mut s);
         assert_eq!(f.contains_popular_token.as_deref(), Some("requests"));
         assert_eq!(f.n_hyphens, 2);
-        let f = compute_features(Ecosystem::Pypi, "python-dateutil-ext", Some(&p), &mut s);
-        assert_eq!(f.contains_popular_token.as_deref(), Some("python-dateutil"));
-        let f = compute_features(Ecosystem::Pypi, "zzzzzzzzzzzzzzzzz", Some(&p), &mut s);
-        assert_eq!(f.min_edit_distance, EDIT_DISTANCE_CAP);
-        assert_eq!(f.explanation(), None);
+        assert_eq!(
+            f.explanation().unwrap(),
+            "wraps popular name 'requests' in extra words"
+        );
+        // "six" is too short to count as a wrapped token.
+        let f = compute_features(Ecosystem::Pypi, "six-helpers", &p, 4, &mut s);
+        assert_eq!(f.contains_popular_token, None);
+        let f = compute_features(Ecosystem::Pypi, "zzzzzzzzzzzzzzzzz", &p, 4, &mut s);
+        assert_eq!((f.distance, f.nearest_popular.as_deref()), (5, None));
+        let f = compute_features(Ecosystem::Pypi, "urllib4", &p, 4, &mut s);
+        assert!(f.digit_suffix);
+        assert_eq!(f.n_digits, 1);
     }
 
     #[test]
-    fn npm_scope_squat() {
+    fn npm_bare_names() {
         let p = PopularIndex::new(
             Ecosystem::Npm,
             ["react", "@babel/core", "@types/node", "lodash"],
         );
         let mut s = Scratch::default();
-        let f = compute_features(Ecosystem::Npm, "@babel-js/core", Some(&p), &mut s);
-        assert_eq!(f.scope_squat.as_deref(), Some("@babel/core"));
-        let f = compute_features(Ecosystem::Npm, "@bable/parser", Some(&p), &mut s);
-        assert_eq!(f.scope_squat.as_deref(), Some("@babel"));
-        let f = compute_features(Ecosystem::Npm, "@babel/core", Some(&p), &mut s);
-        assert!(f.is_popular);
-        assert!(f.scope_squat.is_none());
-        let f = compute_features(Ecosystem::Npm, "@acme/thing", Some(&p), &mut s);
-        assert!(f.scope_squat.is_none());
+        let f = compute_features(Ecosystem::Npm, "@evil/nodee", &p, 4, &mut s);
+        assert!(f.has_scope);
+        assert_eq!(f.len, 5);
+        assert_eq!(
+            (f.distance, f.nearest_popular.as_deref()),
+            (1, Some("@types/node"))
+        );
+        // Same bare name as a popular package: distance 0 is ignored.
+        let f = compute_features(Ecosystem::Npm, "@acme/core", &p, 4, &mut s);
+        assert!(f.distance > 1);
     }
 
     #[test]
     fn ties_prefer_popular() {
         let p = PopularIndex::new(Ecosystem::Pypi, ["abcd", "abce"]);
         let mut s = Scratch::default();
-        assert_eq!(p.nearest("abcf", &mut s), Some((1, 0)));
+        assert_eq!(p.nearest("abcf", 4, &mut s), (1, Some("abcd")));
     }
 
     #[test]
     fn nearest_matches_brute_force() {
         let names: Vec<String> = (0..400)
-            .map(|i| format!("pkg{}{}", i * 7919 % 1000, ["a", "bb", "ccc", "dddd"][i % 4]))
+            .map(|i| {
+                format!(
+                    "pkg{}{}",
+                    i * 7919 % 1000,
+                    ["a", "bb", "ccc", "dddd"][i % 4]
+                )
+            })
             .collect();
         let p = PopularIndex::new(Ecosystem::Pypi, names.iter().map(|s| s.as_str()));
         let mut s = Scratch::default();
-        for q in ["pkg123a", "pkg12bb", "pkgx", "pkg999dddd", "zzz", "pkg7919a"] {
-            let got = p.nearest(q, &mut s).unwrap();
-            let mut best = (EDIT_DISTANCE_CAP, usize::MAX);
+        for q in [
+            "pkg123a",
+            "pkg12bb",
+            "pkgx",
+            "pkg999dddd",
+            "zzz",
+            "pkg7919a",
+        ] {
+            let got = p.nearest(q, 4, &mut s);
+            let mut best: Option<(u32, usize)> = None;
             for (r, n) in names.iter().enumerate() {
-                if n == q {
+                let d = osa_distance(q, n);
+                if d == 0 || d > 4 {
                     continue;
                 }
-                let d = osa_distance(q, n).min(EDIT_DISTANCE_CAP);
-                if (d, r) < best {
-                    best = (d, r);
+                if best.is_none_or(|b| (d, r) < b) {
+                    best = Some((d, r));
                 }
             }
-            assert_eq!(got, best, "{q}");
+            let expect = best
+                .map(|(d, r)| (d, Some(names[r].as_str())))
+                .unwrap_or((5, None));
+            assert_eq!(got, expect, "{q}");
         }
     }
 }

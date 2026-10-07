@@ -34,10 +34,16 @@ impl Rewriter<'_> {
     pub fn rewrite_url(&self, href: &str, page_url: &Url) -> Option<String> {
         let abs = page_url.join(href).ok()?;
         let s = abs.as_str();
-        if let Some(rest) = s.strip_prefix(self.files_base).and_then(|r| r.strip_prefix('/')) {
+        if let Some(rest) = s
+            .strip_prefix(self.files_base)
+            .and_then(|r| r.strip_prefix('/'))
+        {
             return Some(format!("{}/pypi/files/{}", self.proxy_base, rest));
         }
-        if let Some(rest) = s.strip_prefix(self.simple_base).and_then(|r| r.strip_prefix('/')) {
+        if let Some(rest) = s
+            .strip_prefix(self.simple_base)
+            .and_then(|r| r.strip_prefix('/'))
+        {
             return Some(format!("{}/pypi/simple/{}", self.proxy_base, rest));
         }
         None
@@ -45,7 +51,8 @@ impl Rewriter<'_> {
 
     pub fn rewrite_html(&self, body: &str, page_url: &Url) -> String {
         static HREF: OnceLock<Regex> = OnceLock::new();
-        let re = HREF.get_or_init(|| Regex::new(r#"(?i)(\bhref\s*=\s*)(["'])([^"']*)(["'])"#).unwrap());
+        let re =
+            HREF.get_or_init(|| Regex::new(r#"(?i)(\bhref\s*=\s*)(["'])([^"']*)(["'])"#).unwrap());
         re.replace_all(body, |c: &regex::Captures<'_>| {
             let href = &c[3];
             // Hrefs in HTML may carry entity-encoded ampersands; decode only for resolution.
@@ -85,16 +92,29 @@ async fn fetch_and_rewrite(
         .get(header::ACCEPT)
         .and_then(|v| v.to_str().ok())
         .unwrap_or(DEFAULT_ACCEPT);
-    let page = match state.engine.registry.get(&url, Some(accept), "pypi_simple").await {
+    let page = match state
+        .engine
+        .registry
+        .get(&url, Some(accept), "pypi_simple")
+        .await
+    {
         Ok(p) => p,
         Err(e) => {
             tracing::warn!(%url, error = %e, "upstream simple page failed");
-            return (StatusCode::BAD_GATEWAY, format!("customs: upstream error: {e}\n")).into_response();
+            return (
+                StatusCode::BAD_GATEWAY,
+                format!("customs: upstream error: {e}\n"),
+            )
+                .into_response();
         }
     };
     if page.status == 404 {
         if let Some(p) = project {
-            if let Err(e) = state.engine.record_nonexistent(Ecosystem::Pypi, p, client_from_headers(headers)) {
+            if let Err(e) =
+                state
+                    .engine
+                    .record_nonexistent(Ecosystem::Pypi, p, client_from_headers(headers))
+            {
                 tracing::error!(error = %e, "recording nonexistent package failed");
             }
         }
@@ -117,14 +137,20 @@ async fn fetch_and_rewrite(
         files_base: &up.pypi_files,
         proxy_base: &base,
     };
-    let ct = page.content_type.clone().unwrap_or_else(|| "text/html".into());
+    let ct = page
+        .content_type
+        .clone()
+        .unwrap_or_else(|| "text/html".into());
     let body = if ct.contains("json") {
         match serde_json::from_slice::<Value>(&page.body) {
             Ok(mut v) => {
                 rw.rewrite_json(&mut v, &page_url);
                 v.to_string()
             }
-            Err(_) => return (StatusCode::BAD_GATEWAY, "customs: invalid upstream JSON\n").into_response(),
+            Err(_) => {
+                return (StatusCode::BAD_GATEWAY, "customs: invalid upstream JSON\n")
+                    .into_response()
+            }
         }
     } else {
         rw.rewrite_html(&String::from_utf8_lossy(&page.body), &page_url)
@@ -151,7 +177,11 @@ pub async fn simple_project(
 }
 
 /// `GET /pypi/files/{path}`
-pub async fn file(State(state): State<AppState>, Path(path): Path<String>, headers: HeaderMap) -> Response {
+pub async fn file(
+    State(state): State<AppState>,
+    Path(path): Path<String>,
+    headers: HeaderMap,
+) -> Response {
     if path.split('/').any(|seg| seg == ".." || seg.is_empty()) {
         return (StatusCode::BAD_REQUEST, "invalid path\n").into_response();
     }
@@ -163,11 +193,19 @@ pub async fn file(State(state): State<AppState>, Path(path): Path<String>, heade
         return match state.engine.registry.get(&url, None, "pypi_metadata").await {
             Ok(p) => (
                 StatusCode::from_u16(p.status).unwrap_or(StatusCode::BAD_GATEWAY),
-                [(header::CONTENT_TYPE, p.content_type.unwrap_or_else(|| "application/octet-stream".into()))],
+                [(
+                    header::CONTENT_TYPE,
+                    p.content_type
+                        .unwrap_or_else(|| "application/octet-stream".into()),
+                )],
                 p.body,
             )
                 .into_response(),
-            Err(e) => (StatusCode::BAD_GATEWAY, format!("customs: upstream error: {e}\n")).into_response(),
+            Err(e) => (
+                StatusCode::BAD_GATEWAY,
+                format!("customs: upstream error: {e}\n"),
+            )
+                .into_response(),
         };
     }
     let filename = path.rsplit('/').next().unwrap_or(&path).to_string();
@@ -226,7 +264,9 @@ mod tests {
         assert!(out.contains(r#"href="http://127.0.0.1:7878/pypi/files/packages/f9/9b/335f9764261e915ed497fcdeb11df5dfd6f7bf257d4a6a2a686d80da4d54/requests-2.32.3-py3-none-any.whl#sha256=70761cfe03c773ceb22aa2f671b4757976145175cdfca038c02654d061d6dcc6""#));
         assert!(out.contains("/pypi/files/packages/63/70/"));
         // Relative links resolve against the page and are rewritten too.
-        assert!(out.contains("href='http://127.0.0.1:7878/pypi/files/packages/aa/bb/relative-1.0.tar.gz#sha256=00'"));
+        assert!(out.contains(
+            "href='http://127.0.0.1:7878/pypi/files/packages/aa/bb/relative-1.0.tar.gz#sha256=00'"
+        ));
         // Attributes other than href are untouched.
         assert!(out.contains(r#"data-requires-python="&gt;=3.8""#));
         assert!(out.contains(r#"href="https://example.com/elsewhere.tar.gz""#));

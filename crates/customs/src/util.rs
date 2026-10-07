@@ -121,9 +121,18 @@ mod tests {
 
     #[test]
     fn npm_tarballs() {
-        assert_eq!(parse_npm_tarball("left-pad", "left-pad-1.3.0.tgz").as_deref(), Some("1.3.0"));
-        assert_eq!(parse_npm_tarball("@babel/core", "core-7.24.0.tgz").as_deref(), Some("7.24.0"));
-        assert_eq!(parse_npm_tarball("x", "x-1.0.0-beta.1.tgz").as_deref(), Some("1.0.0-beta.1"));
+        assert_eq!(
+            parse_npm_tarball("left-pad", "left-pad-1.3.0.tgz").as_deref(),
+            Some("1.3.0")
+        );
+        assert_eq!(
+            parse_npm_tarball("@babel/core", "core-7.24.0.tgz").as_deref(),
+            Some("7.24.0")
+        );
+        assert_eq!(
+            parse_npm_tarball("x", "x-1.0.0-beta.1.tgz").as_deref(),
+            Some("1.0.0-beta.1")
+        );
         assert_eq!(parse_npm_tarball("x", "x.zip"), None);
     }
 

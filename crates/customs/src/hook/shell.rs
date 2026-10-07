@@ -313,7 +313,11 @@ mod tests {
     fn s(input: &str) -> Vec<Vec<&'static str>> {
         split_commands(input)
             .into_iter()
-            .map(|c| c.into_iter().map(|w| &*Box::leak(w.into_boxed_str())).collect())
+            .map(|c| {
+                c.into_iter()
+                    .map(|w| &*Box::leak(w.into_boxed_str()))
+                    .collect()
+            })
             .collect()
     }
 
@@ -334,10 +338,22 @@ mod tests {
 
     #[test]
     fn quotes_and_escapes() {
-        assert_eq!(s(r#"pip install "requests>=2,<3" 'flask[async]'"#), vec![vec!["pip", "install", "requests>=2,<3", "flask[async]"]]);
-        assert_eq!(s(r#"echo "a \"b\" \$c" d\ e"#), vec![vec!["echo", r#"a "b" $c"#, "d e"]]);
-        assert_eq!(s("pip install \\\n  requests"), vec![vec!["pip", "install", "requests"]]);
-        assert_eq!(s(r#"pip install pkg"==1.0""#), vec![vec!["pip", "install", "pkg==1.0"]]);
+        assert_eq!(
+            s(r#"pip install "requests>=2,<3" 'flask[async]'"#),
+            vec![vec!["pip", "install", "requests>=2,<3", "flask[async]"]]
+        );
+        assert_eq!(
+            s(r#"echo "a \"b\" \$c" d\ e"#),
+            vec![vec!["echo", r#"a "b" $c"#, "d e"]]
+        );
+        assert_eq!(
+            s("pip install \\\n  requests"),
+            vec![vec!["pip", "install", "requests"]]
+        );
+        assert_eq!(
+            s(r#"pip install pkg"==1.0""#),
+            vec![vec!["pip", "install", "pkg==1.0"]]
+        );
         assert_eq!(s("echo 'it;s && fine'"), vec![vec!["echo", "it;s && fine"]]);
     }
 
@@ -348,8 +364,14 @@ mod tests {
             vec![vec!["pip", "install", "x"]]
         );
         assert_eq!(s("npm i y &>out.log"), vec![vec!["npm", "i", "y"]]);
-        assert_eq!(s("pip install z 2> err.txt < in"), vec![vec!["pip", "install", "z"]]);
-        assert_eq!(s("cat <<EOF\nhello\nEOF"), vec![vec!["cat"], vec!["hello"], vec!["EOF"]]);
+        assert_eq!(
+            s("pip install z 2> err.txt < in"),
+            vec![vec!["pip", "install", "z"]]
+        );
+        assert_eq!(
+            s("cat <<EOF\nhello\nEOF"),
+            vec![vec!["cat"], vec!["hello"], vec!["EOF"]]
+        );
     }
 
     #[test]
@@ -366,7 +388,11 @@ mod tests {
     fn comments_and_subshells() {
         assert_eq!(
             s("(cd x && npm install a) # pip install b\nyarn add c"),
-            vec![vec!["cd", "x"], vec!["npm", "install", "a"], vec!["yarn", "add", "c"]]
+            vec![
+                vec!["cd", "x"],
+                vec!["npm", "install", "a"],
+                vec!["yarn", "add", "c"]
+            ]
         );
         assert_eq!(s("echo a#b"), vec![vec!["echo", "a#b"]]);
         assert!(s("").is_empty());

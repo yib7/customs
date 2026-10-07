@@ -19,7 +19,11 @@ use crate::verdict::Verdict;
 const DEFAULT_SERVER: &str = "http://127.0.0.1:7878";
 
 #[derive(Debug, Parser)]
-#[command(name = "customs", version, about = "Package firewall for AI coding agents")]
+#[command(
+    name = "customs",
+    version,
+    about = "Package firewall for AI coding agents"
+)]
 pub struct Cli {
     /// Log as JSON lines (to stderr).
     #[arg(long, global = true, env = "CUSTOMS_LOG_JSON")]
@@ -161,7 +165,11 @@ pub fn init_logging(json: bool, default_level: &str) {
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
         .with_ansi(std::io::stderr().is_terminal());
-    let _ = if json { b.json().try_init() } else { b.try_init() };
+    let _ = if json {
+        b.json().try_init()
+    } else {
+        b.try_init()
+    };
 }
 
 /// Run the CLI; returns the process exit code.
@@ -180,7 +188,12 @@ pub async fn run(cli: Cli) -> i32 {
             Ok(0)
         }
         Command::Hook {
-            target: HookTarget::ClaudeCode { server, fail_closed, local },
+            target:
+                HookTarget::ClaudeCode {
+                    server,
+                    fail_closed,
+                    local,
+                },
         } => Ok(run_claude_code(HookOptions {
             server,
             fail_closed,
@@ -198,7 +211,8 @@ pub async fn run(cli: Cli) -> i32 {
 }
 
 async fn serve(a: ServeArgs) -> anyhow::Result<()> {
-    let (policy, source) = resolve_policy(a.config.as_deref(), &a.data_dir).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let (policy, source) =
+        resolve_policy(a.config.as_deref(), &a.data_dir).map_err(|e| anyhow::anyhow!("{e}"))?;
     if source.loaded {
         tracing::info!(path = %source.path.display(), mode = policy.mode.as_str(), "loaded policy");
     } else {
@@ -218,7 +232,11 @@ async fn serve(a: ServeArgs) -> anyhow::Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("binding {}: {e}", a.bind))?;
     let addr = listener.local_addr()?;
-    let ui = a.ui_dir.join("index.html").is_file().then(|| a.ui_dir.clone());
+    let ui = a
+        .ui_dir
+        .join("index.html")
+        .is_file()
+        .then(|| a.ui_dir.clone());
     if ui.is_none() {
         tracing::warn!(ui_dir = %a.ui_dir.display(), "dashboard not built; serving a placeholder page");
     }
@@ -235,7 +253,10 @@ pub fn split_package_arg(eco: Ecosystem, s: &str) -> (String, Option<String>) {
         Ecosystem::Npm | Ecosystem::Pypi => s.rfind('@').filter(|i| *i > 0),
     };
     match at {
-        Some(i) => (s[..i].to_string(), Some(s[i + 1..].to_string()).filter(|v| !v.is_empty())),
+        Some(i) => (
+            s[..i].to_string(),
+            Some(s[i + 1..].to_string()).filter(|v| !v.is_empty()),
+        ),
         None => (s.to_string(), None),
     }
 }
@@ -243,12 +264,12 @@ pub fn split_package_arg(eco: Ecosystem, s: &str) -> (String, Option<String>) {
 async fn check(a: CheckArgs) -> anyhow::Result<i32> {
     let (eco_str, package) = match &a.package {
         Some(p) => (a.ecosystem.as_str(), p.as_str()),
-        None => a
-            .ecosystem
-            .split_once(':')
-            .ok_or_else(|| anyhow::anyhow!("expected `<ecosystem> <package>` or `<ecosystem>:<package>`"))?,
+        None => a.ecosystem.split_once(':').ok_or_else(|| {
+            anyhow::anyhow!("expected `<ecosystem> <package>` or `<ecosystem>:<package>`")
+        })?,
     };
-    let eco = parse_ecosystem(eco_str).ok_or_else(|| anyhow::anyhow!("unknown ecosystem '{eco_str}' (use pypi or npm)"))?;
+    let eco = parse_ecosystem(eco_str)
+        .ok_or_else(|| anyhow::anyhow!("unknown ecosystem '{eco_str}' (use pypi or npm)"))?;
     let (name, version) = split_package_arg(eco, package);
     let checker = Checker::connect(&a.server, &a.local.options()).await?;
     let v = checker
@@ -258,7 +279,14 @@ async fn check(a: CheckArgs) -> anyhow::Result<i32> {
     if a.json {
         println!("{}", serde_json::to_string_pretty(&v)?);
     } else {
-        print!("{}", pretty(&v, checker.verdict_url(v.id).as_deref(), &checker.describe()));
+        print!(
+            "{}",
+            pretty(
+                &v,
+                checker.verdict_url(v.id).as_deref(),
+                &checker.describe()
+            )
+        );
     }
     Ok(exit_code(v.decision))
 }
@@ -273,7 +301,8 @@ pub fn exit_code(d: Decision) -> i32 {
 }
 
 fn scan(a: ScanArgs) -> anyhow::Result<i32> {
-    let bytes = std::fs::read(&a.archive).map_err(|e| anyhow::anyhow!("reading {}: {e}", a.archive.display()))?;
+    let bytes = std::fs::read(&a.archive)
+        .map_err(|e| anyhow::anyhow!("reading {}: {e}", a.archive.display()))?;
     let filename = a
         .archive
         .file_name()
@@ -283,12 +312,14 @@ fn scan(a: ScanArgs) -> anyhow::Result<i32> {
     let eco = match a.ecosystem {
         Some(EcoArg::Pypi) => Ecosystem::Pypi,
         Some(EcoArg::Npm) => Ecosystem::Npm,
-        None => customs_scan::guess_ecosystem(&filename)
-            .ok_or_else(|| anyhow::anyhow!("cannot tell the ecosystem of {filename}; pass --ecosystem"))?,
+        None => customs_scan::guess_ecosystem(&filename).ok_or_else(|| {
+            anyhow::anyhow!("cannot tell the ecosystem of {filename}; pass --ecosystem")
+        })?,
     };
     // Offline: an in-memory engine with no network use, in a throwaway data dir.
     let tmp = std::env::temp_dir().join(format!("customs-scan-{}", std::process::id()));
-    let (policy, source) = resolve_policy(a.config.as_deref(), &tmp).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let (policy, source) =
+        resolve_policy(a.config.as_deref(), &tmp).map_err(|e| anyhow::anyhow!("{e}"))?;
     let engine = Engine::new(EngineConfig {
         data_dir: tmp.clone(),
         models: load_models(a.models.as_deref())?,
@@ -312,7 +343,10 @@ fn scan(a: ScanArgs) -> anyhow::Result<i32> {
 /// Human-readable verdict.
 pub fn pretty(v: &Verdict, url: Option<&str>, via: &str) -> String {
     let mut s = String::new();
-    let risk = v.risk.map(|r| format!("risk {r:.2}")).unwrap_or_else(|| "risk n/a".into());
+    let risk = v
+        .risk
+        .map(|r| format!("risk {r:.2}"))
+        .unwrap_or_else(|| "risk n/a".into());
     s.push_str(&format!(
         "{} {} {}  {}  {}  (model {}, {})\n",
         ecosystem_str(v.ecosystem),
@@ -324,8 +358,15 @@ pub fn pretty(v: &Verdict, url: Option<&str>, via: &str) -> String {
         via
     ));
     if let Some(a) = &v.artifact {
-        let sha = v.sha256.as_deref().map(|h| &h[..h.len().min(12)]).unwrap_or("-");
-        s.push_str(&format!("  artifact  {a} (sha256 {sha}...){}\n", if v.cached { " [cached]" } else { "" }));
+        let sha = v
+            .sha256
+            .as_deref()
+            .map(|h| &h[..h.len().min(12)])
+            .unwrap_or("-");
+        s.push_str(&format!(
+            "  artifact  {a} (sha256 {sha}...){}\n",
+            if v.cached { " [cached]" } else { "" }
+        ));
     }
     let f = |x: Option<f64>| x.map(|v| format!("{v:.2}")).unwrap_or_else(|| "-".into());
     s.push_str(&format!(
@@ -346,13 +387,19 @@ pub fn pretty(v: &Verdict, url: Option<&str>, via: &str) -> String {
         s.push_str("  reasons\n");
         for r in &v.reasons {
             let val = r.value.map(|x| format!(" = {x}")).unwrap_or_default();
-            s.push_str(&format!("    {:+.2}  {} ({}{val})\n", r.contribution, r.label, r.feature));
+            s.push_str(&format!(
+                "    {:+.2}  {} ({}{val})\n",
+                r.contribution, r.label, r.feature
+            ));
         }
     }
     if !v.evidence.is_empty() {
         s.push_str("  evidence\n");
         for e in v.evidence.iter().take(10) {
-            s.push_str(&format!("    {}:{}  {}  {}\n", e.file, e.line, e.indicator, e.snippet));
+            s.push_str(&format!(
+                "    {}:{}  {}  {}\n",
+                e.file, e.line, e.indicator, e.snippet
+            ));
         }
     }
     for e in &v.scan_errors {
@@ -391,11 +438,26 @@ mod tests {
 
     #[test]
     fn package_args() {
-        assert_eq!(split_package_arg(Ecosystem::Pypi, "requests==2.0"), ("requests".into(), Some("2.0".into())));
-        assert_eq!(split_package_arg(Ecosystem::Pypi, "requests"), ("requests".into(), None));
-        assert_eq!(split_package_arg(Ecosystem::Npm, "@babel/core@7.0.0"), ("@babel/core".into(), Some("7.0.0".into())));
-        assert_eq!(split_package_arg(Ecosystem::Npm, "@babel/core"), ("@babel/core".into(), None));
-        assert_eq!(split_package_arg(Ecosystem::Npm, "left-pad@^1"), ("left-pad".into(), Some("^1".into())));
+        assert_eq!(
+            split_package_arg(Ecosystem::Pypi, "requests==2.0"),
+            ("requests".into(), Some("2.0".into()))
+        );
+        assert_eq!(
+            split_package_arg(Ecosystem::Pypi, "requests"),
+            ("requests".into(), None)
+        );
+        assert_eq!(
+            split_package_arg(Ecosystem::Npm, "@babel/core@7.0.0"),
+            ("@babel/core".into(), Some("7.0.0".into()))
+        );
+        assert_eq!(
+            split_package_arg(Ecosystem::Npm, "@babel/core"),
+            ("@babel/core".into(), None)
+        );
+        assert_eq!(
+            split_package_arg(Ecosystem::Npm, "left-pad@^1"),
+            ("left-pad".into(), Some("^1".into()))
+        );
     }
 
     #[test]
@@ -412,10 +474,23 @@ mod tests {
         use clap::CommandFactory;
         Cli::command().debug_assert();
         let c = Cli::try_parse_from(["customs", "hook", "claude-code", "--fail-closed"]).unwrap();
-        assert!(matches!(c.command, Command::Hook { target: HookTarget::ClaudeCode { fail_closed: true, .. } }));
+        assert!(matches!(
+            c.command,
+            Command::Hook {
+                target: HookTarget::ClaudeCode {
+                    fail_closed: true,
+                    ..
+                }
+            }
+        ));
         let c = Cli::try_parse_from(["customs", "check", "npm:@scope/pkg@1.0.0"]).unwrap();
-        assert!(matches!(c.command, Command::Check(CheckArgs { package: None, .. })));
+        assert!(matches!(
+            c.command,
+            Command::Check(CheckArgs { package: None, .. })
+        ));
         let c = Cli::try_parse_from(["customs", "serve", "--bind", "0.0.0.0:9000"]).unwrap();
-        assert!(matches!(c.command, Command::Serve(ServeArgs { ref bind, .. }) if bind == "0.0.0.0:9000"));
+        assert!(
+            matches!(c.command, Command::Serve(ServeArgs { ref bind, .. }) if bind == "0.0.0.0:9000")
+        );
     }
 }

@@ -65,19 +65,38 @@ impl HookDecision {
 /// Outcome for one target.
 #[derive(Debug, Clone)]
 pub enum TargetResult {
-    Verdict { label: String, verdict: Box<Verdict>, url: Option<String> },
-    Unverifiable { label: String, reason: String },
-    PackageError { label: String, message: String },
-    Failed { label: String, message: String },
+    Verdict {
+        label: String,
+        verdict: Box<Verdict>,
+        url: Option<String>,
+    },
+    Unverifiable {
+        label: String,
+        reason: String,
+    },
+    PackageError {
+        label: String,
+        message: String,
+    },
+    Failed {
+        label: String,
+        message: String,
+    },
 }
 
 fn target_label(t: &Target) -> String {
     match t {
-        Target::Package { ecosystem, name, version } => match version {
+        Target::Package {
+            ecosystem,
+            name,
+            version,
+        } => match version {
             Some(v) => format!("{}:{name} ({v})", ecosystem_str(*ecosystem)),
             None => format!("{}:{name}", ecosystem_str(*ecosystem)),
         },
-        Target::Unverifiable { ecosystem, spec, .. } => format!("{}:{spec}", ecosystem_str(*ecosystem)),
+        Target::Unverifiable {
+            ecosystem, spec, ..
+        } => format!("{}:{spec}", ecosystem_str(*ecosystem)),
     }
 }
 
@@ -121,7 +140,11 @@ pub fn decide(results: &[TargetResult], fail_closed: bool) -> Option<HookDecisio
                     "{}:{}{}: {}",
                     ecosystem_str(verdict.ecosystem),
                     verdict.name,
-                    verdict.version.as_deref().map(|v| format!(" {v}")).unwrap_or_default(),
+                    verdict
+                        .version
+                        .as_deref()
+                        .map(|v| format!(" {v}"))
+                        .unwrap_or_default(),
                     verdict_summary(verdict)
                 );
                 if let Some(u) = url {
@@ -133,8 +156,12 @@ pub fn decide(results: &[TargetResult], fail_closed: bool) -> Option<HookDecisio
                     Decision::Allow => {}
                 }
             }
-            TargetResult::Unverifiable { label, reason } => review.push(format!("{label}: not checked, {reason}")),
-            TargetResult::PackageError { label, message } => review.push(format!("{label}: could not be checked: {message}")),
+            TargetResult::Unverifiable { label, reason } => {
+                review.push(format!("{label}: not checked, {reason}"))
+            }
+            TargetResult::PackageError { label, message } => {
+                review.push(format!("{label}: could not be checked: {message}"))
+            }
             TargetResult::Failed { label, message } => {
                 if fail_closed {
                     blocked.push(format!("{label}: Customs check failed: {message}"));
@@ -150,7 +177,9 @@ pub fn decide(results: &[TargetResult], fail_closed: bool) -> Option<HookDecisio
         for r in &review {
             reason.push_str(&format!("- (review) {r}\n"));
         }
-        reason.push_str("Do not retry with a different spelling or source; ask the user how to proceed.");
+        reason.push_str(
+            "Do not retry with a different spelling or source; ask the user how to proceed.",
+        );
         return Some(HookDecision {
             decision: "deny",
             reason,
@@ -171,8 +200,13 @@ pub fn decide(results: &[TargetResult], fail_closed: bool) -> Option<HookDecisio
 
 /// Evaluate one hook invocation. `Err` is an internal failure (bad input, no checker).
 pub async fn evaluate(input: &str, opts: &HookOptions) -> anyhow::Result<Option<HookDecision>> {
-    let input: HookInput = serde_json::from_str(input).map_err(|e| anyhow::anyhow!("invalid hook input: {e}"))?;
-    if input.hook_event_name.as_deref().is_some_and(|e| e != "PreToolUse") {
+    let input: HookInput =
+        serde_json::from_str(input).map_err(|e| anyhow::anyhow!("invalid hook input: {e}"))?;
+    if input
+        .hook_event_name
+        .as_deref()
+        .is_some_and(|e| e != "PreToolUse")
+    {
         return Ok(None);
     }
     if input.tool_name.as_deref() != Some("Bash") {
@@ -208,17 +242,29 @@ pub async fn evaluate(input: &str, opts: &HookOptions) -> anyhow::Result<Option<
             let label = target_label(&t);
             match t {
                 Target::Unverifiable { reason, .. } => TargetResult::Unverifiable { label, reason },
-                Target::Package { ecosystem, name, version } => {
+                Target::Package {
+                    ecosystem,
+                    name,
+                    version,
+                } => {
                     let Some(c) = checker else {
-                        return TargetResult::Failed { label, message: "no checker".into() };
+                        return TargetResult::Failed {
+                            label,
+                            message: "no checker".into(),
+                        };
                     };
-                    match c.check(ecosystem, &name, version.as_deref(), "claude-code-hook").await {
+                    match c
+                        .check(ecosystem, &name, version.as_deref(), "claude-code-hook")
+                        .await
+                    {
                         Ok(v) => TargetResult::Verdict {
                             label,
                             url: c.verdict_url(v.id),
                             verdict: Box::new(v),
                         },
-                        Err(CheckError::Package(m)) => TargetResult::PackageError { label, message: m },
+                        Err(CheckError::Package(m)) => {
+                            TargetResult::PackageError { label, message: m }
+                        }
                         Err(CheckError::Infrastructure(m)) => {
                             eprintln!("customs hook: checking {label} failed: {m}");
                             TargetResult::Failed { label, message: m }
@@ -254,7 +300,9 @@ fn finish_error(msg: &str, fail_closed: bool) -> i32 {
     if fail_closed {
         let d = HookDecision {
             decision: "deny",
-            reason: format!("Customs could not check this command ({msg}) and is configured to fail closed."),
+            reason: format!(
+                "Customs could not check this command ({msg}) and is configured to fail closed."
+            ),
         };
         println!("{}", d.to_json());
     }
@@ -359,7 +407,8 @@ mod tests {
             fail_closed: false,
             local: LocalOptions::default(),
         };
-        let edit = r#"{"hook_event_name":"PreToolUse","tool_name":"Edit","tool_input":{"file_path":"x"}}"#;
+        let edit =
+            r#"{"hook_event_name":"PreToolUse","tool_name":"Edit","tool_input":{"file_path":"x"}}"#;
         assert_eq!(evaluate(edit, &opts).await.unwrap(), None);
         let ls = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"ls -la"},"cwd":"/tmp"}"#;
         assert_eq!(evaluate(ls, &opts).await.unwrap(), None);

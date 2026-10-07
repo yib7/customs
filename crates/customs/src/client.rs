@@ -38,8 +38,12 @@ pub fn default_client_data_dir() -> PathBuf {
 }
 
 pub fn local_engine(opts: &LocalOptions) -> anyhow::Result<Arc<Engine>> {
-    let data_dir = opts.data_dir.clone().unwrap_or_else(default_client_data_dir);
-    let (policy, source) = resolve_policy(opts.config.as_deref(), &data_dir).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let data_dir = opts
+        .data_dir
+        .clone()
+        .unwrap_or_else(default_client_data_dir);
+    let (policy, source) =
+        resolve_policy(opts.config.as_deref(), &data_dir).map_err(|e| anyhow::anyhow!("{e}"))?;
     Engine::new(EngineConfig {
         data_dir,
         models: load_models(opts.models.as_deref())?,
@@ -131,10 +135,12 @@ impl Checker {
                 .check(eco, name, version, Some(client.to_string()))
                 .await
                 .map_err(|e| match e {
-                    EngineError::NotFound(m) | EngineError::Unresolvable(m) | EngineError::TooLarge(m) => {
-                        CheckError::Package(m)
+                    EngineError::NotFound(m)
+                    | EngineError::Unresolvable(m)
+                    | EngineError::TooLarge(m) => CheckError::Package(m),
+                    EngineError::Upstream(m) | EngineError::Internal(m) => {
+                        CheckError::Infrastructure(m)
                     }
-                    EngineError::Upstream(m) | EngineError::Internal(m) => CheckError::Infrastructure(m),
                 }),
             Checker::Remote { base, http } => {
                 let resp = http
@@ -154,8 +160,9 @@ impl Checker {
                     .await
                     .map_err(|e| CheckError::Infrastructure(e.to_string()))?;
                 if status.is_success() {
-                    return serde_json::from_str(&body)
-                        .map_err(|e| CheckError::Infrastructure(format!("bad verdict from server: {e}")));
+                    return serde_json::from_str(&body).map_err(|e| {
+                        CheckError::Infrastructure(format!("bad verdict from server: {e}"))
+                    });
                 }
                 let parsed = serde_json::from_str::<Value>(&body).ok();
                 // A nonexistent package is a 404 that still carries a verdict.
@@ -170,7 +177,9 @@ impl Checker {
                 if matches!(status.as_u16(), 404 | 413 | 422) {
                     Err(CheckError::Package(msg))
                 } else {
-                    Err(CheckError::Infrastructure(format!("server returned {status}: {msg}")))
+                    Err(CheckError::Infrastructure(format!(
+                        "server returned {status}: {msg}"
+                    )))
                 }
             }
         }

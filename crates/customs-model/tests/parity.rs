@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use customs_model::cnn::CodeCnn;
 use customs_model::ensemble::{Ensemble, Logits};
 use customs_model::gbdt::TreeEnsemble;
-use customs_model::name::{ngram_buckets, NameModel, PopularIndex};
+use customs_model::name::{distinct_buckets, NameModel, PopularIndex};
 use customs_model::{Models, ScoreInput};
 use customs_scan::Ecosystem;
 use serde_json::Value;
@@ -66,17 +66,29 @@ fn gbdt_parity() {
         let f = features(&c["features"]);
         let o = m.predict_map(&f);
         close(o.raw, c["raw"].as_f64().unwrap(), &format!("case {i} raw"));
-        close(o.prob, c["prob"].as_f64().unwrap(), &format!("case {i} prob"));
+        close(
+            o.prob,
+            c["prob"].as_f64().unwrap(),
+            &format!("case {i} prob"),
+        );
         close(
             o.calibrated,
             c["calibrated"].as_f64().unwrap(),
             &format!("case {i} calibrated"),
         );
-        close(o.bias, c["bias"].as_f64().unwrap(), &format!("case {i} bias"));
+        close(
+            o.bias,
+            c["bias"].as_f64().unwrap(),
+            &format!("case {i} bias"),
+        );
         let exp = c["contributions"].as_array().unwrap();
         assert_eq!(exp.len(), o.contributions.len());
         for (j, (a, b)) in o.contributions.iter().zip(exp).enumerate() {
-            close(*a, b.as_f64().unwrap(), &format!("case {i} contribution {j}"));
+            close(
+                *a,
+                b.as_f64().unwrap(),
+                &format!("case {i} contribution {j}"),
+            );
         }
         let sum: f64 = o.bias + o.contributions.iter().sum::<f64>();
         close(sum, o.raw, &format!("case {i} contributions sum to raw"));
@@ -85,27 +97,36 @@ fn gbdt_parity() {
 
 #[test]
 fn name_parity() {
-    let model = NameModel::from_json(&model_text("name_model.json")).unwrap();
-    let pypi = PopularIndex::from_text(Ecosystem::Pypi, &model_text("popular_pypi.txt"));
-    let npm = PopularIndex::from_text(Ecosystem::Npm, &model_text("popular_npm.txt"));
+    let dir = fixtures().join("models");
+    let model = NameModel::from_json(&model_text("name_model.json"), |p| {
+        Ok(std::fs::read_to_string(dir.join(p)).unwrap())
+    })
+    .unwrap();
     let cases = load("expected_name.json");
     for c in cases["cases"].as_array().unwrap() {
         let e = eco(c["ecosystem"].as_str().unwrap());
         let name = c["name"].as_str().unwrap();
-        let pop = if e == Ecosystem::Pypi { &pypi } else { &npm };
-        let s = model.score(e, name, Some(pop));
+        let s = model.score(e, name).unwrap();
         let f = &c["features"];
-        let what = format!("{name}");
-        assert_eq!(s.features.normalized, f["normalized"].as_str().unwrap(), "{what}");
+        let what = name.to_string();
+        assert_eq!(
+            s.features.normalized,
+            f["normalized"].as_str().unwrap(),
+            "{what}"
+        );
+        assert_eq!(s.features.bare, f["bare"].as_str().unwrap(), "{what}");
         for k in [
             "len",
             "n_digits",
             "n_hyphens",
             "n_underscores",
             "n_dots",
-            "min_edit_distance",
+            "has_scope",
             "is_popular",
-            "keyboard_typo",
+            "dist1",
+            "dist2",
+            "dist3",
+            "digit_suffix",
         ] {
             assert_eq!(
                 s.features.get(k).unwrap(),
@@ -113,6 +134,11 @@ fn name_parity() {
                 "{what}: {k}"
             );
         }
+        assert_eq!(
+            s.features.distance as u64,
+            f["distance"].as_u64().unwrap(),
+            "{what}: distance"
+        );
         assert_eq!(
             s.features.nearest_popular.as_deref(),
             f["nearest_popular"].as_str(),
@@ -123,11 +149,6 @@ fn name_parity() {
             f["contains_popular_token"].as_str(),
             "{what}: token"
         );
-        assert_eq!(
-            s.features.scope_squat.as_deref(),
-            f["scope_squat"].as_str(),
-            "{what}: scope"
-        );
         let buckets: Vec<u32> = c["buckets"]
             .as_array()
             .unwrap()
@@ -135,7 +156,7 @@ fn name_parity() {
             .map(|b| b.as_u64().unwrap() as u32)
             .collect();
         assert_eq!(
-            ngram_buckets(&s.features.normalized, 1, 4, model.n_buckets()),
+            distinct_buckets(&s.features.normalized, 1, 4, model.n_buckets()),
             buckets,
             "{what}: buckets"
         );
@@ -144,8 +165,16 @@ fn name_parity() {
             f["char_ngram_score"].as_f64().unwrap(),
             &format!("{what}: ngram"),
         );
-        close(s.logit, c["logit"].as_f64().unwrap(), &format!("{what}: logit"));
-        close(s.prob, c["prob"].as_f64().unwrap(), &format!("{what}: prob"));
+        close(
+            s.logit,
+            c["logit"].as_f64().unwrap(),
+            &format!("{what}: logit"),
+        );
+        close(
+            s.prob,
+            c["prob"].as_f64().unwrap(),
+            &format!("{what}: prob"),
+        );
     }
 }
 
@@ -191,7 +220,11 @@ fn ensemble_parity() {
             (None, true) => {}
             (Some(o), false) => {
                 close(o.z, c["out"]["z"].as_f64().unwrap(), &format!("case {i} z"));
-                close(o.risk, c["out"]["risk"].as_f64().unwrap(), &format!("case {i} risk"));
+                close(
+                    o.risk,
+                    c["out"]["risk"].as_f64().unwrap(),
+                    &format!("case {i} risk"),
+                );
                 assert_eq!(o.weight_set, c["out"]["weight_set"].as_str().unwrap());
             }
             _ => panic!("case {i}: availability mismatch"),
@@ -202,7 +235,7 @@ fn ensemble_parity() {
 #[test]
 fn bundle_assess_parity() {
     let models = Models::load(fixtures().join("models")).unwrap();
-    assert_eq!(models.model_version(), "fixture.1");
+    assert_eq!(models.model_version(), "fixture.2");
     assert!(models.manifest.untrained);
     let cases = load("expected_assess.json");
     for (i, c) in cases["cases"].as_array().unwrap().iter().enumerate() {
@@ -245,7 +278,10 @@ fn bundle_assess_parity() {
         for w in a.reasons.windows(2) {
             assert!(w[0].contribution >= w[1].contribution);
         }
-        assert!(a.reasons.iter().all(|r| r.contribution > 0.0 && !r.label.is_empty()));
+        assert!(a
+            .reasons
+            .iter()
+            .all(|r| r.contribution > 0.0 && !r.label.is_empty()));
     }
 }
 
@@ -265,15 +301,24 @@ fn name_search_is_fast() {
         .collect();
     let pop = PopularIndex::new(Ecosystem::Pypi, names.iter().map(|s| s.as_str()));
     let mut scratch = customs_model::name::Scratch::default();
-    let queries = ["reqeusts", "numpy-helper", "abcdefghijk", "x", "djangorestframwork"];
+    let queries = [
+        "reqeusts",
+        "numpy-helper",
+        "abcdefghijk",
+        "x",
+        "djangorestframwork",
+    ];
     let start = std::time::Instant::now();
     let rounds = 50;
     for _ in 0..rounds {
         for q in queries {
-            std::hint::black_box(pop.nearest(q, &mut scratch));
+            std::hint::black_box(pop.nearest(q, 4, &mut scratch));
         }
     }
     let per = start.elapsed().as_secs_f64() / (rounds * queries.len()) as f64;
-    eprintln!("nearest-name search: {:.1} us per query over 5000 names", per * 1e6);
+    eprintln!(
+        "nearest-name search: {:.1} us per query over 5000 names",
+        per * 1e6
+    );
     assert!(per < 0.02, "too slow: {per}s per query");
 }

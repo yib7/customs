@@ -14,7 +14,9 @@ use crate::registry::PackageMeta;
 
 /// Resolve `spec` against `meta`. Errors carry a user-facing message.
 pub fn resolve_version(meta: &PackageMeta, spec: Option<&str>) -> Result<String, String> {
-    let spec = spec.map(str::trim).filter(|s| !s.is_empty() && *s != "latest" && *s != "*");
+    let spec = spec
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && *s != "latest" && *s != "*");
     let latest = || {
         meta.latest
             .clone()
@@ -27,7 +29,10 @@ pub fn resolve_version(meta: &PackageMeta, spec: Option<&str>) -> Result<String,
     };
     let exact = spec.strip_prefix("==").unwrap_or(spec).trim();
     let exact = exact.strip_prefix('=').unwrap_or(exact).trim();
-    let exact = exact.strip_prefix('v').filter(|_| meta.ecosystem == Ecosystem::Npm).unwrap_or(exact);
+    let exact = exact
+        .strip_prefix('v')
+        .filter(|_| meta.ecosystem == Ecosystem::Npm)
+        .unwrap_or(exact);
     if meta.version(exact).is_some() {
         return Ok(exact.to_string());
     }
@@ -175,8 +180,16 @@ fn parse_pep440_specifier(spec: &str) -> Option<Vec<Clause>> {
             let idx = hi.iter().position(|x| *x != 0).unwrap_or(hi.len() - 1);
             hi.truncate(idx + 1);
             hi[idx] += 1;
-            out.push(Clause { op: ">=".into(), version: lo, wildcard: false });
-            out.push(Clause { op: "<".into(), version: Pep440::from_release(hi), wildcard: false });
+            out.push(Clause {
+                op: ">=".into(),
+                version: lo,
+                wildcard: false,
+            });
+            out.push(Clause {
+                op: "<".into(),
+                version: Pep440::from_release(hi),
+                wildcard: false,
+            });
             continue;
         }
         if let Some(v) = c.strip_prefix('~').filter(|v| !v.starts_with('=')) {
@@ -188,8 +201,16 @@ fn parse_pep440_specifier(spec: &str) -> Option<Vec<Clause>> {
             } else {
                 hi[0] += 1;
             }
-            out.push(Clause { op: ">=".into(), version: lo, wildcard: false });
-            out.push(Clause { op: "<".into(), version: Pep440::from_release(hi), wildcard: false });
+            out.push(Clause {
+                op: ">=".into(),
+                version: lo,
+                wildcard: false,
+            });
+            out.push(Clause {
+                op: "<".into(),
+                version: Pep440::from_release(hi),
+                wildcard: false,
+            });
             continue;
         }
         let op_len = ["===", "==", "!=", "~=", ">=", "<=", ">", "<"]
@@ -209,6 +230,9 @@ fn parse_pep440_specifier(spec: &str) -> Option<Vec<Clause>> {
     }
     (!out.is_empty()).then_some(out)
 }
+
+/// Ordering key: epoch, trimmed release, pre-release, post-release, dev-release.
+type SortKey = (u64, Vec<u64>, (i8, u8, u64), (i8, u64), (i8, u64));
 
 /// A PEP 440 version reduced to what ordering needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -292,7 +316,11 @@ impl Pep440 {
             if matched {
                 continue;
             }
-            if let Some(r) = t.strip_prefix("post").or_else(|| t.strip_prefix("rev")).or_else(|| t.strip_prefix('r')) {
+            if let Some(r) = t
+                .strip_prefix("post")
+                .or_else(|| t.strip_prefix("rev"))
+                .or_else(|| t.strip_prefix('r'))
+            {
                 let (n, used) = num(r);
                 v.post = Some(n);
                 tail = &tail[lead + (t.len() - r.len()) + used..];
@@ -327,7 +355,7 @@ impl Pep440 {
             .all(|(i, p)| self.release.get(i).copied().unwrap_or(0) == *p)
     }
 
-    fn key(&self) -> (u64, Vec<u64>, (i8, u8, u64), (i8, u64), (i8, u64)) {
+    fn key(&self) -> SortKey {
         let mut rel = self.release.clone();
         while rel.len() > 1 && rel.last() == Some(&0) {
             rel.pop();
@@ -366,9 +394,12 @@ mod tests {
             ecosystem: eco,
             name: "demo".into(),
             latest: Some(latest.into()),
-            dist_tags: [("latest".to_string(), latest.to_string()), ("next".to_string(), "3.0.0-rc.1".to_string())]
-                .into_iter()
-                .collect::<BTreeMap<_, _>>(),
+            dist_tags: [
+                ("latest".to_string(), latest.to_string()),
+                ("next".to_string(), "3.0.0-rc.1".to_string()),
+            ]
+            .into_iter()
+            .collect::<BTreeMap<_, _>>(),
             versions: versions
                 .iter()
                 .map(|v| VersionMeta {
@@ -385,22 +416,41 @@ mod tests {
     #[test]
     fn pep440_ordering() {
         let order = [
-            "1.0.dev1", "1.0a1.dev1", "1.0a1", "1.0a1.post1", "1.0b2", "1.0rc1", "1.0", "1.0.post1.dev1",
-            "1.0.post1", "1.0.1", "1.1", "2!0.1",
+            "1.0.dev1",
+            "1.0a1.dev1",
+            "1.0a1",
+            "1.0a1.post1",
+            "1.0b2",
+            "1.0rc1",
+            "1.0",
+            "1.0.post1.dev1",
+            "1.0.post1",
+            "1.0.1",
+            "1.1",
+            "2!0.1",
         ];
         for w in order.windows(2) {
             let (a, b) = (Pep440::parse(w[0]).unwrap(), Pep440::parse(w[1]).unwrap());
             assert!(a < b, "{} < {}", w[0], w[1]);
         }
-        assert_eq!(Pep440::parse("1.0"), Pep440::parse("1.0").map(|v| v));
-        assert_eq!(Pep440::parse("1.0").unwrap().cmp(&Pep440::parse("1.0.0").unwrap()), Ordering::Equal);
+        assert!(Pep440::parse("1.0").is_some());
+        assert_eq!(
+            Pep440::parse("1.0")
+                .unwrap()
+                .cmp(&Pep440::parse("1.0.0").unwrap()),
+            Ordering::Equal
+        );
         assert!(Pep440::parse("not a version").is_none());
         assert!(Pep440::parse("1.0-1").unwrap().post.is_some());
     }
 
     #[test]
     fn pypi_specifiers() {
-        let m = meta(Ecosystem::Pypi, &["1.0", "1.4.2", "1.4.9", "1.5.0", "1.9.9", "2.0", "2.1rc1"], "2.0");
+        let m = meta(
+            Ecosystem::Pypi,
+            &["1.0", "1.4.2", "1.4.9", "1.5.0", "1.9.9", "2.0", "2.1rc1"],
+            "2.0",
+        );
         let r = |s: &str| resolve_version(&m, Some(s)).unwrap();
         assert_eq!(resolve_version(&m, None).unwrap(), "2.0");
         assert_eq!(r("1.4.2"), "1.4.2");
@@ -420,7 +470,11 @@ mod tests {
 
     #[test]
     fn npm_ranges() {
-        let m = meta(Ecosystem::Npm, &["1.0.0", "1.2.3", "1.9.0", "2.0.0", "3.0.0-rc.1"], "2.0.0");
+        let m = meta(
+            Ecosystem::Npm,
+            &["1.0.0", "1.2.3", "1.9.0", "2.0.0", "3.0.0-rc.1"],
+            "2.0.0",
+        );
         let r = |s: &str| resolve_version(&m, Some(s)).unwrap();
         assert_eq!(r("^1.0.0"), "1.9.0");
         assert_eq!(r("^1"), "1.9.0");

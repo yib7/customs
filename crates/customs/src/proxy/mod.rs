@@ -52,7 +52,11 @@ pub fn block_message(v: &Verdict, base: &str) -> String {
             .map(|a| format!(" ({a})"))
             .unwrap_or_default()
     );
-    for h in v.policy_hits.iter().filter(|h| h.severity >= Decision::Warn) {
+    for h in v
+        .policy_hits
+        .iter()
+        .filter(|h| h.severity >= Decision::Warn)
+    {
         s.push_str(&format!("  - {}: {}\n", h.rule, h.detail));
     }
     if v.model_decision >= Decision::Warn {
@@ -77,7 +81,13 @@ fn reason_phrase(v: &Verdict) -> String {
     let text = format!("Blocked by Customs: {}", v.headline());
     let mut out: String = text
         .chars()
-        .map(|c| if c.is_ascii_graphic() || c == ' ' { c } else { '?' })
+        .map(|c| {
+            if c.is_ascii_graphic() || c == ' ' {
+                c
+            } else {
+                '?'
+            }
+        })
         .collect();
     if out.len() > 120 {
         out.truncate(117);
@@ -88,7 +98,10 @@ fn reason_phrase(v: &Verdict) -> String {
 
 fn verdict_headers(resp: &mut Response, v: &Verdict) {
     let h = resp.headers_mut();
-    h.insert("x-customs-decision", HeaderValue::from_static(v.decision.as_str()));
+    h.insert(
+        "x-customs-decision",
+        HeaderValue::from_static(v.decision.as_str()),
+    );
     if let Some(id) = v.id {
         if let Ok(val) = HeaderValue::from_str(&id.to_string()) {
             h.insert("x-customs-verdict", val);
@@ -123,17 +136,28 @@ pub async fn artifact_response(eco: Ecosystem, out: Outcome, base: &str) -> Resp
         return resp;
     }
     let Some(path) = &out.path else {
-        return (StatusCode::INTERNAL_SERVER_ERROR, "artifact missing from cache").into_response();
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "artifact missing from cache",
+        )
+            .into_response();
     };
     let file = match tokio::fs::File::open(path).await {
         Ok(f) => f,
         Err(e) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, format!("cache read failed: {e}")).into_response()
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("cache read failed: {e}"),
+            )
+                .into_response()
         }
     };
     let mut resp = Response::new(Body::from_stream(ReaderStream::new(file)));
     let h = resp.headers_mut();
-    h.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/octet-stream"));
+    h.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/octet-stream"),
+    );
     if let Ok(len) = HeaderValue::from_str(&out.size.to_string()) {
         h.insert(header::CONTENT_LENGTH, len);
     }
@@ -166,7 +190,10 @@ mod tests {
         h.insert(header::HOST, HeaderValue::from_static("localhost:9000"));
         assert_eq!(proxy_base(&h), "http://localhost:9000");
         h.insert("x-forwarded-proto", HeaderValue::from_static("https"));
-        h.insert("x-forwarded-host", HeaderValue::from_static("customs.example"));
+        h.insert(
+            "x-forwarded-host",
+            HeaderValue::from_static("customs.example"),
+        );
         assert_eq!(proxy_base(&h), "https://customs.example");
     }
 
