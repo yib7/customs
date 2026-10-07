@@ -13,11 +13,41 @@ pub const NPM_INSTALL_HOOKS: [&str; 6] = [
     "postprepare",
 ];
 
-/// What an npm script command runs: files it points at and inline code (`node -e`).
+/// What an npm script command runs: files it points at, inline code (`node -e`), and other
+/// package.json scripts it invokes by name (`npm run build`).
 #[derive(Debug, Default, PartialEq)]
 pub struct CommandRefs {
     pub files: Vec<(String, Lang)>,
     pub inline: Vec<(String, Lang)>,
+    pub scripts: Vec<String>,
+}
+
+/// Yarn commands that are not script names (`yarn <script>` runs a script otherwise).
+const YARN_BUILTINS: [&str; 16] = [
+    "add",
+    "bin",
+    "cache",
+    "config",
+    "dlx",
+    "exec",
+    "global",
+    "info",
+    "init",
+    "install",
+    "link",
+    "node",
+    "pack",
+    "remove",
+    "upgrade",
+    "workspace",
+];
+
+fn looks_like_file(a: &str) -> bool {
+    a.contains('/')
+        || matches!(
+            crate::archive::extension(a).to_ascii_lowercase().as_str(),
+            "js" | "cjs" | "mjs" | "ts" | "mts" | "cts" | "tsx" | "jsx"
+        )
 }
 
 /// Split a shell command into segments of words, honoring quotes. Operators (`&&`, `||`,
@@ -114,6 +144,45 @@ pub fn command_refs(cmd: &str) -> CommandRefs {
         let base = base.trim_end_matches(".exe");
         let args: Vec<&str> = words.collect();
         match base {
+            "bun" if matches!(args.first(), Some(&("x" | "add" | "install" | "i" | "pm"))) => {}
+            "bun" if args.first() == Some(&"run") => {
+                // `bun run <file>` runs a file; `bun run <name>` runs a package.json script.
+                if let Some(a) = args[1..].iter().find(|a| !a.starts_with('-')) {
+                    if looks_like_file(a) {
+                        refs.files.push((a.to_string(), Lang::Js));
+                    } else {
+                        refs.scripts.push(a.to_string());
+                    }
+                }
+            }
+            "npm" | "pnpm" => {
+                if matches!(args.first(), Some(&("run" | "run-script"))) {
+                    if let Some(a) = args[1..].iter().find(|a| !a.starts_with('-')) {
+                        refs.scripts.push(a.to_string());
+                    }
+                }
+            }
+            "yarn" => {
+                let rest: Vec<&str> = args
+                    .iter()
+                    .copied()
+                    .filter(|a| !a.starts_with('-'))
+                    .collect();
+                match rest.as_slice() {
+                    ["run", name, ..] => refs.scripts.push(name.to_string()),
+                    [name, ..] if !YARN_BUILTINS.contains(name) && *name != "run" => {
+                        refs.scripts.push(name.to_string())
+                    }
+                    _ => {}
+                }
+            }
+            "run-s" | "run-p" | "npm-run-all" => {
+                refs.scripts.extend(
+                    args.iter()
+                        .filter(|a| !a.starts_with('-') && !a.contains('*'))
+                        .map(|a| a.to_string()),
+                );
+            }
             "node" | "nodejs" | "bun" => {
                 let mut i = 0;
                 while i < args.len() {
@@ -358,6 +427,24 @@ mod tests {
         assert_eq!(r.inline, vec![("import os".to_string(), Lang::Python)]);
         assert!(command_refs("node-gyp rebuild").files.is_empty());
         assert!(command_refs("husky install").files.is_empty());
+    }
+
+    #[test]
+    fn bun_run_and_script_indirection() {
+        let r = command_refs("bun run index.js");
+        assert_eq!(r.files, vec![("index.js".to_string(), Lang::Js)]);
+        assert!(r.scripts.is_empty());
+        let r = command_refs("bun run build && npm run setup -- --x; yarn prep; yarn run gen");
+        assert_eq!(r.scripts, vec!["build", "setup", "prep", "gen"]);
+        assert!(r.files.is_empty());
+        assert!(command_refs("yarn install --frozen-lockfile")
+            .scripts
+            .is_empty());
+        assert!(command_refs("bun x tsc").files.is_empty());
+        let r = command_refs("cross-env NODE_ENV=production run-s clean build:*");
+        assert_eq!(r.scripts, vec!["clean"]);
+        let r = command_refs("bun ./postinstall.mjs || node ./postinstall.mjs");
+        assert_eq!(r.files.len(), 2);
     }
 
     #[test]

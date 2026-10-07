@@ -490,17 +490,31 @@ impl<'a> Scanner<'a> {
             serde_json::from_str(pj_text.trim_start_matches('\u{feff}')).ok()?;
         let scripts = pj.get("scripts").and_then(|s| s.as_object());
         let mut script_files: Vec<usize> = Vec::new();
-        for hook in surface::NPM_INSTALL_HOOKS {
+        // Install hooks first, then scripts they invoke by name (`npm run setup`,
+        // `yarn setup`, `bun run setup`), so a hook that delegates to another script does
+        // not move that script's code off the install surface.
+        let mut queue: Vec<(String, u32)> = surface::NPM_INSTALL_HOOKS
+            .iter()
+            .map(|h| (h.to_string(), 0))
+            .collect();
+        queue.reverse();
+        let mut visited: HashSet<String> = HashSet::new();
+        while let Some((name, depth)) = queue.pop() {
+            if !visited.insert(name.clone()) || visited.len() > 16 {
+                continue;
+            }
             let Some(cmd) = scripts
-                .and_then(|s| s.get(hook))
+                .and_then(|s| s.get(&name))
                 .and_then(|v| v.as_str())
                 .filter(|c| !c.trim().is_empty())
             else {
                 continue;
             };
-            self.n_npm_install_scripts += 1;
-            let label = format!("package.json:scripts.{hook}");
-            let line = line_of_key(&pj_text, hook);
+            if depth == 0 {
+                self.n_npm_install_scripts += 1;
+            }
+            let label = format!("package.json:scripts.{name}");
+            let line = line_of_key(&pj_text, &name);
             self.install_surface.push(label.clone());
             self.units.push(Unit {
                 label: label.clone(),
@@ -533,6 +547,11 @@ impl<'a> Scanner<'a> {
             for (path, lang) in refs.files {
                 if let Some(idx) = self.resolve_node(&path, lang) {
                     script_files.push(idx);
+                }
+            }
+            if depth < 3 {
+                for s in refs.scripts.into_iter().rev() {
+                    queue.push((s, depth + 1));
                 }
             }
         }

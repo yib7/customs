@@ -88,7 +88,11 @@ Every indicator is counted on two surfaces and emitted with a prefix:
   PyPI: `setup.py`, `setup.cfg` cmdclass targets when resolvable, every top-level
   `__init__.py` of a package directory, `*.pth` files. npm: commands in `package.json`
   `scripts.preinstall|install|postinstall|prepare|preprepare|postprepare`, files those commands
-  reference (`node x.js`), and the `main` entry file (default `index.js`).
+  reference (`node x.js`, `bun x.js`, `bun run x.js`), scripts they invoke by name
+  (`npm run setup`, `pnpm run setup`, `yarn setup`, `bun run setup`, `run-s a b`; up to
+  three levels and 16 scripts), and the `main` entry file (default `index.js`). Before this
+  was followed, a hook such as `bun run index.js` put a file named `run` on the surface and
+  missed `index.js`, and `postinstall: npm run setup` hid whatever `setup` runs.
 - `all_`: every source file in the archive (`.py`, `.js`, `.mjs`, `.cjs`, `.ts`, `.sh`,
   `.bat`, `.ps1`, `.cmd`).
 
