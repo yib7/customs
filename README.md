@@ -3,7 +3,8 @@
 **A package firewall for AI coding agents.** Customs sits between `pip`/`uv`/`npm` (and
 agents like Claude Code that run them on your behalf) and the public registries. It
 inspects every package archive before it reaches your machine, scores it with a malware
-classifier trained on 20,000 real malicious packages, and blocks what looks dangerous.
+classifier trained on real malicious packages from two independent collections, and blocks
+what looks dangerous.
 Packages that do not exist (the names an LLM hallucinates and attackers then register)
 are stopped before anything is downloaded.
 
@@ -13,15 +14,15 @@ are stopped before anything is downloaded.
 
 | | Customs | GuardDog 3.2 |
 |---|---:|---:|
-| ROC AUC | **0.972** | 0.837 |
-| Malware caught at GuardDog's own false-positive rate (18%) | **95.1%** | 79.4% |
-| Malware caught at GuardDog's `high_risk` false-positive rate (5%) | **86.5%** | 49.7% |
-| Malware flagged (warn) at a 0.8% false-positive rate | **78.9%** | |
-| Malware auto-blocked at a 0.02% false-positive rate | **57.4%** | |
+| ROC AUC | **0.968** | 0.837 |
+| Malware caught at GuardDog's own false-positive rate (18%) | **94.3%** | 79.4% |
+| Malware caught at GuardDog's `high_risk` false-positive rate (5%) | **86.7%** | 49.7% |
+| Malware flagged (warn) at a 0.7% false-positive rate | **77.8%** | |
+| Malware auto-blocked at a 0.02% false-positive rate | **57.5%** | |
 
 The Rust binary reproduces the offline evaluation exactly: replaying 706 held-out packages
 through the live proxy gave identical decisions to the Python pipeline (largest risk
-difference 1e-7) at about 50 ms per package. Full report:
+difference 2e-7) at about 60 ms per package. Full report:
 [`docs/EVALUATION.md`](docs/EVALUATION.md).
 
 ## Why this exists
@@ -121,10 +122,10 @@ or a project wakes up after a year of silence (`docs/DESIGN.md`, section 8).
 
 | Test set (time split, malware found from 2026-02-13) | Value (95% CI) |
 |---|---|
-| ROC AUC | 0.972 (0.967 to 0.977) |
-| Flagged at the warn threshold (target FPR 1%) | 78.9% (75.7 to 82.1), realized FPR 0.76% |
-| Blocked at the block threshold (target FPR 0.1%) | 57.4% (52.6 to 62.0), realized FPR 0.02% |
-| Never-seen campaigns (no near-duplicate in training), ROC AUC | 0.971 |
+| ROC AUC | 0.968 (0.961 to 0.974) |
+| Flagged at the warn threshold (target FPR 1%) | 77.8% (74.3 to 81.4), realized FPR 0.69% |
+| Blocked at the block threshold (target FPR 0.1%) | 57.5% (52.8 to 61.5), realized FPR 0.02% |
+| Never-seen campaigns (no near-duplicate in training), ROC AUC | 0.967 |
 | Benign false positives at block, popular packages | 0 of 2,064 (top and mid tiers) |
 
 ![Verdict for a real PyPI stealer, blocked with the code evidence](docs/screenshots/verdict-light.png)
@@ -135,16 +136,31 @@ training was augmented with disguised malware. Detection at the warn threshold:
 
 | Evasion | Used in augmentation | Before | After |
 |---|---|---:|---:|
-| none (clean) | | 80.0% | 79.0% |
-| starjacking (README, repo link and description copied from a real project) | yes | 57.9% | **74.2%** |
-| fake README and repository metadata | yes | 63.2% | **76.0%** |
-| payload buried inside a real library's source | yes | 68.0% | **79.2%** |
-| string literals split into concatenations | no | 78.0% | 76.2% |
-| install script moved behind an import | no | 79.9% | 78.9% |
-| payload wrapped in base64 + exec | no | 91.6% | 93.9% |
+| none (clean) | | 80.0% | 77.6% |
+| starjacking (README, repo link and description copied from a real project) | yes | 57.9% | **73.1%** |
+| fake README and repository metadata | yes | 63.2% | **72.9%** |
+| payload buried inside a real library's source | yes | 68.0% | **76.9%** |
+| string literals split into concatenations | no | 78.0% | 75.9% |
+| install script moved behind an import | no | 79.9% | 77.6% |
+| payload wrapped in base64 + exec | no | 91.6% | 92.2% |
+
+**A second source.** All of the above uses one collector's malware.
+[MalRegistry](https://github.com/lxyeternal/pypi_malregistry) (ASE 2023) was gathered by
+another team. Its samples with no name or near-duplicate in the training data are split by
+campaign into a dev half and a held-out half that is never looked at or trained on:
+
+| Held-out MalRegistry campaigns (2,174 archives, 660 clusters) | Before | After |
+|---|---:|---:|
+| Caught at a 0.5% false-positive rate (code only, no name model) | 37.4% | **50.3%** |
+| Warned or blocked, one sample per campaign | 59.2% | **81.8%** |
+
+*Before* is the model trained on one collector; *after* adds the dev half to training. The
+gain grows with the share of dev campaigns added (43.0% at a quarter, 46.1% at half). A
+round of scanner fixes driven by dev-half error analysis, by contrast, helped the dev half
+and barely moved the held-out one, which is why the held-out half exists.
 
 **Known weak spots** (from the report): compromised releases of popular libraries (a
-payload inside thousands of lines of legitimate code, ROC AUC 0.882) and very large
+payload inside thousands of lines of legitimate code, ROC AUC 0.867) and very large
 packages. The policy rules (minimum package age, install scripts in new packages) are the
 backstop there.
 
@@ -154,7 +170,8 @@ methodology, is in [`docs/EVALUATION.md`](docs/EVALUATION.md).
 ### How the evaluation avoids fooling itself
 
 * **Real data, both classes.** 20,488 malicious archives from
-  [Datadog's malicious-software-packages-dataset](https://github.com/DataDog/malicious-software-packages-dataset)
+  [Datadog's malicious-software-packages-dataset](https://github.com/DataDog/malicious-software-packages-dataset),
+  11,630 from MalRegistry (half of its campaigns held out for testing only),
   and 22,258 benign archives downloaded from PyPI and npm across popularity tiers,
   filtered against all 234K OSSF reports.
 * **Identical packaging.** Both classes are repacked into the same deterministic tarball

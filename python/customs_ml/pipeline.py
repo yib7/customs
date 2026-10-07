@@ -381,9 +381,10 @@ def main(argv: list[str]) -> None:
         "ensemble": stage_ensemble,
         "ablation": stage_ablation,
     }
-    from . import augment
+    from . import augment, external
 
     stages["augment"] = augment.stage_augment
+    stages["malregistry"] = external.stage_train_rows
     try:
         from . import evaluate
 

@@ -665,19 +665,35 @@ As implemented; results are in `docs/EVALUATION.md` and `models/metrics.json`.
 ### 10.1 Independent dataset (`customs_ml/external.py`)
 
 MalRegistry (lxyeternal/pypi_malregistry, ASE 2023) is a PyPI malware corpus collected by a
-different team. It is only scored, never trained on. Archives are fetched, canonicalized
-like the corpus, and scored by the shipped binary at its shipped thresholds. A sample is
-*novel* when its normalized name never appears in the training data and its token stream
-does not share a MinHash cluster with any training malware. Novel clusters are split in
-half by a hash of the cluster id: the **dev** half is for error analysis (and holds every
-cluster any sample of which was looked at), the **held-out** half is only ever reported.
-Rates are given per archive and per cluster (one sample each), since one campaign can
-contribute hundreds of copies.
+different team. Archives are fetched, canonicalized like the corpus, and scored by the
+shipped binary at its shipped thresholds. A sample is *novel* when its normalized name
+never appears in the training data and its token stream does not share a MinHash cluster
+with any training malware. Novel clusters are split in half by a hash of the cluster id:
+the **dev** half is for error analysis and training (and holds every cluster any sample of
+which was looked at), the **held-out** half is only ever reported. Rates are given per
+archive and per cluster (one sample each), since one campaign can contribute hundreds of
+copies.
 
-Dev-half error analysis drove three scanner changes: import following on the PyPI install
-surface (4.1), and the `hidden_ws_lines` and `exec_decoded` features (4.3). After a scanner
+- **Frozen sets.** Cluster ids shift when a scanner change alters token streams, so the
+  first run's halves, novelty and clusters are stored by archive hash
+  (`external_malregistry_split.json`) and reused by every later run.
+- **Matched FPR.** Shipped thresholds move with every retrain, so runs are compared at
+  thresholds giving the same false positive rate on the benign test split.
+- **Code-only scores.** Most MalRegistry names are in the OSSF name list the name model
+  trains on. The binary is also run with the name model left out of the manifest, so the
+  ensemble uses its code-only fallback weights.
+
+Dev-half error analysis drove three scanner changes: import following from setup-time
+files (4.1), and the `hidden_ws_lines` and `exec_decoded` features (4.3). After a scanner
 change, `pipeline refresh` rescans the corpus (features and tokens) while keeping clusters
-and splits, and every model is retrained.
+and splits, and every model is retrained. These changes raised dev-half recall more than
+held-out recall (see the report).
+
+`external.adapt(fraction)` is the experiment that added training data instead: a copy of
+the data directory gets the dev half (all of its clusters, or a random fraction) as
+training malware, every model is retrained, and the held-out half is scored code-only.
+The pipeline stage `malregistry` does the same for the shipped models, after `augment`
+(augmentation draws only from the primary corpus). The held-out half never enters training.
 
 ### 10.2 Experiment: release diff model (`customs_ml/diff.py`, `customs-scan delta`)
 

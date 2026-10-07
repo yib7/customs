@@ -3,10 +3,11 @@
 Every malicious sample used for training and testing comes from one source (Datadog's
 dataset), so a model can learn that source's collection habits. MalRegistry
 (github.com/lxyeternal/pypi_malregistry, from "An Empirical Study of Malicious Code In
-PyPI Ecosystem", ASE 2023) was collected independently from PyPI by a different team. Here
-it is only scored, never trained on: archives are canonicalized exactly like the corpus,
-scanned, de-duplicated against the training malware (same normalized name, or MinHash
-near-duplicate code), and scored by the frozen firewall binary at its shipped thresholds.
+PyPI Ecosystem", ASE 2023) was collected independently from PyPI by a different team.
+Archives are canonicalized exactly like the corpus, scanned, de-duplicated against the
+training malware (same normalized name, or MinHash near-duplicate code), and scored by the
+firewall binary. Novel clusters are split into a dev half (error analysis, and training
+data via the ``malregistry`` pipeline stage) and a held-out half that is only scored.
 
 Nothing is installed or executed. Archives are read into memory, rewritten in canonical
 form, and the originals are deleted.
@@ -193,6 +194,7 @@ def evaluate() -> dict:
     ext = ext[ext.get("path").notna()].drop_duplicates("sha256").reset_index(drop=True)
     df = load_table()
     df = df[df.augmented.isna()] if "augmented" in df else df
+    df = df[df.source.isna()] if "source" in df else df
     df = df.assign(
         ens_risk=df.ens_risk_temporal,
         ens_risk_code=code_only_risk(df, json.loads((ROOT / "models/ensemble.json").read_text())),
@@ -277,6 +279,7 @@ def evaluate() -> dict:
         "novel_heldout": rates(nv[nv.half == "heldout"]),
         "novel_heldout_one_per_cluster": rates(nv[nv.half == "heldout"].drop_duplicates("cluster")),
         "recall_at_matched_fpr": _matched_fpr(df, nv[nv.half == "heldout"]),
+        "dev_recall_at_matched_fpr": _matched_fpr(df, nv[nv.half == "dev"]),
         "code_only_recall_at_matched_fpr": _matched_fpr(df, nv[nv.half == "heldout"], "risk_code"),
         "name_seen_in_training_data": int(ext.name_seen.sum()),
         "near_duplicate_of_training": int(ext.near_dup.sum()),
@@ -358,6 +361,8 @@ def adapt(fraction: float = 1.0, seed: int = 0) -> dict:
     os.environ["CUSTOMS_DATA"] = str(exp)
     try:
         df = pipeline.load_table()
+        if "source" in df and df.source.notna().any():
+            raise RuntimeError("adapt() compares against models trained without MalRegistry")
         control = df.copy()
         rows = _corpus_rows(df, pd.concat([dev, held]), exp / "work")
         df = pd.concat([df, rows], ignore_index=True)
@@ -414,3 +419,24 @@ def adapt(fraction: float = 1.0, seed: int = 0) -> dict:
     dest.write_text(json.dumps(out, indent=1))
     print(json.dumps(out, indent=1))
     return out
+
+
+def stage_train_rows() -> None:
+    """Pipeline stage ``malregistry``: add the MalRegistry dev half to the training split.
+
+    The held-out half stays out, so it remains a test of campaigns from a second source
+    that no model has seen. Rows are marked ``source = "malregistry"``; rerunning the stage
+    replaces them.
+    """
+    from .pipeline import load_table, log, work
+
+    df = load_table()
+    if "source" in df:
+        df = df[df.source.isna()].reset_index(drop=True)
+    ext = pd.read_parquet(work() / "external_malregistry.parquet")
+    dev = ext[ext.half == "dev"].assign(split="train")
+    rows = _corpus_rows(df, dev, work())
+    df["source"] = None
+    out = pd.concat([df, rows], ignore_index=True)
+    log(f"malregistry: {len(rows)} dev-half archives added to the training split")
+    out.to_parquet(work() / "dataset.parquet")

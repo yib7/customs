@@ -69,6 +69,12 @@ def render(scheme: str = SCHEME) -> str:
         f"validation malware between {sm['val_cutoff']} and that date; training malware "
         "before. The model never saw a sample from the test period."
     )
+    if _load("external_malregistry_before_training.json"):
+        add(
+            "* **Second source.** Training malware also includes the dev half of MalRegistry "
+            "(collected in 2022 and 2023, before the test period); its held-out half is a "
+            "separate test, below. The training counts include augmented copies."
+        )
     add(
         "* **Benign packages** are split at random by near-duplicate cluster in the same "
         "proportions, sampled across three popularity tiers (top, mid, long tail) of PyPI "
@@ -316,53 +322,133 @@ def render(scheme: str = SCHEME) -> str:
 
     ext = _load("external_malregistry.json")
     ext_base = _load("external_malregistry_baseline.json")
+    adapt = _load("external_adapt_100.json")
+    # Scanner-change comparison: the run before the dev half became training data.
+    ext_scan = _load("external_malregistry_before_training.json") or ext
     if ext:
         add("## Independent dataset: MalRegistry\n")
         add(
-            "All training and test malware above comes from one collector. MalRegistry "
+            "The time-split test above uses one collector's malware. MalRegistry "
             "(the PyPI malware corpus from *An Empirical Study of Malicious Code In PyPI "
-            "Ecosystem*, ASE 2023) was gathered separately and is never trained on. Its "
+            "Ecosystem*, ASE 2023) was gathered separately. Its "
             f"{ext['archives']:,} unique archives are canonicalized like the corpus and scored "
             "by the shipped binary. Samples whose name appears in the training data "
             f"({ext['name_seen_in_training_data']:,}) or whose code is a MinHash near-duplicate "
             f"of training malware ({ext['near_duplicate_of_training']:,}) are set aside; the "
             "rest are **novel**. Novel clusters are split in half: misses in the dev half "
-            "drove the scanner changes below, and the held-out half was not looked at.\n"
+            "were studied and drove scanner changes, the held-out half was never looked at. "
+            "Both halves are frozen by archive hash, so every run below is measured on the "
+            "same samples.\n"
         )
-        rows = [
+        add("| Subset | n | Warn or block | Block |\n|---|---:|---:|---:|")
+        for label, k in (
             ("All archives", "all"),
-            ("Novel, dev half", "novel_dev"),
+            (
+                "Novel, dev half (in training)" if ext_scan is not ext else "Novel, dev half",
+                "novel_dev",
+            ),
             ("Novel, held-out half", "novel_heldout"),
             ("Novel, held-out, one per cluster", "novel_heldout_one_per_cluster"),
-        ]
-        if ext_base:
-            add(
-                "| Subset | n | Warn or block (before) | Warn or block (after) | "
-                "Block (before) | Block (after) |"
-            )
-            add("|---|---:|---:|---:|---:|---:|")
-            for label, k in rows:
-                a, b = ext_base.get(k), ext.get(k)
-                if a and b:
-                    add(
-                        f"| {label} | {b['n']:,} | {pct(a['warn_or_block'])} | "
-                        f"{pct(b['warn_or_block'])} | {pct(a['block'])} | {pct(b['block'])} |"
-                    )
-        else:
-            add("| Subset | n | Warn or block | Block |\n|---|---:|---:|---:|")
-            for label, k in rows:
-                if ext.get(k):
-                    r = ext[k]
-                    add(f"| {label} | {r['n']:,} | {pct(r['warn_or_block'])} | {pct(r['block'])} |")
+        ):
+            if ext.get(k):
+                r = ext[k]
+                add(f"| {label} | {r['n']:,} | {pct(r['warn_or_block'])} | {pct(r['block'])} |")
         add(
-            "\nError analysis on the dev half found that most misses carried clear behavior "
-            "indicators but none on the install surface: the payload sat in a module that "
-            "`__init__.py` or `setup.py` imports, which runs on install or import just the "
-            "same. The scanner now follows a package's own imports from the install surface "
-            "(relative imports, and absolute imports of packages shipped in the archive, up to "
-            "three hops), and gained two features for code hidden past a long run of blanks "
-            "and for running decoded data on the line that decodes it.\n"
+            "\nNovel malware from another collector is much harder than the time-split test "
+            "set. Thresholds move between retrains, so the comparisons below are made at "
+            "matched false positive rates on the benign test split.\n"
         )
+        mf = ext_scan.get("recall_at_matched_fpr")
+        if ext_base and mf and ext_base.get("dev_recall_at_matched_fpr"):
+            add(
+                "**Dev-half error analysis.** Most dev misses carried clear behavior "
+                "indicators, but none on the install surface: the payload sat in a module "
+                "that `setup.py` imports, or after a long run of blanks on one line, or in "
+                "decoded data executed on the line that decodes it. The scanner now follows "
+                "the package's own imports from setup-time files and has features for the "
+                "other two. (Following imports from `__init__.py` as well was tried and "
+                "made things worse: it pulls each benign library onto the install surface.)\n"
+            )
+            add(
+                "| FPR | Dev, before | Dev, after | Held-out, before | Held-out, after |\n"
+                "|---:|---:|---:|---:|---:|"
+            )
+            dev_a = ext_base["dev_recall_at_matched_fpr"]
+            dev_b = ext_scan["dev_recall_at_matched_fpr"]
+            held_a = ext_base["recall_at_matched_fpr"]
+            for f in ("0.001", "0.005", "0.01"):
+                add(
+                    f"| {pct(float(f))} | {pct(dev_a[f]['recall'])} | {pct(dev_b[f]['recall'])} | "
+                    f"{pct(held_a[f]['recall'])} | {pct(mf[f]['recall'])} |"
+                )
+            add(
+                "\nThe changes helped the half they were designed on and barely moved the "
+                "half that was held out. Error analysis on a handful of campaigns fits those "
+                "campaigns; it is the held-out column that says how a fix generalizes, and "
+                "these did not much.\n"
+            )
+        co = ext_scan.get("code_only_recall_at_matched_fpr")
+        if co and mf:
+            add(
+                "**Name leakage check.** The name model is trained on OpenSSF malicious "
+                "package names, and most MalRegistry names are among them (it is the same "
+                "malware, reported). The in-domain test holds its names out of name-model "
+                "training; here the binary was also run without the name model, using the "
+                "ensemble's code-only fallback. Held-out recall at 0.1% / 0.5% / 1% FPR: "
+                + " / ".join(pct(mf[f]["recall"]) for f in ("0.001", "0.005", "0.01"))
+                + " with the name model, "
+                + " / ".join(pct(co[f]["recall"]) for f in ("0.001", "0.005", "0.01"))
+                + " without. The name model carries almost no weight once code is scanned, "
+                "so the leak does not inflate these numbers.\n"
+            )
+        if adapt:
+            h, i = adapt["heldout_code_only"], adapt["in_domain"]
+            add(
+                "**Training on the second source.** The dev half "
+                f"({adapt['added_training_archives']:,} archives in "
+                f"{adapt['added_training_clusters']:,} clusters, novel or not) was added to "
+                "the training split and every model retrained; the held-out half "
+                f"({adapt['heldout_novel_archives']:,} novel archives, "
+                f"{adapt['heldout_novel_clusters']:,} clusters, none sharing a cluster with "
+                "the added data) was scored code-only.\n"
+            )
+            add(
+                "| | Held-out recall at 0.1% FPR | at 0.5% | at 1% | In-domain ROC AUC | "
+                "In-domain block recall |\n|---|---:|---:|---:|---:|---:|"
+            )
+            for label, k in (
+                ("Primary corpus only", "main"),
+                ("Plus MalRegistry dev half", "adapted"),
+            ):
+                add(
+                    f"| {label} | {pct(h[k]['0.001']['recall'])} | "
+                    f"{pct(h[k]['0.005']['recall'])} | "
+                    f"{pct(h[k]['0.01']['recall'])} | {num(i[k]['roc_auc'])} | "
+                    f"{pct(i[k]['recall_block'])} |"
+                )
+            curve = [_load(f"external_adapt_{p}.json") for p in (25, 50)]
+            curve = [c for c in curve if c] + [adapt]
+            if len(curve) > 1:
+                add(
+                    "\nHeld-out recall at 0.5% FPR by share of dev clusters added: "
+                    + ", ".join(
+                        f"{c['fraction'] * 100:.0f}% ({c['added_training_clusters']} clusters): "
+                        f"{pct(c['heldout_code_only']['adapted']['0.005']['recall'])}"
+                        for c in curve
+                    )
+                    + "."
+                )
+            if ext_scan is not ext:
+                add(
+                    "\nThe shipped models include the dev half (pipeline stage `malregistry`). "
+                    "Rerun through the binary, they score the held-out half at "
+                    + " / ".join(
+                        pct(ext["code_only_recall_at_matched_fpr"][f]["recall"])
+                        for f in ("0.001", "0.005", "0.01")
+                    )
+                    + " (code only, 0.1% / 0.5% / 1% FPR)."
+                )
+            add("")
 
     dif = _load("diff_eval.json")
     if dif and "matched_fpr" in dif.get("real_compromised_test", {}):
@@ -394,10 +480,29 @@ def render(scheme: str = SCHEME) -> str:
             f"\nAt 0.5% FPR the two models disagree often: {ov['both']} releases are caught "
             f"by both, {ov['base_only']} only by the base model and {ov['diff_only']} only by "
             "the diff model (among them litellm 1.82.7 and 1.82.8, which the base model "
-            "scores near zero). The diff model misses releases whose previous version was "
-            "already compromised, since the payload is then not new. Combined at a matched "
-            "false positive rate the two do not beat the base model alone, so the diff model "
-            "is not part of the shipped decision.\n"
+            "scores far below its warn threshold). The diff model misses releases whose "
+            "previous version was already compromised, since the payload is then not new.\n"
+        )
+        mf = rt["matched_fpr"]
+        gains = {f: mf[f]["combined_recall"] - mf[f]["base_recall"] for f in mf}
+        lo = min(mf, key=float)
+        add(
+            "Combined at a matched false positive rate (each model's score turned into a "
+            "tail probability on benign validation pairs, then the maximum), the pair gains "
+            + ", ".join(
+                f"{gains[f] * 100:+.1f} points at {pct(float(f))}" for f in sorted(mf, key=float)
+            )
+            + f" FPR, on {rt['n_pos']} releases. Taking the maximum of two scores spends the "
+            "false positive budget on both, which costs most at the strictest rate"
+            + (
+                f" ({pct(mf[lo]['base_recall'])} to {pct(mf[lo]['combined_recall'])} at "
+                f"{pct(float(lo))}, the block operating point)"
+                if gains[lo] < 0
+                else ""
+            )
+            + ". The diff model is therefore not part of the shipped decision: the gain at "
+            f"looser rates is a handful of releases out of {rt['n_pos']}, and the loss lands "
+            "on the decision that blocks.\n"
         )
 
     live = _load("live_study.json")
@@ -427,7 +532,8 @@ def render(scheme: str = SCHEME) -> str:
             f"The window is hours long, and malicious uploads usually stay up for days, so "
             f"the removal columns are a floor. What the window does measure is the alert "
             f"load on real traffic: {flagged} of {live['scanned']:,} fresh releases "
-            f"({pct(flagged / max(live['scanned'], 1))}) were warned or blocked, the rate a "
+            f"({pct(flagged / max(live['scanned'], 1))}) {'was' if flagged == 1 else 'were'} "
+            "warned or blocked, the rate a "
             "user installing brand-new releases would see.\n"
         )
 

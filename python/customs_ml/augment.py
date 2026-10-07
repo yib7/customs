@@ -104,6 +104,9 @@ def stage_augment(
     split = df[f"split_{scheme}"]
     rng = np.random.default_rng(seed)
     src = df[(split == "train") & (df.label == 1)]
+    # Augment the primary corpus only, so adding a second source leaves this stage as is.
+    if "source" in src:
+        src = src[src.source.isna()]
     src = src.groupby("cluster", group_keys=False).apply(
         lambda g: g.sample(min(len(g), per_cluster), random_state=seed)
     )
