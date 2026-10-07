@@ -457,6 +457,28 @@ def render(scheme: str = SCHEME) -> str:
                     )
                     + " (code only, 0.1% / 0.5% / 1% FPR)."
                 )
+                co = ext["code_only_recall_at_matched_fpr"]
+                if "cluster_weighted_recall" in co["0.001"]:
+                    sizes = ext.get("heldout_largest_cluster") or {}
+                    add(
+                        "\n**Read the campaign-weighted numbers.** Weighting each held-out "
+                        "campaign equally, the shipped models catch "
+                        + " / ".join(
+                            pct(co[f]["cluster_weighted_recall"])
+                            for f in ("0.001", "0.005", "0.01")
+                        )
+                        + " at the same rates."
+                        + (
+                            f" One campaign holds {sizes['n']:,} near-identical archives "
+                            f"({pct(sizes['share'])} of the held-out half) with code-only "
+                            f"risk near {sizes['median_risk']:.2f}, so per-archive recall "
+                            "jumps by that share whenever a retrain moves that score across a "
+                            "threshold; per-archive numbers between runs are only comparable "
+                            "when that campaign stays on the same side."
+                            if sizes
+                            else ""
+                        )
+                    )
             add("")
 
     dif = _load("diff_eval.json")

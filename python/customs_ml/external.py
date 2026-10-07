@@ -179,12 +179,28 @@ def _matched_fpr(df: pd.DataFrame, g: pd.DataFrame, col: str = "risk") -> dict:
 
     ``col`` names the score both in ``g`` and, as ``ens_<col>``, in the corpus table."""
     ben = df[(df.label == 0) & (df.split_temporal == "test")][f"ens_{col}"].to_numpy()
-    r = g[col].dropna().to_numpy()
+    g = g[g[col].notna()]
+    r = g[col].to_numpy()
+    # Each campaign weighs the same: one MalRegistry cluster holds 41% of the held-out
+    # archives, so per-archive recall jumps by that much when its score crosses a threshold.
+    w = 1 / g.groupby("cluster")["cluster"].transform("size").to_numpy() if "cluster" in g else None
     out = {"benign_test_n": int(len(ben))}
     for fpr in (0.001, 0.005, 0.01):
         t = float(np.quantile(ben, 1 - fpr))
         out[str(fpr)] = {"threshold": t, "recall": float(np.mean(r >= t)) if len(r) else None}
+        if w is not None and len(r):
+            out[str(fpr)]["cluster_weighted_recall"] = float(np.sum(w * (r >= t)) / np.sum(w))
     return out
+
+
+def _largest_cluster(g: pd.DataFrame) -> dict:
+    sizes = g.cluster.value_counts()
+    big = g[g.cluster == sizes.index[0]]
+    return {
+        "n": int(sizes.iloc[0]),
+        "share": float(sizes.iloc[0] / len(g)),
+        "median_risk": float(big.risk_code.median()),
+    }
 
 
 def evaluate() -> dict:
@@ -282,6 +298,7 @@ def evaluate() -> dict:
         "recall_at_matched_fpr": _matched_fpr(df, nv[nv.half == "heldout"]),
         "dev_recall_at_matched_fpr": _matched_fpr(df, nv[nv.half == "dev"]),
         "code_only_recall_at_matched_fpr": _matched_fpr(df, nv[nv.half == "heldout"], "risk_code"),
+        "heldout_largest_cluster": _largest_cluster(nv[nv.half == "heldout"]),
         "name_seen_in_training_data": int(ext.name_seen.sum()),
         "near_duplicate_of_training": int(ext.near_dup.sum()),
         "thresholds": ens,
