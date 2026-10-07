@@ -895,20 +895,32 @@ loopback host (a Customs proxy). The project's own workspace packages (`editable
 `virtual`, `workspace:`, `link:`, `portal:`, npm `link: true`) and berry `patch:` entries
 (the unpatched entry is listed too) are skipped silently.
 
+npm, Yarn classic and pnpm install from the URL the lockfile records (`resolved`, pnpm
+`resolution.tarball`), and none of them compares the tarball with the entry's name. A
+lockfile edit in a pull request can therefore point `node_modules/lodash` at
+`https://registry.npmjs.org/evil-pkg/-/evil-pkg-1.0.0.tgz` with a matching `integrity`:
+the diff shows a trusted name, and `npm ci` installs the other package. The audit reads the
+package and version back out of every registry tarball URL (`<name>/-/<base>-<version>.tgz`,
+scoped and percent-encoded names, any path prefix such as the proxy's `/npm/`) and reports a
+`mismatch` when they differ from the entry or the URL is not a tarball path. A mismatch
+counts as block, and the package the URL actually serves is checked in its place. uv
+records file URLs too, but it validates the downloaded distribution's name and version
+against the lock entry, so `uv.lock` gets no such check.
+
 Pins are checked through the same client as `customs check` (a running server, else
 in-process), `--jobs` (default 8) at a time; PyPI pins are sent as `==version` so a version
 the registry lacks is reported as unavailable instead of resolving to another one. The
 verdict cache makes repeated audits cheap.
 
 Exit codes: 1 when a package meets `--fail-on` (`block` by default, `warn`, or `never`; an
-unavailable version counts as warn), otherwise 2 when a check failed (network, server) or
+unavailable version counts as warn and a mismatch as block), otherwise 2 when a check failed (network, server) or
 on usage and parse errors, otherwise 0. `--format text` prints a summary line and a table
 of non-allowed packages; `json` prints every result with its full verdict; `sarif` prints
 SARIF 2.1.0 with one run (driver `Customs`), rules `customs/model-block`,
-`customs/model-warn`, `customs/unavailable` and one per policy rule that appears
+`customs/model-warn`, `customs/unavailable`, `customs/lockfile-mismatch` and one per policy rule that appears
 (`customs/deny-list`, `customs/nonexistent-package`, `customs/min-age`,
 `customs/install-scripts-from-new-package`, `customs/scan-error`), and one result per warned
-or blocked package at its lockfile line (path relative to the working directory) with
+or blocked package, or mismatched entry, at its lockfile line (path relative to the working directory) with
 `partialFingerprints.customsPackage/v1 = <ecosystem>/<name>/<version>`, so GitHub keeps one
 alert per package version across runs. `action.yml` wraps this for GitHub Actions
 (`docs/github-action.md`).

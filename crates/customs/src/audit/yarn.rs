@@ -215,6 +215,20 @@ __metadata:
 "#;
 
     #[test]
+    fn yarn_classic_resolved_elsewhere() {
+        let lock = "\
+lodash@^4.17.21:
+  version \"4.17.21\"
+  resolved \"https://registry.yarnpkg.com/lodash-utils/-/lodash-utils-1.0.0.tgz#abc\"
+";
+        let mut p = Parsed::default();
+        parse(lock, Path::new("yarn.lock"), &mut p).unwrap();
+        assert_eq!(pins(&p), vec![("lodash-utils".into(), "1.0.0".into(), 1)]);
+        assert_eq!(p.mismatches.len(), 1);
+        assert!(p.mismatches[0].message.contains("not lodash@4.17.21"));
+    }
+
+    #[test]
     fn yarn_classic() {
         let mut p = Parsed::default();
         parse(CLASSIC, Path::new("yarn.lock"), &mut p).unwrap();
@@ -228,6 +242,7 @@ __metadata:
         );
         let skipped: Vec<usize> = p.skipped.iter().map(|s| s.line).collect();
         assert_eq!(skipped, vec![22, 26]);
+        assert!(p.mismatches.is_empty());
         assert!(p.skipped[1].reason.contains("npm.corp.example"));
     }
 

@@ -189,6 +189,7 @@ mod tests {
             ]
         );
         assert_eq!(p.skipped.len(), 1);
+        assert!(p.mismatches.is_empty());
         assert_eq!(p.skipped[0].line, 50);
         assert!(p.skipped[0].reason.contains("git+ssh"));
     }
@@ -210,7 +211,41 @@ mod tests {
             ]
         );
         assert_eq!(p.skipped.len(), 1);
+        assert!(p.mismatches.is_empty());
         assert_eq!(p.skipped[0].line, 29);
+    }
+
+    #[test]
+    fn resolved_tarball_of_another_package() {
+        let lock = r#"{
+  "lockfileVersion": 3,
+  "packages": {
+    "": {"name": "x"},
+    "node_modules/lodash": {
+      "version": "4.17.21",
+      "resolved": "https://registry.npmjs.org/evil-pkg/-/evil-pkg-1.0.0.tgz",
+      "integrity": "sha512-EVIL"
+    },
+    "node_modules/semver": {
+      "version": "7.6.0",
+      "resolved": "https://registry.npmjs.org/semver/-/semver-7.6.0.tgz"
+    }
+  }
+}"#;
+        let mut p = Parsed::default();
+        parse(lock, Path::new("package-lock.json"), &mut p).unwrap();
+        let mut got = pins(&p);
+        got.sort_by_key(|x| x.2);
+        assert_eq!(
+            got,
+            vec![
+                ("evil-pkg".into(), "1.0.0".into(), 5),
+                ("semver".into(), "7.6.0".into(), 10),
+            ]
+        );
+        assert_eq!(p.mismatches.len(), 1);
+        assert_eq!(p.mismatches[0].dep.name, "lodash");
+        assert_eq!(p.mismatches[0].dep.line, 5);
     }
 
     #[test]

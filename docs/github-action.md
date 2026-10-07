@@ -3,7 +3,9 @@
 The `action.yml` at the root of this repository runs `customs audit` on the lockfiles in
 your repository and uploads the result to GitHub code scanning. Every pinned package is
 checked with the malware classifier and the policy rules (nonexistent names, deny list,
-minimum age, install scripts in young packages). Blocked and warned packages show up as
+minimum age, install scripts in young packages), and npm, Yarn and pnpm entries whose
+`resolved` tarball URL names a different package or version than the entry are blocked as
+lockfile injection. Blocked and warned packages show up as
 code scanning alerts on the lockfile line that pins them, and in the pull request diff.
 
 ## Workflow

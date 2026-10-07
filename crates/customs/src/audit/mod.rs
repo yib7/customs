@@ -63,11 +63,21 @@ pub struct Skipped {
     pub reason: String,
 }
 
+/// An npm lockfile entry whose registry `resolved` URL is not this package's tarball:
+/// npm installs whatever the URL serves, so the recorded name is not what gets installed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Mismatch {
+    /// The package the entry claims to be.
+    pub dep: Dependency,
+    pub message: String,
+}
+
 /// What the parsers produce.
 #[derive(Debug, Default)]
 pub struct Parsed {
     pub deps: Vec<Dependency>,
     pub skipped: Vec<Skipped>,
+    pub mismatches: Vec<Mismatch>,
 }
 
 impl Parsed {
@@ -78,6 +88,19 @@ impl Parsed {
             version: version.to_string(),
             file: file.to_path_buf(),
             line,
+        });
+    }
+
+    fn mismatch(&mut self, name: &str, version: &str, file: &Path, line: usize, message: String) {
+        self.mismatches.push(Mismatch {
+            dep: Dependency {
+                ecosystem: Ecosystem::Npm,
+                name: normalize_name(Ecosystem::Npm, name),
+                version: version.to_string(),
+                file: file.to_path_buf(),
+                line,
+            },
+            message,
         });
     }
 
@@ -103,6 +126,9 @@ impl Parsed {
         let mut seen = HashSet::new();
         self.skipped
             .retain(|s| seen.insert((s.file.clone(), s.line, s.spec.clone())));
+        let mut seen = HashSet::new();
+        self.mismatches
+            .retain(|m| seen.insert((m.dep.file.clone(), m.dep.line)));
     }
 }
 
@@ -246,6 +272,7 @@ pub fn collect(files: &[PathBuf]) -> Result<Parsed, Vec<String>> {
             Ok(p) => {
                 all.deps.extend(p.deps);
                 all.skipped.extend(p.skipped);
+                all.mismatches.extend(p.mismatches);
             }
             Err(e) => errors.push(e),
         }
@@ -441,6 +468,31 @@ fn host_of(url: &str) -> String {
         .unwrap_or_else(|| url.to_string())
 }
 
+/// The package and version a registry tarball URL serves: `.../lodash/-/lodash-4.17.21.tgz`,
+/// `.../@babel/core/-/core-7.24.0.tgz` (also `@babel%2fcore`), under any path prefix such
+/// as the proxy's `/npm/`. `None` when the URL is not shaped like a registry tarball.
+fn tarball_identity(url: &str) -> Option<(String, String)> {
+    let u = url::Url::parse(url).ok()?;
+    let path = percent_encoding::percent_decode_str(u.path())
+        .decode_utf8()
+        .ok()?;
+    let (dir, file) = path.rsplit_once("/-/")?;
+    let mut segs = dir.rsplit('/');
+    let base = segs.next().filter(|b| !b.is_empty())?;
+    let name = match segs.next() {
+        Some(scope) if scope.starts_with('@') => format!("{scope}/{base}"),
+        _ => base.to_string(),
+    };
+    let version = file
+        .strip_prefix(base)?
+        .strip_prefix('-')?
+        .strip_suffix(".tgz")?;
+    if version.is_empty() || version.contains('/') {
+        return None;
+    }
+    Some((name, version.to_string()))
+}
+
 /// `name@range` with an optional `@scope/` prefix into name and range.
 fn split_npm_spec(spec: &str) -> Option<(&str, &str)> {
     let start = usize::from(spec.starts_with('@'));
@@ -498,6 +550,39 @@ fn npm_pin(
             );
             return;
         }
+        // npm installs the tarball at `resolved` without comparing it with the entry's
+        // name, so a lockfile edit can swap in another package under a trusted name.
+        match tarball_identity(r) {
+            Some((n, v))
+                if normalize_name(Ecosystem::Npm, &n) == normalize_name(Ecosystem::Npm, name)
+                    && v == version => {}
+            Some((n, v)) => {
+                let installed = format!("{n}@{v}");
+                out.mismatch(
+                    name,
+                    version,
+                    file,
+                    line,
+                    format!("lockfile installs {installed} from {r}, not {spec}"),
+                );
+                if valid_npm_name(&n) && is_npm_version(&v) {
+                    out.dep(Ecosystem::Npm, &n, &v, file, line);
+                } else {
+                    out.skip(file, line, &installed, "not a registry package version");
+                }
+                return;
+            }
+            None => {
+                out.mismatch(
+                    name,
+                    version,
+                    file,
+                    line,
+                    format!("resolved URL {r} is not a registry tarball of {spec}"),
+                );
+                return;
+            }
+        }
     }
     out.dep(Ecosystem::Npm, name, version, file, line);
 }
@@ -533,6 +618,8 @@ pub enum Outcome {
     Unavailable(String),
     /// Customs itself failed (network, server error).
     Failed(String),
+    /// The lockfile entry installs a different package than it names. Counted as a block.
+    Mismatch(String),
 }
 
 #[derive(Debug, Clone)]
@@ -547,6 +634,7 @@ impl Finding {
         match &self.outcome {
             Outcome::Checked { verdict, .. } => Some(verdict.decision),
             Outcome::Unavailable(_) => Some(Decision::Warn),
+            Outcome::Mismatch(_) => Some(Decision::Block),
             Outcome::Failed(_) => None,
         }
     }
@@ -556,6 +644,7 @@ impl Finding {
             Outcome::Checked { verdict, .. } => verdict.decision.as_str(),
             Outcome::Unavailable(_) => "unavailable",
             Outcome::Failed(_) => "failed",
+            Outcome::Mismatch(_) => "mismatch",
         }
     }
 
@@ -672,7 +761,15 @@ pub async fn run(opts: AuditOptions) -> i32 {
             return 2;
         }
     };
-    let (findings, via) = if parsed.deps.is_empty() {
+    let mismatched: Vec<Finding> = parsed
+        .mismatches
+        .into_iter()
+        .map(|m| Finding {
+            dep: m.dep,
+            outcome: Outcome::Mismatch(m.message),
+        })
+        .collect();
+    let (mut findings, via) = if parsed.deps.is_empty() {
         (Vec::new(), "nothing to check".to_string())
     } else {
         let checker = match Checker::connect(&opts.server, &opts.local).await {
@@ -695,6 +792,7 @@ pub async fn run(opts: AuditOptions) -> i32 {
             checker.describe(),
         )
     };
+    findings.splice(0..0, mismatched);
     let report = Report {
         files,
         findings,
@@ -811,7 +909,11 @@ pub fn render_text(r: &Report, cwd: &Path) -> String {
         r.count("warn"),
         r.count("allow"),
     );
-    for (status, label) in [("unavailable", "unavailable"), ("failed", "failed")] {
+    for (status, label) in [
+        ("mismatch", "mismatched"),
+        ("unavailable", "unavailable"),
+        ("failed", "failed"),
+    ] {
         let n = r.count(status);
         if n > 0 {
             s.push_str(&format!(", {n} {label}"));
@@ -823,7 +925,7 @@ pub fn render_text(r: &Report, cwd: &Path) -> String {
     s.push('\n');
 
     let rank = |f: &Finding| match f.status() {
-        "block" => 0,
+        "mismatch" | "block" => 0,
         "warn" => 1,
         "unavailable" => 2,
         _ => 3,
@@ -840,7 +942,9 @@ pub fn render_text(r: &Report, cwd: &Path) -> String {
             .map(|f| {
                 let reason = match &f.outcome {
                     Outcome::Checked { verdict, .. } => verdict.headline(),
-                    Outcome::Unavailable(m) | Outcome::Failed(m) => m.clone(),
+                    Outcome::Unavailable(m) | Outcome::Failed(m) | Outcome::Mismatch(m) => {
+                        m.clone()
+                    }
                 };
                 [
                     f.status().to_uppercase(),
@@ -896,10 +1000,13 @@ pub fn render_json(r: &Report, cwd: &Path) -> Value {
                 "line": f.dep.line,
                 "status": f.status(),
                 "risk": v.and_then(|v| v.risk),
-                "reason": v.map(Verdict::headline),
+                "reason": match &f.outcome {
+                    Outcome::Mismatch(m) => Some(m.clone()),
+                    _ => v.map(Verdict::headline),
+                },
                 "error": match &f.outcome {
                     Outcome::Unavailable(m) | Outcome::Failed(m) => Some(m.as_str()),
-                    Outcome::Checked { .. } => None,
+                    Outcome::Checked { .. } | Outcome::Mismatch(_) => None,
                 },
                 "verdict_url": match &f.outcome {
                     Outcome::Checked { url, .. } => url.as_deref(),
@@ -929,6 +1036,7 @@ pub fn render_json(r: &Report, cwd: &Path) -> Value {
             "block": r.count("block"),
             "warn": r.count("warn"),
             "allow": r.count("allow"),
+            "mismatch": r.count("mismatch"),
             "unavailable": r.count("unavailable"),
             "failed": r.count("failed"),
             "not_checked": r.skipped.len(),
@@ -1137,6 +1245,145 @@ pub(crate) mod tests {
         );
         assert_eq!(p.skipped.len(), 3);
         assert!(p.skipped[0].reason.contains("npm.corp.example"));
+    }
+
+    #[test]
+    fn tarball_identities() {
+        let id = |u: &str| tarball_identity(u);
+        let pair = |n: &str, v: &str| Some((n.to_string(), v.to_string()));
+        assert_eq!(
+            id("https://registry.npmjs.org/lodash/-/lodash-4.17.21.tgz"),
+            pair("lodash", "4.17.21")
+        );
+        assert_eq!(
+            id("https://registry.npmjs.org/@babel/core/-/core-7.24.0.tgz"),
+            pair("@babel/core", "7.24.0")
+        );
+        assert_eq!(
+            id("https://registry.yarnpkg.com/@babel/code-frame/-/code-frame-7.24.2.tgz#5a3f9"),
+            pair("@babel/code-frame", "7.24.2")
+        );
+        assert_eq!(
+            id("http://127.0.0.1:7878/npm/@types%2Fnode/-/node-20.11.30.tgz"),
+            pair("@types/node", "20.11.30")
+        );
+        assert_eq!(
+            id("https://registry.npmjs.org/a-b/-/a-b-1.0.0-rc.1.tgz"),
+            pair("a-b", "1.0.0-rc.1")
+        );
+        assert_eq!(id("https://registry.npmjs.org/lodash"), None);
+        assert_eq!(
+            id("https://registry.npmjs.org/lodash/-/evil-1.0.0.tgz"),
+            None
+        );
+        assert_eq!(id("https://registry.npmjs.org/lodash/-/lodash-.tgz"), None);
+    }
+
+    #[test]
+    fn resolved_url_must_match_the_entry() {
+        let f = Path::new("package-lock.json");
+        let mut p = Parsed::default();
+        // Another package's tarball under a trusted name: the tarball's package is checked.
+        npm_pin(
+            &mut p,
+            f,
+            1,
+            "lodash",
+            "4.17.21",
+            Some("https://registry.npmjs.org/evil-pkg/-/evil-pkg-1.0.0.tgz"),
+        );
+        // Same package, older version than recorded.
+        npm_pin(
+            &mut p,
+            f,
+            2,
+            "debug",
+            "4.3.4",
+            Some("https://registry.npmjs.org/debug/-/debug-2.6.8.tgz"),
+        );
+        // Registry host, but not a tarball URL: nothing to check, still a mismatch.
+        npm_pin(
+            &mut p,
+            f,
+            3,
+            "ms",
+            "2.1.2",
+            Some("https://registry.npmjs.org/ms"),
+        );
+        // Matching entries stay ordinary pins, scoped and percent-encoded ones included.
+        npm_pin(
+            &mut p,
+            f,
+            4,
+            "@types/node",
+            "20.11.30",
+            Some("http://localhost:7878/npm/@types%2fnode/-/node-20.11.30.tgz"),
+        );
+        npm_pin(
+            &mut p,
+            f,
+            5,
+            "alias",
+            "npm:chalk@2.4.2",
+            Some("https://registry.npmjs.org/chalk/-/chalk-2.4.2.tgz"),
+        );
+        assert_eq!(
+            pins(&p),
+            vec![
+                ("evil-pkg".into(), "1.0.0".into(), 1),
+                ("debug".into(), "2.6.8".into(), 2),
+                ("@types/node".into(), "20.11.30".into(), 4),
+                ("chalk".into(), "2.4.2".into(), 5),
+            ]
+        );
+        let m: Vec<(&str, &str, usize)> = p
+            .mismatches
+            .iter()
+            .map(|m| (m.dep.name.as_str(), m.dep.version.as_str(), m.dep.line))
+            .collect();
+        assert_eq!(
+            m,
+            vec![
+                ("lodash", "4.17.21", 1),
+                ("debug", "4.3.4", 2),
+                ("ms", "2.1.2", 3)
+            ]
+        );
+        assert_eq!(
+            p.mismatches[0].message,
+            "lockfile installs evil-pkg@1.0.0 from \
+             https://registry.npmjs.org/evil-pkg/-/evil-pkg-1.0.0.tgz, not lodash@4.17.21"
+        );
+        assert!(p.mismatches[2].message.contains("not a registry tarball"));
+        assert!(p.skipped.is_empty());
+    }
+
+    #[test]
+    fn mismatches_block_and_render() {
+        let cwd = Path::new("/work");
+        let report = Report {
+            files: vec![PathBuf::from("/work/package-lock.json")],
+            findings: vec![
+                finding("ok", 1, checked(verdict("ok", Decision::Allow, None))),
+                finding("lodash", 2, Outcome::Mismatch("lockfile installs x".into())),
+            ],
+            skipped: vec![],
+            via: "test".into(),
+        };
+        assert_eq!(report.exit_code(FailOn::Block), 1);
+        assert_eq!(report.exit_code(FailOn::Never), 0);
+        let t = render_text(&report, cwd);
+        assert!(
+            t.starts_with("Audited 2 packages from 1 lockfile (test): 0 block, 0 warn, 1 allow, 1 mismatched\n"),
+            "{t}"
+        );
+        assert!(t.contains("MISMATCH  -     pypi lodash 1.0.0"), "{t}");
+        assert!(t.trim_end().ends_with("lockfile installs x"), "{t}");
+        let j = render_json(&report, cwd);
+        assert_eq!(j["summary"]["mismatch"], 1);
+        assert_eq!(j["results"][1]["status"], "mismatch");
+        assert_eq!(j["results"][1]["reason"], "lockfile installs x");
+        assert!(j["results"][1]["error"].is_null());
     }
 
     #[test]

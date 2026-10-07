@@ -106,7 +106,8 @@ source to prompt-inject the agent reading the verdict. See [`hooks/README.md`](h
 
 **Lockfiles in CI.** `customs audit` checks every pin in `requirements.txt`, `poetry.lock`,
 `uv.lock`, `Pipfile.lock`, `package-lock.json`, `pnpm-lock.yaml` and `yarn.lock`, and can
-write SARIF 2.1.0 for GitHub code scanning. The composite action in [`action.yml`](action.yml)
+write SARIF 2.1.0 for GitHub code scanning. It also blocks npm lockfile injection: an entry
+whose `resolved` URL serves a different package than the name the diff shows. The composite action in [`action.yml`](action.yml)
 turns blocked dependencies into alerts on the lockfile line in the pull request:
 
 ```sh

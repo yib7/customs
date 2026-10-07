@@ -85,6 +85,12 @@ fn rule(id: &str) -> Rule {
             "This version adds a dependency first published days before it by accounts that do not maintain the package, or one the registry does not know. Hijacked releases pull in their payload this way.",
             "error",
         ),
+        "customs/lockfile-mismatch" => (
+            "LockfileResolvedMismatch",
+            "Lockfile installs a different package than it names",
+            "The lockfile entry's resolved URL is a registry tarball of another package or version, or not a tarball at all. npm installs from that URL, so the dependency named here is not the code that gets installed.",
+            "error",
+        ),
         "customs/unavailable" => (
             "UnavailableVersion",
             "Pinned version is not available on the registry",
@@ -201,6 +207,11 @@ fn describe(f: &Finding) -> Option<(String, &'static str, String)> {
             msg.push('.');
             Some((primary_rule(verdict), level(verdict.decision), msg))
         }
+        Outcome::Mismatch(m) => Some((
+            "customs/lockfile-mismatch".into(),
+            "error",
+            format!("{label}: {m}."),
+        )),
         Outcome::Unavailable(m) => Some((
             "customs/unavailable".into(),
             "warning",
@@ -348,6 +359,7 @@ mod tests {
                 ),
                 finding("gone", 7, Outcome::Unavailable("no version 1.0.0".into())),
                 finding("err", 8, Outcome::Failed("timeout".into())),
+                finding("swap", 9, Outcome::Mismatch("lockfile installs x".into())),
             ],
             skipped: vec![],
             via: "test".into(),
@@ -372,6 +384,7 @@ mod tests {
                 "customs/min-age",
                 "customs/future-rule",
                 "customs/unavailable",
+                "customs/lockfile-mismatch",
             ]
         );
         for r in rules {
@@ -389,7 +402,7 @@ mod tests {
         assert_eq!(rules[4]["name"], "FutureRule");
 
         let results = run["results"].as_array().unwrap();
-        assert_eq!(results.len(), 6, "allow and failed checks are not results");
+        assert_eq!(results.len(), 7, "allow and failed checks are not results");
         let expect = [
             ("customs/model-block", "error", 2, "evil"),
             ("customs/nonexistent-package", "error", 3, "nope"),
@@ -397,6 +410,7 @@ mod tests {
             ("customs/min-age", "warning", 5, "young"),
             ("customs/future-rule", "warning", 6, "odd"),
             ("customs/unavailable", "warning", 7, "gone"),
+            ("customs/lockfile-mismatch", "error", 9, "swap"),
         ];
         for (res, (rule, lvl, line, name)) in results.iter().zip(expect) {
             assert_eq!(res["ruleId"], rule);

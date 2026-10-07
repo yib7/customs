@@ -9,6 +9,8 @@ use super::{npm_pin, split_npm_spec, Parsed};
 pub(super) fn parse(text: &str, file: &Path, out: &mut Parsed) -> Result<(), String> {
     let mut in_packages = false;
     let mut entry_indent: Option<usize> = None;
+    // The entry being read: its line, key, and `resolution.tarball` once seen.
+    let mut pending: Option<(usize, String, Option<String>)> = None;
     for (i, raw) in text.lines().enumerate() {
         let trimmed = raw.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') {
@@ -16,6 +18,7 @@ pub(super) fn parse(text: &str, file: &Path, out: &mut Parsed) -> Result<(), Str
         }
         let indent = raw.len() - raw.trim_start().len();
         if indent == 0 {
+            flush(pending.take(), file, out);
             in_packages = trimmed == "packages:";
             entry_indent = None;
             continue;
@@ -24,24 +27,54 @@ pub(super) fn parse(text: &str, file: &Path, out: &mut Parsed) -> Result<(), Str
             continue;
         }
         let indent_of_entries = *entry_indent.get_or_insert(indent);
+        if indent > indent_of_entries {
+            if let (Some(p), Some(t)) = (pending.as_mut(), tarball(trimmed)) {
+                p.2 = Some(t);
+            }
+            continue;
+        }
         if indent != indent_of_entries {
             continue;
         }
-        let Some(key) = entry_key(trimmed) else {
-            continue;
-        };
-        let line = i + 1;
-        match split_key(&key) {
-            Some((name, version)) => npm_pin(out, file, line, name, version, None),
-            None => out.skip(
-                file,
-                line,
-                &key,
-                "not a registry package (git, URL, or local path)",
-            ),
+        flush(pending.take(), file, out);
+        if let Some(key) = entry_key(trimmed) {
+            pending = Some((i + 1, key, tarball(trimmed)));
         }
     }
+    flush(pending, file, out);
     Ok(())
+}
+
+fn flush(entry: Option<(usize, String, Option<String>)>, file: &Path, out: &mut Parsed) {
+    let Some((line, key, tarball)) = entry else {
+        return;
+    };
+    match split_key(&key) {
+        Some((name, version)) => npm_pin(out, file, line, name, version, tarball.as_deref()),
+        None => out.skip(
+            file,
+            line,
+            &key,
+            "not a registry package (git, URL, or local path)",
+        ),
+    }
+}
+
+/// The URL in `tarball: URL` (inline `resolution: {integrity: ..., tarball: URL}` or on
+/// its own line). pnpm downloads from it when present, so it is checked like npm's
+/// `resolved`.
+fn tarball(line: &str) -> Option<String> {
+    if !(line.starts_with("resolution:") || line.starts_with("tarball:")) {
+        return None;
+    }
+    let rest = &line[line.find("tarball:")? + "tarball:".len()..];
+    let url = rest
+        .trim_start()
+        .split([',', '}'])
+        .next()?
+        .trim()
+        .trim_matches(|c| c == '\'' || c == '"');
+    url.contains("://").then(|| url.to_string())
 }
 
 /// The map key on an entry line: `/a@1.0.0:`, `'@s/a@1.0.0':`, `a@1.0.0: {}`.
@@ -180,7 +213,43 @@ packages:
             ]
         );
         assert_eq!(p.skipped.len(), 1);
+        assert!(p.mismatches.is_empty());
         assert_eq!(p.skipped[0].line, 35);
+    }
+
+    #[test]
+    fn pnpm_tarball_is_checked() {
+        let lock = "\
+lockfileVersion: '9.0'
+
+packages:
+
+  lodash@4.17.21:
+    resolution: {integrity: sha512-AAAA, tarball: https://registry.npmjs.org/evil/-/evil-2.0.0.tgz}
+
+  ms@2.1.2:
+    resolution:
+      integrity: sha512-BBBB
+      tarball: 'https://registry.npmjs.org/ms/-/ms-2.1.2.tgz'
+    dependencies:
+      tarball: 1.0.0
+
+  internal@1.0.0:
+    resolution: {integrity: sha512-CCCC, tarball: https://npm.corp.example/internal/-/internal-1.0.0.tgz}
+";
+        let mut p = Parsed::default();
+        parse(lock, Path::new("pnpm-lock.yaml"), &mut p).unwrap();
+        assert_eq!(
+            pins(&p),
+            vec![
+                ("evil".into(), "2.0.0".into(), 5),
+                ("ms".into(), "2.1.2".into(), 8),
+            ]
+        );
+        assert_eq!(p.mismatches.len(), 1);
+        assert_eq!(p.mismatches[0].dep.name, "lodash");
+        assert_eq!(p.skipped.len(), 1);
+        assert!(p.skipped[0].reason.contains("npm.corp.example"));
     }
 
     #[test]
