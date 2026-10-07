@@ -85,6 +85,7 @@ def run_seed(df: pd.DataFrame, seed: int, scheme: str = SCHEME) -> dict:
     g = gbdt.predict_raw(best, df[cols].to_numpy(dtype=float))
     cfg = cnn.Config(seed=seed, max_len=768, epochs=10, patience=3)
     _, _, c, _, _ = _fit_cnn(df, split, cfg)
+    np.savez_compressed(work() / f"seed_logits_{seed}.npz", gbdt=g, cnn=c)
     d = df.copy(deep=False)
     d[f"gbdt_logit_{scheme}"] = g
     d[f"cnn_logit_{scheme}"] = c
@@ -97,6 +98,17 @@ def run_seed(df: pd.DataFrame, seed: int, scheme: str = SCHEME) -> dict:
         "thresholds": thr,
         "test": test_metrics(d, risk, thr, scheme),
     }
+
+
+def bagged(df: pd.DataFrame, seeds: list[int], scheme: str = SCHEME) -> dict:
+    """Average the saved gbdt and CNN logits of several seeds, then stack as usual."""
+    z = [np.load(work() / f"seed_logits_{s}.npz") for s in seeds]
+    d = df.copy(deep=False)
+    d[f"gbdt_logit_{scheme}"] = np.mean([x["gbdt"] for x in z], axis=0)
+    d[f"cnn_logit_{scheme}"] = np.mean([x["cnn"] for x in z], axis=0)
+    ens, risk = fit_ensemble(d, scheme)
+    thr = {"warn": ens["thresholds"]["warn"], "block": ens["thresholds"]["block"]}
+    return {"seeds": seeds, "test": test_metrics(d, risk, thr, scheme)}
 
 
 def summarize_runs(runs: list[dict]) -> dict:
