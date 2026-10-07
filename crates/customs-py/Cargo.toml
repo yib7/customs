@@ -8,6 +8,15 @@ publish = false
 [lib]
 name = "customs_scan"
 crate-type = ["cdylib", "rlib"]
+# Test binaries would need to link libpython; the bindings are exercised from Python.
+test = false
+doctest = false
 
 [dependencies]
 customs-scan = { path = "../customs-scan" }
+pyo3.workspace = true
+serde_json.workspace = true
+
+[features]
+# Enabled by maturin (see pyproject.toml) so the extension does not link libpython.
+extension-module = ["pyo3/extension-module"]

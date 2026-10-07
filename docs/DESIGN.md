@@ -92,6 +92,29 @@ Every indicator is counted on two surfaces and emitted with a prefix:
 - `all_`: every source file in the archive (`.py`, `.js`, `.mjs`, `.cjs`, `.ts`, `.sh`,
   `.bat`, `.ps1`, `.cmd`).
 
+Implementation details (`customs-scan`, schema 1):
+
+- PyPI install surface, in order: `setup.py`; `setup.cfg` `cmdclass` targets
+  (`install = pkg.mod.Cls` resolves `pkg/mod.py`, `pkg/mod/__init__.py`, or the same under
+  `src/`); an in-tree PEP 517 backend (`pyproject.toml` `build-system.backend-path`), which
+  runs during the build; `<pkg>/__init__.py` and `src/<pkg>/__init__.py` for every directory
+  one level below the root (or below `src/`), sorted; every `*.pth` file at any depth, sorted.
+  Wheels use the same rules (their root is site-packages).
+- npm install surface, in order: for each hook in the order `preinstall, install,
+  postinstall, preprepare, prepare, postprepare`, the command string itself (a shell unit
+  named `package.json:scripts.<hook>`), inline code it runs (`node -e`/`--eval`/`-p`,
+  `sh|bash -c`, `python -c`, `powershell -Command`, analyzed in that language under the same
+  name), and files it runs (`node [flags] x`, `node -r x`, `sh x.sh`, `python x.py`,
+  `powershell -File x`, `./x`), resolved like Node (`x`, `x.js`, `x.cjs`, `x.mjs`,
+  `x/index.js`). From those files and from inline JavaScript, relative `require`/`import`
+  specifiers are followed two levels deep (at most 32 files), so moving a payload into a
+  helper module keeps it on the install surface. Then `main`. `.json` targets are never code.
+- `all_` is every source file (including files inside nested archives, see 4.7) plus every
+  install-surface unit, so `all_<x> >= inst_<x>` always holds and npm script commands count
+  on both surfaces.
+- Each file is analyzed once; a unit is in `install_surface` (report field) in the order
+  above, without duplicates.
+
 ### 4.2 Indicator families (each emitted as `inst_<x>` and `all_<x>` counts)
 
 | Indicator | Meaning (Python and JavaScript patterns) |
@@ -111,6 +134,36 @@ Every indicator is counted on two surfaces and emitted with a prefix:
 | `file_write` | `open(... 'w'|'wb'|'a')`, `fs.writeFile*`, `fs.createWriteStream`, `shutil.copy*`, `os.chmod` |
 | `crypto_wallet` | `bitcoin`, `ethereum`, `metamask`, `exodus`, `electrum`, wallet address regexes |
 
+How indicators are counted (`customs-scan`, schema 1):
+
+- Python and JavaScript are tokenized by a hand-written lexer that drops comments and
+  separates identifiers, string literals (template literal chunks and `${...}` code are
+  split), regex literals, numbers and punctuation. Call and module patterns (`os.system`,
+  `eval(`, `require('child_process')`) match tokens only, so a name in a comment never
+  counts and a name inside a string never counts as a call. Python module names
+  (`requests`, `socket`, ...) count when imported or dereferenced (`x.`), not when used as a
+  plain variable. JavaScript `exec(`/`spawn(`/`fork(` count only in files that reference
+  `child_process`. Method calls (`re.compile`, `cursor.exec`) and `def`s do not count.
+- String-content patterns (`secret_paths`, `persistence`, `recon` command names,
+  `download_exec`, `exfil_endpoint`, `ip_url`, `url`, `crypto_wallet` words, and
+  `curl`/`wget` as `network`) are regexes over string literal contents. Shell files and npm
+  script commands are matched as whole comment-stripped text, with extra shell rules:
+  `nc`/`ncat`/`netcat`/`irm`/`scp`/`ftp`/`telnet` (network), `sh -c`/`cmd /c`/`powershell`/
+  `nohup` (proc_exec), `eval`/`iex`/`node -e`/`python -c` (dyn_code), `$env:`/`printenv`/
+  `%VAR%` (env_access), redirection to a file (not `/dev/null`), `chmod`, `tee`,
+  `Set-Content`, `Out-File` (file_write).
+- Every match counts once (counts, not booleans). Additions to the table: `exfil_endpoint`
+  also matches `interactsh`, `pipedream.com`, `dnslog.cn`, `ceye.io`, `hookbin.com`,
+  `canarytokens`; `secret_paths` also matches `id_dsa|id_ecdsa|id_ed25519`, `.bash_profile`
+  is `persistence`, and `decode_obf` also matches `base64 -d`, `FromBase64String`, `xxd -r`
+  and zlib/gzip/lzma/bz2 decompression in both languages.
+- `secret_paths` does not count `discord` when it is part of a `discord.com`/`discordapp.com`
+  host (that is an `exfil_endpoint`). `ip_url` excludes loopback (`127.0.0.0/8`) and
+  `0.0.0.0`. Wallet address regexes (BTC base58 and bech32, ETH `0x` + 40 hex, TRON) apply to
+  whole string literals only.
+- `download_exec` additionally counts once per Python/JavaScript file that has `network`,
+  `file_write` and `proc_exec` all nonzero (fetch, write, run).
+
 ### 4.3 Structural and obfuscation features (no prefix unless stated)
 
 `n_files`, `total_bytes`, `max_file_bytes`, `n_py`, `n_js`, `n_shell` (sh, bat, ps1, cmd),
@@ -123,12 +176,39 @@ over 500), `has_setup_py`, `has_pyproject`, `has_package_json`, `n_npm_install_s
 length over 30 with high entropy, over all identifiers), `inst_nonascii_ratio`,
 `inst_long_line_ratio` (lines over 1000 chars over all lines).
 
+Added in implementation (still schema 1): `inst_n_files` (number of install-surface units),
+`n_links` (symlink and hardlink entries skipped), `n_unsafe_paths` (absolute or `..` entries
+skipped).
+
+Definitions: file counts include every regular file, nested-archive entries too
+(`n_js` counts `.js .mjs .cjs .ts`; `n_minified_js` only `.js .mjs .cjs`); `n_hidden` counts
+files with any path component starting with `.`; `has_*` look at the package root only.
+Line lengths are in bytes. String entropy is Shannon entropy in bits per byte over string
+literals of at least 20 bytes (shell: quoted strings); the mean is over all such strings on
+the surface. `longest_b64_run` is the longest run of `[A-Za-z0-9+/=_-]` inside a string
+literal (shell: quoted strings and words). `hex_escape_count` counts `\xNN`, `\uNNNN` and
+`\u{...}` in the raw text. "High entropy" for identifiers means above 4.3 bits per byte.
+Ratios are 0 when the denominator is 0.
+
+Feature order (`feature_names()`, 70 names): the 14 `inst_<indicator>` in table order, the
+14 `all_<indicator>`, then the 28 features above in the order listed, then `inst_n_files`,
+`n_links`, `n_unsafe_paths`, then the 11 manifest features in the order listed in 4.4.
+
 ### 4.4 Manifest features
 
 `meta_desc_len`, `meta_has_homepage`, `meta_has_repo`, `meta_has_author_email`,
 `meta_has_license`, `meta_n_deps`, `meta_readme_bytes`, `meta_version_major`,
 `meta_version_is_zero` (0.0.0 or 0.0.1 style), `meta_version_huge` (major at least 90, a
 dependency-confusion tell), `meta_n_keywords`.
+
+Sources: npm `package.json`; PyPI `PKG-INFO` or `*.dist-info/METADATA`, then
+`pyproject.toml` (`[project]`, `[tool.poetry]`), `setup.cfg`, then literal keyword arguments
+of `setup(...)` in `setup.py`; each field takes the first source that has it. Details:
+`meta_desc_len` is the character length of `Summary` (PyPI) or `description` (npm);
+`meta_n_deps` counts `Requires-Dist` without an `extra ==` marker (npm: `dependencies`);
+`meta_readme_bytes` is the size of a root `README*` file, else the long description length;
+`meta_version_is_zero` means major 0 and minor 0; unparsable versions give 0 for all
+version features.
 
 Features never include the package name or registry metadata (age, downloads). Those are
 unavailable for removed malicious packages and would leak the label. Name signals live in
@@ -143,6 +223,64 @@ Levenshtein to the top-N popular names, excluding exact matches), `nearest_popul
 with extra tokens), `scope_squat` (npm scope differs from a popular scoped package),
 `char_ngram_score` (logistic model over hashed character 1 to 4 grams), `keyboard_typo`
 (edit is an adjacent-key substitution).
+
+### 4.6 Token stream (`tokens`, input of the code neural network)
+
+Produced only on request (`--tokens`, `tokens=True`). Rules, which training consumes
+verbatim (changing them requires a schema version bump):
+
+1. Install-surface units are visited in `install_surface` order (inline code right after
+   its script command). Each unit starts with the marker token `<file>`.
+2. Comments and Python newline markers produce no tokens.
+3. Python and JavaScript identifiers are lowercased (`Popen` becomes `popen`).
+4. String literals and JavaScript regex literals become `<str>`, except when the content is
+   1 to 24 bytes and only ASCII letters, digits and `_ - . : / @`: then the lowercased
+   content is kept without quotes (`'child_process'` becomes `child_process`,
+   `"discord.com"` stays `discord.com`). Template literal chunks are separate strings.
+5. Numbers become `<num>`.
+6. Punctuation is kept verbatim; multi-character operators are single tokens (`==`, `=>`,
+   `**`, `...`, `?.`, `//` in Python).
+7. Shell units (npm script commands, `.sh .bat .ps1 .cmd`): words follow rule 4, quoted
+   strings follow rule 4, operators (`|`, `||`, `&&`, `;`, `>`, `>>`, `(`, `)`) are kept.
+8. The stream is truncated at 4096 tokens in total.
+
+### 4.7 Archive handling
+
+Formats are detected from content, not the file name: gzip and bzip2 tarballs, plain tar,
+zip (sdist `.zip`, wheels). Defaults: 20,000 entries, 32 MiB per entry (larger entries are
+counted with their declared size but not analyzed), 256 MiB decompressed in total, a
+compression ratio of 250 (checked once 1 MiB has been decompressed), and one level of
+nested archives (`.zip .whl .tar.gz .tgz .tar.bz2 .tar .egg` inside the package are expanded
+into `outer!/inner` paths that count toward `all_` and the structural features only).
+Exceeding the entry, total or ratio cap rejects the archive; unsafe and link entries are
+skipped and counted. Only content needed for analysis is kept in memory (source, manifest,
+README and nested-archive entries in full, a short magic-number prefix otherwise).
+
+Root normalization: top-level directories are stripped while the current level holds
+exactly one directory and nothing besides sidecar `*.json` files (other than
+`package.json`), stopping at a level that has `package.json`, `PKG-INFO`, `setup.py`,
+`setup.cfg`, `pyproject.toml` or a `*.dist-info/` directory. This removes `name-version/`
+from sdists, `package/` from npm tarballs, and the wrapper directories and
+`package_info-*.json` sidecars of sample collections such as the Datadog dataset
+(`tmp/tmpXXXX/name/name-version/`). Paths whose trailing components repeat
+(`pkg/mod.py/pkg/mod.py`, an artifact of re-extracted wheels in that dataset) collapse to
+`pkg/mod.py`. Ecosystem detection: an explicit argument wins; otherwise a stripped
+`package/` with `package.json` is npm; `PKG-INFO`, `setup.py`, `pyproject.toml`, `setup.cfg`
+or `*.dist-info/METADATA` at the root is PyPI; a root `package.json` is npm; then the file
+name decides (`.tgz` npm; `.whl .tar.gz .zip .tar.bz2` PyPI). Name and version come from the
+manifest, else from the file name (`name-1.0.tar.gz`, wheel tags, and dated sample names
+`YYYY-MM-DD-name-v1.0.zip`).
+
+Evidence: at most `max_evidence` (default 50) items; install-surface hits first, and within
+each surface one hit per indicator in turn, most telling first (`download_exec`,
+`exfil_endpoint`, `dyn_code`, `decode_obf`, `proc_exec`, `secret_paths`, `persistence`,
+`ip_url`, `network`, `recon`, `env_access`, `crypto_wallet`, `file_write`, `url`). `line` is
+1-based (for npm script units, the line of the script key in `package.json`); `snippet` is
+the trimmed source line cut to 160 characters.
+
+CLI batch mode (`customs-scan batch --input paths.txt --output out.jsonl [--tokens]
+[--jobs N]`) writes one line per input path in input order: the report plus a `path` field,
+or `{"archive": "<path>", "error": "<message>"}` when that archive fails.
 
 ## 5. Model artifacts (`models/`)
 

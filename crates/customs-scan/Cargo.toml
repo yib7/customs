@@ -5,8 +5,24 @@ edition.workspace = true
 license.workspace = true
 description = "Safe archive unpacking and static feature extraction for package malware detection"
 
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "customs-scan"
+path = "src/bin/customs_scan.rs"
+
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
+tar.workspace = true
+flate2.workspace = true
+bzip2.workspace = true
+zip.workspace = true
+sha2.workspace = true
+regex.workspace = true
+toml.workspace = true
+clap.workspace = true
+rayon.workspace = true
