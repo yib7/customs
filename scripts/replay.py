@@ -22,6 +22,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -230,6 +231,9 @@ def main() -> None:
     finally:
         if not args.keep:
             server.terminate()
+            server.wait(timeout=30)
+            # The firewall's artifact cache holds every replayed archive.
+            shutil.rmtree(work, ignore_errors=True)
         fake.shutdown()
 
 

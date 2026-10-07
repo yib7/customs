@@ -198,6 +198,9 @@ const FEATURE_NAMES: &[&str] = &[
     "all_hidden_ws_lines",
     "inst_exec_decoded",
     "all_exec_decoded",
+    "inst_max_file_kinds",
+    "all_max_file_kinds",
+    "all_top_file_share",
     "inst_n_files",
     "n_links",
     "n_unsafe_paths",
@@ -819,6 +822,12 @@ impl<'a> Scanner<'a> {
         set("all_hidden_ws_lines", all.hidden_ws as f64);
         set("inst_exec_decoded", inst.exec_decoded as f64);
         set("all_exec_decoded", all.exec_decoded as f64);
+        set("inst_max_file_kinds", inst.max_file_kinds as f64);
+        set("all_max_file_kinds", all.max_file_kinds as f64);
+        set(
+            "all_top_file_share",
+            ratio(all.top_file_hits as f64, all.behavior_hits as f64),
+        );
         set(
             "inst_n_files",
             self.units.iter().filter(|u| u.inst).count() as f64,
@@ -1027,7 +1036,29 @@ struct Agg {
     obf: u64,
     hidden_ws: u64,
     exec_decoded: u64,
+    /// Most distinct behavior kinds (`BEHAVIOR`) seen together in one file.
+    max_file_kinds: u64,
+    /// Behavior hits in the file that has the most of them.
+    top_file_hits: u64,
+    behavior_hits: u64,
 }
+
+/// Indicators that describe what code does. `url` and `file_write` are left out: nearly
+/// every library has them, so they say little about where a payload sits.
+const BEHAVIOR: [usize; 12] = [
+    indicators::PROC_EXEC,
+    indicators::DYN_CODE,
+    indicators::NETWORK,
+    indicators::DECODE_OBF,
+    indicators::ENV_ACCESS,
+    indicators::SECRET_PATHS,
+    indicators::PERSISTENCE,
+    indicators::RECON,
+    indicators::DOWNLOAD_EXEC,
+    indicators::EXFIL_ENDPOINT,
+    indicators::IP_URL,
+    indicators::CRYPTO_WALLET,
+];
 
 impl Agg {
     fn over<'x>(it: impl Iterator<Item = &'x FileAnalysis>) -> Self {
@@ -1051,6 +1082,11 @@ impl Agg {
             g.obf += a.n_obf_idents;
             g.hidden_ws += a.hidden_ws_lines;
             g.exec_decoded += a.exec_decoded_lines;
+            let kinds = BEHAVIOR.iter().filter(|&&k| a.counts[k] > 0).count() as u64;
+            let hits: u64 = BEHAVIOR.iter().map(|&k| a.counts[k] as u64).sum();
+            g.max_file_kinds = g.max_file_kinds.max(kinds);
+            g.top_file_hits = g.top_file_hits.max(hits);
+            g.behavior_hits += hits;
         }
         g
     }

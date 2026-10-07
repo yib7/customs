@@ -386,3 +386,41 @@ fn features_do_not_depend_on_the_archive_file_name() {
     let b = scan_archive(&tgz, "0123abcd.tar.gz", Some(Ecosystem::Pypi), &opts).unwrap();
     assert_eq!(a.features, b.features);
 }
+
+#[test]
+fn behavior_concentrated_in_one_file() {
+    // Payload: process, network and environment access together in one module.
+    let packed = tar_gz_files(&[
+        ("lib-1.0/setup.py", "from setuptools import setup\nsetup(name='lib')\n"),
+        (
+            "lib-1.0/lib/x.py",
+            "import os, subprocess, socket\nk = os.environ['AWS_SECRET_ACCESS_KEY']\nsubprocess.run(['id'])\nsocket.create_connection(('1.2.3.4', 80))\n",
+        ),
+        ("lib-1.0/lib/y.py", "import json\n"),
+    ]);
+    let r = scan(&packed, "lib-1.0.tar.gz");
+    assert!(r.features["all_max_file_kinds"] >= 3.0);
+    assert_eq!(r.features["all_top_file_share"], 1.0);
+    // Off the install surface, so the install-time variant stays at 0.
+    assert_eq!(r.features["inst_max_file_kinds"], 0.0);
+
+    // The same behaviors spread one per file.
+    let spread = tar_gz_files(&[
+        (
+            "lib-1.0/setup.py",
+            "from setuptools import setup\nsetup(name='lib')\n",
+        ),
+        (
+            "lib-1.0/lib/a.py",
+            "import subprocess\nsubprocess.run(['id'])\n",
+        ),
+        (
+            "lib-1.0/lib/b.py",
+            "import socket\nsocket.create_connection(('h', 80))\n",
+        ),
+        ("lib-1.0/lib/c.py", "import os\nk = os.environ['HOME']\n"),
+    ]);
+    let r = scan(&spread, "lib-1.0.tar.gz");
+    assert_eq!(r.features["all_max_file_kinds"], 1.0);
+    assert!(r.features["all_top_file_share"] < 0.5);
+}

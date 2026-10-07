@@ -196,7 +196,13 @@ skipped). Added after the MalRegistry error analysis (section 10.1):
 more spaces or tabs (code pushed past the right edge of an editor or diff view; evidence
 snippets show such a line as `head [N blank columns] hidden code`), and
 `inst_exec_decoded`/`all_exec_decoded`, lines holding both a `dyn_code` and a `decode_obf`
-hit (`exec(b64decode(...))` on one line).
+hit (`exec(b64decode(...))` on one line). Added for compromised releases of large
+libraries, where a payload is a small share of the code: `inst_max_file_kinds` and
+`all_max_file_kinds`, the most distinct behavior indicators (every indicator except `url`
+and `file_write`) present together in a single file, and `all_top_file_share`, the share of
+all behavior hits that sit in the file with the most of them. An injected payload packs
+network, process, decoding and secret access into one file; a large benign library
+spreads the same indicators thinly across many.
 
 Definitions: file counts include every regular file, nested-archive entries too
 (`n_js` counts `.js .mjs .cjs .ts`; `n_minified_js` only `.js .mjs .cjs`); `n_hidden` counts
@@ -208,10 +214,10 @@ literal (shell: quoted strings and words). `hex_escape_count` counts `\xNN`, `\u
 `\u{...}` in the raw text. "High entropy" for identifiers means above 4.3 bits per byte.
 Ratios are 0 when the denominator is 0.
 
-Feature order (`feature_names()`, 74 names): the 14 `inst_<indicator>` in table order, the
+Feature order (`feature_names()`, 77 names): the 14 `inst_<indicator>` in table order, the
 14 `all_<indicator>`, then the 28 features above in the order listed, then
 `inst_hidden_ws_lines`, `all_hidden_ws_lines`, `inst_exec_decoded`, `all_exec_decoded`,
-`inst_n_files`, `n_links`, `n_unsafe_paths`, then the 11 manifest features in the order
+`inst_max_file_kinds`, `all_max_file_kinds`, `all_top_file_share`, `inst_n_files`, `n_links`, `n_unsafe_paths`, then the 11 manifest features in the order
 listed in 4.4. Models bind features by name, so adding features never breaks an older model
 file.
 

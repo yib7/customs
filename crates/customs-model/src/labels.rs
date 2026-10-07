@@ -95,6 +95,18 @@ const OTHER: &[(&str, &str)] = &[
         "Install-time code runs decoded data on the same line",
     ),
     ("all_exec_decoded", "Runs decoded data on the same line"),
+    (
+        "inst_max_file_kinds",
+        "Most kinds of risky behavior in one install-time file",
+    ),
+    (
+        "all_max_file_kinds",
+        "Most kinds of risky behavior in one file",
+    ),
+    (
+        "all_top_file_share",
+        "Share of risky behavior in the busiest file",
+    ),
     ("meta_desc_len", "Length of the package description"),
     ("meta_has_homepage", "Declares a homepage"),
     ("meta_has_repo", "Declares a source repository"),

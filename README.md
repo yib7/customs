@@ -49,7 +49,7 @@ flowchart LR
     subgraph P[customs binary, Rust]
       direction TB
       R[registry proxy<br/>PyPI simple + npm] --> POL[policy engine<br/>age, nonexistent names,<br/>allow / deny]
-      POL --> S[scanner<br/>safe unpack, 74 static features,<br/>install-time token stream]
+      POL --> S[scanner<br/>safe unpack, 77 static features,<br/>install-time token stream]
       S --> M[models<br/>gradient-boosted trees, code CNN,<br/>name model, stacked + calibrated]
     end
     P -->|allowed archives| A
@@ -61,7 +61,7 @@ flowchart LR
   zip-bomb, traversal and symlink defenses; a hand-written lexer for Python, JavaScript
   and shell finds what the code does at install and import time (process execution,
   network calls, credential paths, exfiltration endpoints, obfuscation, persistence) and
-  emits 74 features plus a normalized token stream. Training and serving call this same
+  emits 77 features plus a normalized token stream. Training and serving call this same
   code, so there is no train/serve skew.
 * **Models** (`python/customs_ml`, inference in `crates/customs-model`): a LightGBM model over
   the features, a 1D CNN (PyTorch) over install-time tokens, and a package-name model for

@@ -122,7 +122,24 @@ def stage_augment(
         for eco in ("pypi", "npm")
     }
     tmp = config.sub("augment_tmp")
-    paths, meta = [], []
+    paths, meta, rows = [], [], []
+
+    def flush() -> None:
+        # Scan and delete in batches, so disk use stays at one batch of archives.
+        reports = features.scan_paths(paths, tokens=True)
+        for (idx, tname), rep, p in zip(meta, reports, paths, strict=True):
+            Path(p).unlink(missing_ok=True)
+            if "features" not in rep:
+                continue
+            base = df.loc[idx].to_dict()
+            base.update({f"f_{k}": v for k, v in rep["features"].items()})
+            base["tokens"] = rep.get("tokens") or []
+            base["augmented"] = tname
+            base["canonical_path"] = ""
+            rows.append(base)
+        paths.clear()
+        meta.clear()
+
     for i, row in enumerate(src.itertuples()):
         d = donors[row.ecosystem]
         donor_row = d.iloc[int(rng.integers(0, len(d)))]
@@ -142,18 +159,10 @@ def stage_augment(
         out.write_bytes(blob)
         paths.append(str(out))
         meta.append((row.Index, tname))
-    reports = features.scan_paths(paths, tokens=True)
-    rows = []
-    for (idx, tname), rep, p in zip(meta, reports, paths, strict=True):
-        Path(p).unlink(missing_ok=True)
-        if "features" not in rep:
-            continue
-        base = df.loc[idx].to_dict()
-        base.update({f"f_{k}": v for k, v in rep["features"].items()})
-        base["tokens"] = rep.get("tokens") or []
-        base["augmented"] = tname
-        base["canonical_path"] = ""
-        rows.append(base)
+        if len(paths) >= 500:
+            flush()
+    if paths:
+        flush()
     aug = pd.DataFrame(rows)
     df["augmented"] = None
     out = pd.concat([df, aug], ignore_index=True)
