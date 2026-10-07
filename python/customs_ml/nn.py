@@ -54,11 +54,17 @@ class Config:
 
 def build_vocab(docs: Sequence[Sequence[str]], cfg: Config) -> dict[str, int]:
     """Vocabulary by document frequency, so a token repeated 1,000 times in one file
-    does not outrank a token used once in many packages."""
+    does not outrank a token used once in many packages.
+
+    Ties break by token. ``Counter.most_common`` would break them by insertion order, which
+    follows ``set`` iteration and so changes with each process's string hash seed: the
+    same data and seed then gave a different vocabulary, and a different model, per run.
+    """
     df = Counter()
     for d in docs:
         df.update(set(d[: cfg.max_len]))
-    common = [t for t, c in df.most_common(cfg.vocab_size - 2) if c >= cfg.min_df]
+    ranked = sorted(df.items(), key=lambda tc: (-tc[1], tc[0]))[: cfg.vocab_size - 2]
+    common = [t for t, c in ranked if c >= cfg.min_df]
     vocab = {"<pad>": PAD, "<unk>": UNK}
     for t in common:
         vocab[t] = len(vocab)

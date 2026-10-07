@@ -67,3 +67,28 @@ def test_batched_scores_equal_single_document_scores():
     batched = cnn.predict_logits(model, cnn.encode(docs, vocab, cfg.max_len), batch=6)
     for d, b in zip(docs, batched, strict=True):
         assert abs(cnn.numpy_forward(exported, d) - b) < 1e-4
+
+
+def test_vocab_does_not_depend_on_hash_seed():
+    # Equal document frequencies everywhere: the cut and the ids must come from the tokens,
+    # not from set iteration order, which changes with PYTHONHASHSEED.
+    import subprocess
+    import sys
+
+    code = (
+        "from customs_ml import nn as cnn\n"
+        "docs = [[f't{i}' for i in range(200)] for _ in range(3)]\n"
+        "cfg = cnn.Config(vocab_size=52, min_df=1)\n"
+        "print(sorted(cnn.build_vocab(docs, cfg).items(), key=lambda kv: kv[1]))\n"
+    )
+    outs = {
+        subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            check=True,
+            env={**__import__("os").environ, "PYTHONHASHSEED": seed},
+        ).stdout
+        for seed in ("1", "2", "3")
+    }
+    assert len(outs) == 1
