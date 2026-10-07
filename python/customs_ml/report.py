@@ -714,7 +714,10 @@ def render(scheme: str = SCHEME) -> str:
             f"({pct(isa['low'], 2)}, under the block budget of 0.1%) and on at least "
             f"{pct(hc['rules']['install_script_added']['low'])} of compromised ones, because "
             "the classic takeover adds a `postinstall` and established packages rarely change "
-            "theirs. It therefore blocks by default. `publisher_changed` is the noisiest rule "
+            "theirs. It compares with the previous release and, when that shows no change, "
+            "with the newest release at least a day older: attackers often publish several "
+            "malicious versions within hours, and each one matches the one before it. It "
+            "therefore blocks by default. `publisher_changed` is the noisiest rule "
             f"on by default ({pct(hb['rules']['publisher_changed']['low'], 2)} of releases; "
             f"{pct(hb['packages_with_alarm']['publisher_changed'])} of packages over the "
             "window, since large projects rotate release managers), and its value on "
@@ -751,6 +754,31 @@ def render(scheme: str = SCHEME) -> str:
                     "dependencies that are gone from the registry today). "
                 )
                 + "Both block by default.\n"
+            )
+        fams = hc.get("families_test")
+        if fams:
+            add(
+                "Takeovers come in waves, one attacker working through every package a stolen "
+                "account or token can publish. Grouping the test-period releases by npm scope, "
+                "or by name prefix for unscoped packages, shows which waves each layer stops "
+                "(groups of at least 3 releases; blocked means under the default policy):\n"
+            )
+            add(
+                "| Group | Releases | Packages | Model blocks | A blocking rule fires "
+                "| Blocked |\n|---|---:|---:|---:|---:|---:|"
+            )
+            for f in fams:
+                add(
+                    f"| `{f['family']}` | {f['n']} | {f['packages']} | {f['model_block']} | "
+                    f"{f['rules_block']} | {f['block_with_rules']} |"
+                )
+            add(
+                "\nThe model and the rules fail in different places: a wave that ships its "
+                "payload in the archive is the model's to catch, and a wave that pulls it in "
+                "through a new install script or dependency is the rules'. A wave with neither "
+                "(an obfuscated payload in a file the install surface does not reach, published "
+                "by the usual account with no change to scripts or dependencies) gets past "
+                "both.\n"
             )
         par = _load("history_parity.json")
         if par:

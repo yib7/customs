@@ -92,7 +92,15 @@ Every indicator is counted on two surfaces and emitted with a prefix:
   (`npm run setup`, `pnpm run setup`, `yarn setup`, `bun run setup`, `run-s a b`; up to
   three levels and 16 scripts), and the `main` entry file (default `index.js`). Before this
   was followed, a hook such as `bun run index.js` put a file named `run` on the surface and
-  missed `index.js`, and `postinstall: npm run setup` hid whatever `setup` runs.
+  missed `index.js`, and `postinstall: npm run setup` hid whatever `setup` runs. A root
+  `binding.gyp` counts too: npm installs a package that has one and no `install` or
+  `preinstall` hook (and no `"gypfile": false`) by running `node-gyp rebuild`, and node-gyp
+  runs every command in the file's `<!(...)` and `<!@(...)` expansions while configuring, so
+  those commands, and the files they reference, join the surface whenever the implicit
+  build or an install hook that mentions gyp applies. The 2026 autotel and awaitly
+  takeovers used exactly this: `"sources": ["<!(node index.js > /dev/null 2>&1 && echo
+  stub.c)"]` beside a 4.5 MB obfuscated `index.js`, with no install script in
+  `package.json`.
 - `all_`: every source file in the archive (`.py`, `.js`, `.mjs`, `.cjs`, `.ts`, `.sh`,
   `.bat`, `.ps1`, `.cmd`).
 
@@ -102,7 +110,11 @@ Implementation details (`customs-scan`, schema 1):
   (`install = pkg.mod.Cls` resolves `pkg/mod.py`, `pkg/mod/__init__.py`, or the same under
   `src/`); an in-tree PEP 517 backend (`pyproject.toml` `build-system.backend-path`), which
   runs during the build; `<pkg>/__init__.py` and `src/<pkg>/__init__.py` for every directory
-  one level below the root (or below `src/`), sorted; every `*.pth` file at any depth, sorted.
+  one level below the root (or below `src/`), sorted, plus, for a namespace package (a
+  directory with no `__init__.py` of its own, such as `mistralai/` in mistralai 2.x), the
+  `__init__.py` of each subpackage one level further down (at most 8, skipping `tests`,
+  `docs`, `examples` and similar), because importing `mistralai.client` runs
+  `mistralai/client/__init__.py`; every `*.pth` file at any depth, sorted.
   Then the package's own imports are followed from the setup-time files (`setup.py`,
   cmdclass targets, an in-tree backend), three hops deep (at most 48 files): relative
   imports (`from .core import run`, `from . import util`, `from ..x import y`) and absolute
@@ -209,7 +221,13 @@ skipped). Added after the MalRegistry error analysis (section 10.1):
 more spaces or tabs (code pushed past the right edge of an editor or diff view; evidence
 snippets show such a line as `head [N blank columns] hidden code`), and
 `inst_exec_decoded`/`all_exec_decoded`, lines holding both a `dyn_code` and a `decode_obf`
-hit (`exec(b64decode(...))` on one line). Added for compromised releases of large
+hit (`exec(b64decode(...))` on one line). The same call written inside a string literal
+counts too (`subprocess.Popen([sys.executable, "-c", "import base64;
+exec(base64.b64decode('...'))"])`, `node -e "eval(Buffer.from(p, 'base64')...)"`), which is
+how the 2026 litellm and telnyx takeover releases started their payload in a child process;
+string contents are otherwise only matched against the string rules, so the call was
+invisible. The string rule needs the decoder within one run of identifier, dot, quote and
+bracket characters after `exec(`, so prose that mentions both does not match. Added for compromised releases of large
 libraries, where a payload is a small share of the code: `inst_max_file_kinds` and
 `all_max_file_kinds`, the most distinct behavior indicators (every indicator except `url`
 and `file_write`) present together in a single file, and `all_top_file_share`, the share of
@@ -324,12 +342,18 @@ from sdists, `package/` from npm tarballs, and the wrapper directories and
 `package_info-*.json` sidecars of sample collections such as the Datadog dataset
 (`tmp/tmpXXXX/name/name-version/`). If stripping stops with no manifest at the root (the
 top level holds a package directory beside something else), the shallowest directory that
-holds a manifest becomes the root, provided it is unique; a tie between a built
-distribution and a source checkout goes to the one with `PKG-INFO` or `package.json`.
+holds a manifest or a `*.dist-info/` directory becomes the root, provided it is unique; a
+tie between a built distribution and a source checkout goes to the one with `PKG-INFO`,
+`package.json` or a `*.dist-info/` (an unpacked wheel).
 Files outside the new root keep their paths and are still scanned. Before this rule,
 69 malicious and 6 benign PyPI archives in the corpus had their manifest below such a level
 and so no install surface at all (one campaign stored each release beside a `sources/`
-git checkout of the same project). Paths whose trailing components repeat
+git checkout of the same project). Recent entries of the Datadog dataset store an
+unpacked wheel (`name/`, with its `.dist-info`) beside such a checkout; the wheel has no
+manifest file, so until `.dist-info` counted, the checkout became the root and the clean
+upstream source was scanned in place of the published package. That hid the payload of
+44 PyPI archives (3 benign), among them the 2026 durabletask, mistralai and telnyx
+takeover releases. Paths whose trailing components repeat
 (`pkg/mod.py/pkg/mod.py`, an artifact of re-extracted wheels in that dataset) collapse to
 `pkg/mod.py`. Ecosystem detection: an explicit argument wins; otherwise a stripped
 `package/` with `package.json` is npm; `PKG-INFO`, `setup.py`, `pyproject.toml`, `setup.cfg`
@@ -589,7 +613,7 @@ itself a prerelease. A version without a publish time gets no history rules.
 | Rule | Ecosystems | Fires when |
 |---|---|---|
 | `provenance_dropped` | npm | `dist.attestations` is absent but the previous release had it |
-| `install_script_added` | npm | a `preinstall`/`install`/`postinstall` script is new or its command changed since the previous release (the detail shows the command, cut at 120 characters) |
+| `install_script_added` | npm | a `preinstall`/`install`/`postinstall` script is new or its command changed since the previous release, or since the newest release at least 24 hours older (the detail shows the command, cut at 120 characters) |
 | `publisher_changed` | npm | `_npmUser.name` differs from every known publisher of the previous 5 releases |
 | `dormant_revival` | npm, PyPI | the previous release is more than `dormant_days` (1 to 3650) older |
 | `version_anomaly` | npm, PyPI | the major version is more than one above the highest earlier version, or the release extends an older major line while a newer major exists and that line had no release for `dormant_days` (or never had one) |

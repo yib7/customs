@@ -561,6 +561,17 @@ def benign(df: pd.DataFrame, cache: Path, n: int, years: float, seed: int) -> li
     return out
 
 
+MIN_FAMILY = 3
+
+
+def family(name: str) -> str:
+    """A package family for grouping a takeover wave: the npm scope (``@scope/*``), else
+    the name up to its first hyphen (``autotel-*``), else the name itself."""
+    if name.startswith("@") and "/" in name:
+        return name.split("/", 1)[0] + "/*"
+    return name.split("-", 1)[0] + "-*" if "-" in name else name
+
+
 def summarize(comp: dict, ben: list[dict]) -> dict:
     rows = comp["rows"]
     out: dict = {
@@ -619,6 +630,27 @@ def summarize(comp: dict, ben: list[dict]) -> dict:
             "missed_by_model": int(missed.sum()),
             "rules_on_missed": _rates([r for r, m in zip(sub, missed, strict=True) if m]),
         }
+    test = [r for r in rows if r["split"] == "test"]
+    fams: dict[str, list[dict]] = {}
+    for r in test:
+        fams.setdefault(family(r["name"]), []).append(r)
+    out["compromised"]["families_test"] = sorted(
+        (
+            {
+                "family": f,
+                "n": len(g),
+                "packages": len({r["name"] for r in g}),
+                "model_block": sum(bool(r["model_block"]) for r in g),
+                "rules_block": sum(any(r[k] is True for k in BLOCKING) for r in g),
+                "block_with_rules": sum(
+                    bool(r["model_block"]) or any(r[k] is True for k in BLOCKING) for r in g
+                ),
+            }
+            for f, g in fams.items()
+            if len(g) >= MIN_FAMILY
+        ),
+        key=lambda x: (-x["n"], x["family"]),
+    )
     pkgs = {r["name"] for r in ben}
     by_pkg = pd.DataFrame(ben)
     out["benign"] = {
