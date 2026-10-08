@@ -7,8 +7,8 @@
 //! text for shell scripts and npm script commands.
 
 use crate::lexer::{
-    decoded_strings, lex, reversed_literals, strip_shell_comments, with_decoded, with_reversed,
-    Lang, TokKind, Token,
+    decoded_strings, joined_literals, lex, reversed_literals, strip_shell_comments, with_decoded,
+    with_reversed, Lang, TokKind, Token,
 };
 use regex::{Regex, RegexSet};
 use std::cell::OnceCell;
@@ -521,7 +521,9 @@ pub fn analyze(text: &str, lang: Lang) -> FileAnalysis {
             let decoded = decoded_strings(text, &raw, lang);
             let dec = with_decoded(&raw, &decoded);
             let revs = reversed_literals(&dec, lang);
-            let toks = with_reversed(&dec, &revs);
+            let unrev = with_reversed(&dec, &revs);
+            let joins = joined_literals(&unrev, lang);
+            let toks = with_reversed(&unrev, &joins);
             let runs = fold_runs(&toks, lang);
             if runs.is_empty() {
                 analyze_code(&toks, &[], lang, &mut fa);
@@ -1282,6 +1284,28 @@ mod tests {
         );
         // Escapes are decoded first, and a reversed half still folds with its neighbour.
         assert_eq!(py("u = 'https://' + 'x/elpmaxe.l\\x69ve'[::-1]\n")[URL], 1);
+    }
+
+    #[test]
+    fn joined_pieces_are_read_whole() {
+        // The red team's array_join evasion: every literal split into joined pieces.
+        let c = js("const cp = require(['chil', 'd_pro', 'cess'].join(''));\ncp.exec('ls');\n");
+        assert_eq!(c[PROC_EXEC], 2);
+        assert_eq!(
+            py("u = ''.join(['https://', 'evil.ex', 'ample/x'])\n")[URL],
+            1
+        );
+        assert_eq!(
+            py("k = open('/'.join(['~', '.ssh', 'id_rsa']))\n")[SECRET_PATHS],
+            2
+        );
+        // A joined piece folds with its neighbours, and a reversed piece joins forwards.
+        assert_eq!(
+            py("u = 'https://' + ''.join(['evil.', 'elpmaxe'[::-1]]) + '/x'\n")[URL],
+            1
+        );
+        // A join over anything but literals is left alone.
+        assert_eq!(py("u = ''.join(['https://', host, '/x'])\n")[URL], 0);
     }
 
     #[test]

@@ -791,6 +791,146 @@ pub fn with_reversed<'a>(
     out
 }
 
+/// The items of a literal-only list from `toks[i]` (an opening `[` or, in Python, `(`):
+/// `(item texts, index of the first literal, index after the closing bracket, trailing
+/// comma)`. Python items may be runs of adjacent literals, which Python joins first.
+fn literal_list<'t>(
+    toks: &[Token<'t>],
+    i: usize,
+    lang: Lang,
+) -> Option<(Vec<String>, usize, usize, bool)> {
+    let close = match toks.get(i)? {
+        t if t.kind == TokKind::Str => return None,
+        t if t.text == "[" => "]",
+        t if t.text == "(" && lang == Lang::Python => ")",
+        _ => return None,
+    };
+    let is_punct = |k: usize, x: &str| {
+        toks.get(k)
+            .is_some_and(|t| t.kind != TokKind::Str && t.text == x)
+    };
+    let mut items = Vec::new();
+    let mut k = i + 1;
+    let mut trailing = false;
+    loop {
+        if is_punct(k, close) && (trailing || items.is_empty()) {
+            break;
+        }
+        let start = k;
+        let mut item = String::new();
+        while toks.get(k).is_some_and(|t| t.kind == TokKind::Str) {
+            item.push_str(toks[k].text);
+            k += 1;
+            if lang != Lang::Python {
+                break;
+            }
+        }
+        if k == start {
+            return None;
+        }
+        items.push(item);
+        if is_punct(k, ",") {
+            trailing = true;
+            k += 1;
+        } else if is_punct(k, close) {
+            trailing = false;
+            break;
+        } else {
+            return None;
+        }
+    }
+    (!items.is_empty()).then_some((items, i + 1, k + 1, trailing))
+}
+
+/// Lists of string literals joined at run time: Python `sep.join(['ev', 'al'])` (a list or
+/// tuple) and JavaScript `['ev', 'al'].join(sep)`, where `sep` is a literal (JavaScript's
+/// default is a comma). Malware splits a module name or host into pieces this way so that
+/// literal matching misses it. Same output shape as [`reversed_literals`]; run it on the
+/// tokens those produce, so a reversed piece is joined forwards.
+pub fn joined_literals(toks: &[Token<'_>], lang: Lang) -> Vec<(usize, usize, usize, String)> {
+    let is_punct = |k: usize, x: &str| {
+        toks.get(k)
+            .is_some_and(|t| t.kind != TokKind::Str && t.text == x)
+    };
+    let is_str = |k: usize| toks.get(k).is_some_and(|t| t.kind == TokKind::Str);
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < toks.len() {
+        let found = match lang {
+            // 'sep' . join ( [ ... ] )
+            Lang::Python
+                if is_str(i)
+                    && !is_str(i + 1)
+                    && (i == 0 || !is_str(i - 1))
+                    && is_punct(i + 1, ".")
+                    && toks.get(i + 2).is_some_and(|t| t.text == "join")
+                    && is_punct(i + 3, "(") =>
+            {
+                literal_list(toks, i + 4, lang).and_then(|(items, lit, end, trailing)| {
+                    let sep = toks[i].text;
+                    // `sep.join(('ab'))` joins the characters of one string.
+                    let one_string = toks[i + 4].text == "(" && items.len() == 1 && !trailing;
+                    if one_string && !sep.is_empty() {
+                        return None;
+                    }
+                    is_punct(end, ")").then(|| (i, end + 1, lit, items.join(sep)))
+                })
+            }
+            // [ ... ] . join ( 'sep'? )
+            Lang::Js if is_punct(i, "[") && (i == 0 || !is_value_end(&toks[i - 1])) => {
+                literal_list(toks, i, lang).and_then(|(items, lit, end, _)| {
+                    let call = is_punct(end, ".")
+                        && toks.get(end + 1).is_some_and(|t| t.text == "join")
+                        && is_punct(end + 2, "(");
+                    if !call {
+                        return None;
+                    }
+                    if is_punct(end + 3, ")") {
+                        Some((i, end + 4, lit, items.join(",")))
+                    } else if is_str(end + 3) && is_punct(end + 4, ")") {
+                        Some((i, end + 5, lit, items.join(toks[end + 3].text)))
+                    } else {
+                        None
+                    }
+                })
+            }
+            _ => None,
+        };
+        match found {
+            Some(j) => {
+                i = j.1;
+                out.push(j);
+            }
+            None => i += 1,
+        }
+    }
+    out
+}
+
+/// Whether a `[` after this token is a subscript rather than an array literal.
+fn is_value_end(t: &Token<'_>) -> bool {
+    match t.kind {
+        TokKind::Ident => !matches!(
+            t.text,
+            "return"
+                | "typeof"
+                | "in"
+                | "of"
+                | "case"
+                | "yield"
+                | "await"
+                | "void"
+                | "delete"
+                | "throw"
+                | "new"
+                | "else"
+                | "do"
+        ),
+        TokKind::Str | TokKind::Num => true,
+        _ => matches!(t.text, ")" | "]"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -882,6 +1022,84 @@ mod tests {
         let out = with_reversed(&toks, &revs);
         let t = out.iter().find(|t| t.kind == TokKind::Str).unwrap();
         assert_eq!((t.text, t.line), ("xy", 2));
+    }
+
+    #[test]
+    fn joins() {
+        let join = |src: &str, lang: Lang| -> Vec<(TokKind, String)> {
+            let toks = lex(src, lang);
+            let joins = joined_literals(&toks, lang);
+            with_reversed(&toks, &joins)
+                .iter()
+                .map(|t| (t.kind, t.text.to_string()))
+                .collect()
+        };
+        let s = |x: &str| (TokKind::Str, x.to_string());
+        let p = |x: &str| (TokKind::Punct, x.to_string());
+        let i = |x: &str| (TokKind::Ident, x.to_string());
+        assert_eq!(
+            join(
+                "m = __import__(''.join(['sub', 'proc', 'ess']))",
+                Lang::Python
+            ),
+            vec![
+                i("m"),
+                p("="),
+                i("__import__"),
+                p("("),
+                s("subprocess"),
+                p(")")
+            ]
+        );
+        // Tuples, separators, trailing commas, adjacent literals and line breaks.
+        assert_eq!(
+            join(
+                "p = '/'.join((\n  '', 'etc' 'x',\n  'passwd',\n))",
+                Lang::Python
+            ),
+            vec![i("p"), p("="), s("/etcx/passwd")]
+        );
+        assert_eq!(join("''.join(('os'))", Lang::Python), vec![s("os")]);
+        assert_eq!(
+            join("'-'.join(('os'))", Lang::Python).len(),
+            lex("'-'.join(('os'))", Lang::Python).len()
+        );
+        assert_eq!(
+            join("require(['child', '_process'].join(''))", Lang::Js),
+            vec![i("require"), p("("), s("child_process"), p(")")]
+        );
+        assert_eq!(
+            join("return ['a', 'b'].join()", Lang::Js),
+            vec![i("return"), s("a,b")]
+        );
+        assert_eq!(join("x = ['a', 'b'].join('.');", Lang::Js)[2], s("a.b"));
+        // Anything that is not a literal stays as written, and so does a subscript.
+        assert_eq!(
+            join("''.join(['a', x])", Lang::Python).len(),
+            lex("''.join(['a', x])", Lang::Python).len()
+        );
+        assert_eq!(
+            join("''.join(f(x))", Lang::Python).len(),
+            lex("''.join(f(x))", Lang::Python).len()
+        );
+        assert_eq!(
+            join("a['b', 'c'].join('')", Lang::Js).len(),
+            lex("a['b', 'c'].join('')", Lang::Js).len()
+        );
+        assert_eq!(
+            join("[`a${x}b`].join('')", Lang::Js).len(),
+            lex("[`a${x}b`].join('')", Lang::Js).len()
+        );
+        assert!(joined_literals(&lex("''.join(['a'])", Lang::Shell), Lang::Shell).is_empty());
+        // The joined token keeps the first piece's line.
+        let toks = lex("a = 1\nb = ''.join([\n  'x',\n  'y'])\n", Lang::Python);
+        let joins = joined_literals(&toks, Lang::Python);
+        let out = with_reversed(&toks, &joins);
+        let t = out
+            .iter()
+            .find(|t| t.kind == TokKind::Str && !t.text.is_empty())
+            .unwrap();
+        assert_eq!((t.text, t.line), ("xy", 3));
     }
 
     use super::*;
