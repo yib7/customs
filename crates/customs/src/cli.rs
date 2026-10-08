@@ -15,6 +15,7 @@ use crate::engine::{default_scanner, load_models, Engine, EngineConfig, Limits};
 use crate::hook::{run_claude_code, HookOptions};
 use crate::mcp::{run_mcp, McpOptions};
 use crate::metrics::Metrics;
+use crate::notify::{Format as NotifyFormat, NotifyConfig};
 use crate::server::{serve_on, shutdown_signal};
 use crate::util::{ecosystem_str, parse_ecosystem};
 use crate::verdict::Verdict;
@@ -76,6 +77,33 @@ pub struct ServeArgs {
     /// Artifact cache size cap in MiB; least recently used archives are removed past it.
     #[arg(long, default_value_t = 10240, env = "CUSTOMS_CACHE_MAX_MB")]
     pub cache_max_mb: u64,
+    /// Webhook to post warn or block verdicts to (Slack, Discord, or any JSON receiver).
+    #[arg(long, env = "CUSTOMS_NOTIFY_URL", hide_env_values = true)]
+    pub notify_url: Option<String>,
+    /// Payload format; `auto` picks Slack or Discord from the webhook's host, else JSON.
+    #[arg(long, value_enum, default_value_t = NotifyFormatArg::Auto, env = "CUSTOMS_NOTIFY_FORMAT")]
+    pub notify_format: NotifyFormatArg,
+    /// The least severe decision to announce.
+    #[arg(long, value_enum, default_value_t = NotifyOnArg::Block, env = "CUSTOMS_NOTIFY_ON")]
+    pub notify_on: NotifyOnArg,
+    /// Dashboard address used in notification links (default: the bind address when it
+    /// is a specific IP).
+    #[arg(long, env = "CUSTOMS_PUBLIC_URL")]
+    pub public_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum NotifyFormatArg {
+    Auto,
+    Json,
+    Slack,
+    Discord,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum NotifyOnArg {
+    Warn,
+    Block,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -323,6 +351,27 @@ async fn serve(a: ServeArgs) -> anyhow::Result<()> {
         .then(|| a.ui_dir.clone());
     if ui.is_none() {
         tracing::warn!(ui_dir = %a.ui_dir.display(), "dashboard not built; serving a placeholder page");
+    }
+    if let Some(url) = a.notify_url.filter(|u| !u.trim().is_empty()) {
+        let public_url = a
+            .public_url
+            .or_else(|| (!addr.ip().is_unspecified()).then(|| format!("http://{addr}")));
+        let cfg = NotifyConfig {
+            format: match a.notify_format {
+                NotifyFormatArg::Auto => NotifyFormat::detect(&url),
+                NotifyFormatArg::Json => NotifyFormat::Json,
+                NotifyFormatArg::Slack => NotifyFormat::Slack,
+                NotifyFormatArg::Discord => NotifyFormat::Discord,
+            },
+            url,
+            min_decision: match a.notify_on {
+                NotifyOnArg::Warn => Decision::Warn,
+                NotifyOnArg::Block => Decision::Block,
+            },
+            public_url,
+        };
+        cfg.validate().map_err(|e| anyhow::anyhow!("{e}"))?;
+        crate::notify::spawn(engine.clone(), cfg);
     }
     tracing::info!(%addr, "customs listening; run `customs env` for client settings");
     serve_on(listener, engine, ui, shutdown_signal()).await
@@ -664,5 +713,19 @@ mod tests {
         assert!(
             matches!(c.command, Command::Serve(ServeArgs { ref bind, .. }) if bind == "0.0.0.0:9000")
         );
+        let c = Cli::try_parse_from([
+            "customs",
+            "serve",
+            "--notify-url",
+            "https://hooks.slack.com/services/x",
+            "--notify-on",
+            "warn",
+        ])
+        .unwrap();
+        let Command::Serve(a) = c.command else {
+            panic!("not serve")
+        };
+        assert_eq!(a.notify_on, NotifyOnArg::Warn);
+        assert_eq!(a.notify_format, NotifyFormatArg::Auto);
     }
 }

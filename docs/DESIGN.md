@@ -790,6 +790,29 @@ Caching: archives are stored by sha256 under `<data-dir>/cache`, verdict inputs 
 model output) in SQLite keyed by (ecosystem, name, version, sha256, model_version).
 Concurrent requests for the same artifact URL share one download and one scan.
 
+### 7.1 Notifications
+
+`customs serve --notify-url URL` (or `CUSTOMS_NOTIFY_URL`) posts verdicts at or above
+`--notify-on` (`block` by default, or `warn`) to a webhook. A background task follows the
+same event stream as `GET /api/events/stream`, so installs, checks and requests for names
+the registry does not know are all covered. `--notify-format auto` sends `{"text"}` to
+`hooks.slack.com` (with `&`, `<` and `>` escaped, so package text cannot form Slack links or
+mentions), `{"content", "allowed_mentions": {"parse": []}}` to Discord (a scoped npm name
+such as `@everyone/x` must not ping a channel), and to any other host:
+
+`{ "text", "event": Event, "verdict": { "id", "decision", "mode", "risk", "headline",
+"policy_hits", "reasons" (top 5 labels), "artifact", "sha256" }, "url" }`
+
+The text names the package, the event kind and client, says "would block (monitor mode,
+served)" in monitor mode, and ends with the verdict page under `--public-url` (default: the
+bind address when it is a specific IP). The same ecosystem, name, version and decision is
+sent once per hour, so an agent retrying a blocked install does not flood the channel, and a
+token bucket (20 messages, refilled at 20 per minute) caps bursts; the next message sent
+counts the ones held back. Delivery has a 10 s timeout and up to two retries (after 1 s and
+4 s) on network errors, 429 and 5xx; other 4xx answers are not retried. The webhook URL's
+path is its credential, so logs name only its host. Outcomes are counted in
+`customs_notifications_total{outcome="sent|failed|repeat|rate_limited|dropped"}`.
+
 ## 8. Policy (`customs.toml`)
 
 ```toml

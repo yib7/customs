@@ -2062,3 +2062,65 @@ async fn live_registries() {
         .unwrap();
     assert_eq!(v.decision, customs_model::Decision::Block);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn blocks_are_posted_to_the_webhook_once() {
+    use customs::notify::{Format, NotifyConfig};
+    let received: Arc<std::sync::Mutex<Vec<Value>>> = Arc::default();
+    let sink = received.clone();
+    let hook = Router::new().route(
+        "/hook/secret",
+        axum::routing::post(move |Json(v): Json<Value>| {
+            let sink = sink.clone();
+            async move {
+                sink.lock().unwrap().push(v);
+                StatusCode::OK
+            }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let hook_url = format!("http://{}/hook/secret", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, hook).await.unwrap() });
+
+    let h = Harness::start(|p| p.deny = vec!["pypi:goodpkg@1.0.0".into()]).await;
+    customs::notify::spawn(
+        h.engine.clone(),
+        NotifyConfig {
+            url: hook_url,
+            format: Format::Json,
+            min_decision: customs_model::Decision::Block,
+            public_url: Some("http://customs.test".into()),
+        },
+    );
+    // Allowed: no message. Blocked twice (an agent retrying): one message.
+    assert_eq!(
+        h.get(&pypi_file_path("goodpkg", "1.1.0")).await.status(),
+        200
+    );
+    for _ in 0..2 {
+        let r = h.get(&pypi_file_path("goodpkg", "1.0.0")).await;
+        assert_eq!(r.status(), 403);
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while received.lock().unwrap().is_empty() && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let got = received.lock().unwrap().clone();
+    assert_eq!(got.len(), 1, "{got:?}");
+    let text = got[0]["text"].as_str().unwrap();
+    assert!(
+        text.starts_with("Customs blocked pypi package goodpkg 1.0.0 (install"),
+        "{text}"
+    );
+    assert!(text.contains("is on the deny list"), "{text}");
+    assert_eq!(got[0]["verdict"]["decision"], "block");
+    let url = got[0]["url"].as_str().unwrap();
+    assert!(url.starts_with("http://customs.test/verdicts/"), "{url}");
+    let metrics = h.get("/metrics").await.text().await.unwrap();
+    assert!(
+        metrics.contains("customs_notifications_total{outcome=\"sent\"} 1"),
+        "{metrics}"
+    );
+    h.stop().await;
+}

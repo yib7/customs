@@ -69,6 +69,7 @@ struct Inner {
     events: BTreeMap<String, u64>,
     cache: BTreeMap<String, u64>,
     singleflight_joins: u64,
+    notifications: BTreeMap<String, u64>,
     scan: Option<Histogram>,
     upstream: BTreeMap<String, Histogram>,
 }
@@ -113,6 +114,11 @@ impl Metrics {
     /// `kind` is `artifact_hit`, `artifact_miss`, `scan_hit`, or `scan_miss`.
     pub fn cache(&self, kind: &str) {
         self.with(|m| *m.cache.entry(kind.to_string()).or_default() += 1);
+    }
+
+    /// `outcome` is `sent`, `failed`, `repeat`, `rate_limited`, or `dropped`.
+    pub fn notification(&self, outcome: &str) {
+        self.with(|m| *m.notifications.entry(outcome.to_string()).or_default() += 1);
     }
 
     pub fn singleflight_join(&self) {
@@ -169,6 +175,11 @@ impl Metrics {
             out.push_str("# HELP customs_singleflight_joins_total Requests that waited on an in-flight scan of the same artifact.\n");
             out.push_str("# TYPE customs_singleflight_joins_total counter\n");
             let _ = writeln!(out, "customs_singleflight_joins_total {}", m.singleflight_joins);
+            out.push_str("# HELP customs_notifications_total Webhook notifications by outcome.\n");
+            out.push_str("# TYPE customs_notifications_total counter\n");
+            for (k, n) in &m.notifications {
+                let _ = writeln!(out, "customs_notifications_total{{outcome=\"{k}\"}} {n}");
+            }
             out.push_str("# HELP customs_scan_duration_seconds Time to scan and score one artifact.\n");
             out.push_str("# TYPE customs_scan_duration_seconds histogram\n");
             m.scan

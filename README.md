@@ -124,6 +124,11 @@ customs audit -r --fail-on warn                       # whole repo; exit 1 on wa
 customs audit -r --format sarif -o customs.sarif      # see docs/github-action.md
 ```
 
+**Alerts.** `customs serve --notify-url <webhook>` posts each block (or each warn, with
+`--notify-on warn`) to Slack, Discord or any JSON receiver, with the rule or model reason
+and a link to the verdict page. An agent retrying the same blocked install produces one
+message an hour, and bursts are rate-limited.
+
 **Release history rules.** Account takeovers show up in registry metadata before anyone
 reads the code. The policy engine compares each release with the ones before it and flags
 provenance disappearing (npm and PyPI), an install script appearing or changing, a new
