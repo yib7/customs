@@ -336,6 +336,20 @@ Averaging the tree and CNN logits of several seeds before stacking (seed bagging
 
 Bagging mostly steadies the block threshold: single seeds realize between 0.07% and 0.31% FPR at block, the full bag 0.09%, and recall at block moves from a 66.0% mean to 67.8%, inside the single-seed range. It costs one tree model and one CNN per seed at serve time, so the shipped model stays a single seed.
 
+A larger benign validation share was tried as the other way to steady the block threshold: the benign validation boundary moved from the 70th to the 60th percentile of clusters, which moves 2,799 benign packages from training to validation (4,971 instead of 2,172) and leaves the test set unchanged. Five paired seeds each, on the current data:
+
+| Test metric | 2,172 benign validation (shipped) | 4,971 benign validation |
+|---|---:|---:|
+| FPR at block, mean (min to max) | 0.07% (0.00% to 0.12%) | 0.06% (0.05% to 0.12%) |
+| Recall at block | 63.2% | 57.6% |
+| Recall at warn | 77.8% | 78.5% |
+| ROC AUC | 0.973 | 0.970 |
+| Recall at exactly 0.1% FPR (test ROC) | 66.2% | 63.9% |
+| Compromised libraries: ROC AUC | 0.905 | 0.893 |
+| Compromised libraries: recall at block | 37.5% | 29.3% |
+
+Four of the five seeds realize the same 0.05% FPR at block, so the threshold does steady, but the benign packages taken out of training cost 5.6 points of recall at block and 8.2 points on compromised libraries, more than any seed-to-seed difference above. The split was kept as it is.
+
 Exported model sets scored on today's features (the current scanner's view of the test set), which separates what a scanner change did to the test data from what retraining did to the model:
 
 | Models | ROC AUC | Recall at block | FPR at block | Recall at exactly 0.1% FPR | Compromised libraries ROC AUC |
