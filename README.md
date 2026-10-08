@@ -93,12 +93,15 @@ customs diff npm axios                     # what the newest release changes sin
 **Claude Code:** merge [`hooks/claude-code-settings.json`](hooks/claude-code-settings.json)
 into `~/.claude/settings.json`. Before the agent runs any shell command, the hook finds
 package installs in it (`pip install`, `uv add`, `npm i`, `npx`, requirement files,
-chained commands) and denies the command when a package is blocked, with the reason, so
-the agent stops and asks you. Project installs (`npm ci`, `npm install`, `uv sync`,
-`poetry install` and the rest) are checked against the project's lockfile, plus any
-dependency added to the manifest but not locked yet. A script downloaded and run in one
-step (`curl ... | sh`, `bash <(curl ...)`, `irm ... | iex`) never reaches the proxy, so the
-hook asks first and names its URL. Commands and file edits that would
+chained commands, wrappers such as `sudo`, `xargs` and `bash -c`, and `python -c` code
+that shells out to pip) and denies the command when a package is blocked, with the reason,
+so the agent stops and asks you. It also reads the code a command runs when that code
+names its own packages: the PEP 723 block of a script run by `uv run` or `pipx run`, and
+the `npm:` imports of a file `deno run` starts. Project installs (`npm ci`, `npm install`,
+`uv sync`, `poetry install` and the rest) are checked against the project's lockfile, plus
+any dependency added to the manifest but not locked yet, which `uv run` also installs. A
+script downloaded and run (`curl ... | sh`, `bash <(curl ...)`, `curl -o i.sh ... && sh
+i.sh`, `irm ... | iex`) never reaches the proxy, so the hook asks first and names its URL. Commands and file edits that would
 switch Customs off (a policy change, stopping the server, removing the hook from Claude
 Code's settings, pointing pip or npm back at the public registry) come back to you for
 confirmation. A server set up for a team takes policy changes only with its admin token
