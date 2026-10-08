@@ -995,6 +995,16 @@ packages it did not reach as one `ask` line that points to `customs audit`.
 `check_install_command` over MCP (section 9.1) expands project installs the same way and,
 above 40 packages, lists only the ones that are not allowed.
 
+The same evaluation backs two more agents. `customs hook cursor` answers Cursor's
+`beforeShellExecution` (input `command`, `cwd`; output `permission` `allow`, `ask` or
+`deny` with `userMessage` and `agentMessage`). Cursor reports file edits only after they
+happen (`afterFileEdit`), so there only shell commands are checked for tampering.
+`customs hook gemini` answers Gemini CLI's `BeforeTool` for `run_shell_command` (its
+`dir_path` is joined to `cwd`), `write_file` and `replace` (output `decision` and
+`reason`). Gemini CLI parses stderr when stdout is empty and reads plain text at exit 0 as
+`allow`, so the Gemini hook prints `{}` when it has no objection. Each check records the
+agent as its client (`claude-code-hook`, `cursor-hook`, `gemini-hook`).
+
 ### 9.1 MCP server
 
 `customs mcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server for any

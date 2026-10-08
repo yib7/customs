@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "hooks": {
+    "beforeShellExecution": [
+      { "command": "customs hook cursor", "timeout": 60 }
+    ]
+  }
+}

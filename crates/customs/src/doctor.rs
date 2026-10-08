@@ -110,6 +110,7 @@ pub fn inspect(inputs: &Inputs) -> Vec<Finding> {
     python_project(inputs.dir, &mut out);
     lockfiles(inputs.dir, &proxy, &mut out);
     claude_hook(inputs, &mut out);
+    other_agent_hooks(inputs, &mut out);
     out.sort_by_key(|f| std::cmp::Reverse(f.level));
     out
 }
@@ -123,11 +124,6 @@ fn claude_hook(inputs: &Inputs, out: &mut Vec<Finding>) {
         inputs.dir.join(".claude/settings.local.json"),
     ];
     files.extend(inputs.home.map(|h| h.join(".claude/settings.json")));
-    let covers = |matcher: &str, tool: &str| {
-        matcher.is_empty()
-            || matcher == "*"
-            || regex::Regex::new(&format!("^(?:{matcher})$")).is_ok_and(|r| r.is_match(tool))
-    };
     for f in files {
         let Some(v) = std::fs::read_to_string(&f)
             .ok()
@@ -156,7 +152,7 @@ fn claude_hook(inputs: &Inputs, out: &mut Vec<Finding>) {
             continue;
         }
         let subject = f.display().to_string();
-        let sees = |tool: &str| matchers.iter().any(|m| covers(m, tool));
+        let sees = |tool: &str| matchers.iter().any(|m| matcher_covers(m, tool));
         if !sees("Bash") {
             out.push(finding(
                 Level::Warn,
@@ -180,6 +176,112 @@ fn claude_hook(inputs: &Inputs, out: &mut Vec<Finding>) {
             ));
         }
     }
+}
+
+/// Matchers of the hook entries under `event` whose command runs `customs hook <agent>`.
+fn customs_matchers(v: &Value, event: &str, agent: &str, nested: bool) -> Vec<String> {
+    let needle = format!("customs hook {agent}");
+    v["hooks"][event]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|e| {
+            let runs = |h: &Value| h["command"].as_str().is_some_and(|c| c.contains(&needle));
+            if nested {
+                e["hooks"].as_array().is_some_and(|hs| hs.iter().any(runs))
+            } else {
+                runs(e)
+            }
+        })
+        .map(|e| e["matcher"].as_str().unwrap_or("").to_string())
+        .collect()
+}
+
+/// Cursor (`.cursor/hooks.json`) and Gemini CLI (`.gemini/settings.json`) registrations.
+fn other_agent_hooks(inputs: &Inputs, out: &mut Vec<Finding>) {
+    let read = |f: &Path| {
+        std::fs::read_to_string(f)
+            .ok()
+            .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+    };
+    let mut cursor = vec![inputs.dir.join(".cursor/hooks.json")];
+    cursor.extend(inputs.home.map(|h| h.join(".cursor/hooks.json")));
+    for f in cursor {
+        let Some(v) = read(&f) else { continue };
+        let matchers = customs_matchers(&v, "beforeShellExecution", "cursor", false);
+        if matchers.is_empty() {
+            continue;
+        }
+        // Cursor's matcher filters commands, so any matcher can let an install through.
+        let (level, detail, fix) = if matchers.iter().any(|m| m.is_empty()) {
+            (
+                Level::Ok,
+                "the Customs hook checks every shell command".to_string(),
+                "",
+            )
+        } else {
+            (
+                Level::Warn,
+                format!(
+                    "the Customs hook runs only for commands matching {}, so other installs go unchecked",
+                    matchers.join(" or ")
+                ),
+                "remove the matcher (hooks/cursor-hooks.json)",
+            )
+        };
+        out.push(finding(level, &f.display().to_string(), detail, fix));
+    }
+    let mut gemini = vec![inputs.dir.join(".gemini/settings.json")];
+    gemini.extend(inputs.home.map(|h| h.join(".gemini/settings.json")));
+    for f in gemini {
+        let Some(v) = read(&f) else { continue };
+        let matchers = customs_matchers(&v, "BeforeTool", "gemini", true);
+        if matchers.is_empty() {
+            continue;
+        }
+        // Gemini CLI tests the matcher as an unanchored regex.
+        let sees = |tool: &str| {
+            matchers.iter().any(|m| {
+                let m = m.trim();
+                m.is_empty()
+                    || m == "*"
+                    || regex::Regex::new(m).map_or(m == tool, |r| r.is_match(tool))
+            })
+        };
+        let fix =
+            "set the matcher to run_shell_command|write_file|replace (hooks/gemini-settings.json)";
+        let subject = f.display().to_string();
+        if !sees("run_shell_command") {
+            out.push(finding(
+                Level::Warn,
+                &subject,
+                "the Customs hook is registered, but its matcher does not include run_shell_command, so it checks no install".into(),
+                fix,
+            ));
+        } else if !(sees("write_file") && sees("replace")) {
+            out.push(finding(
+                Level::Warn,
+                &subject,
+                "the Customs hook sees only shell commands: a write_file or replace call can remove it from these settings or repoint .npmrc without confirmation".into(),
+                fix,
+            ));
+        } else {
+            out.push(finding(
+                Level::Ok,
+                &subject,
+                "the Customs hook checks shell commands and file edits".into(),
+                "",
+            ));
+        }
+    }
+}
+
+/// Whether a tool-name matcher (a regex over the whole name; empty or `*` for all) covers
+/// `tool`.
+fn matcher_covers(matcher: &str, tool: &str) -> bool {
+    matcher.is_empty()
+        || matcher == "*"
+        || regex::Regex::new(&format!("^(?:{matcher})$")).is_ok_and(|r| r.is_match(tool))
 }
 
 /// Installers that read each variable `customs env` sets.
@@ -865,6 +967,48 @@ mod tests {
         assert!(hook(run_with(d.path(), None, full_env()))[0]
             .1
             .contains("does not include Bash"));
+    }
+
+    #[test]
+    fn cursor_and_gemini_hook_registration() {
+        let d = tempfile::tempdir().unwrap();
+        for dir in [".cursor", ".gemini"] {
+            std::fs::create_dir_all(d.path().join(dir)).unwrap();
+        }
+        let found = |name: &str| {
+            run_with(d.path(), None, full_env())
+                .into_iter()
+                .filter(|f| f.subject.ends_with(name))
+                .map(|f| (f.level, f.detail))
+                .collect::<Vec<_>>()
+        };
+        let cursor = |entry: Value| {
+            let v = json!({"version": 1, "hooks": {"beforeShellExecution": [entry]}});
+            std::fs::write(d.path().join(".cursor/hooks.json"), v.to_string()).unwrap();
+        };
+        cursor(json!({"command": "./other.sh"}));
+        assert!(found("hooks.json").is_empty());
+        cursor(json!({"command": "customs hook cursor"}));
+        assert_eq!(found("hooks.json")[0].0, Level::Ok);
+        cursor(json!({"command": "customs hook cursor", "matcher": "pip"}));
+        let f = found("hooks.json");
+        assert_eq!(f[0].0, Level::Warn);
+        assert!(f[0].1.contains("matching pip"), "{}", f[0].1);
+
+        let gemini = |matcher: &str| {
+            let v = json!({"hooks": {"BeforeTool": [
+                {"matcher": matcher, "hooks": [{"type": "command", "command": "customs hook gemini"}]}
+            ]}});
+            std::fs::write(d.path().join(".gemini/settings.json"), v.to_string()).unwrap();
+        };
+        gemini("run_shell_command|write_file|replace");
+        assert_eq!(found("settings.json")[0].0, Level::Ok);
+        gemini("run_shell_command");
+        assert!(found("settings.json")[0].1.contains("only shell commands"));
+        gemini("write_file");
+        assert!(found("settings.json")[0]
+            .1
+            .contains("does not include run_shell_command"));
     }
 
     #[test]

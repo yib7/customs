@@ -1,12 +1,13 @@
-//! Claude Code PreToolUse hook (DESIGN.md section 9).
+//! Agent hooks (DESIGN.md section 9): Claude Code `PreToolUse`, Cursor
+//! `beforeShellExecution` and Gemini CLI `BeforeTool`.
 //!
-//! Claude Code runs `customs hook claude-code` before every Bash tool call with a JSON
-//! description of the call on stdin. We find package installs in the command, check each
-//! package, and answer on stdout with a `permissionDecision`: `deny` when anything is
-//! blocked, `ask` when anything is warned or cannot be checked, and nothing at all (exit 0,
-//! empty stdout) when everything is allowed, which leaves the normal permission flow alone.
-//! Exit code 2 would also block, but its message format is less clear, so we always exit 0
-//! and use JSON.
+//! The agent runs `customs hook <agent>` before a shell command (and, where the agent
+//! allows it, before a file edit) with a JSON description of the call on stdin. We find
+//! package installs in the command, check each package, and answer on stdout in the
+//! agent's format: `deny` when anything is blocked, `ask` when anything is warned or
+//! cannot be checked, and otherwise nothing that changes the agent's normal permission
+//! flow. Exit code 2 would also block, but its message format is less clear, so we always
+//! exit 0 and use JSON.
 
 pub mod parse;
 pub mod project;
@@ -33,6 +34,38 @@ pub struct HookOptions {
     pub local: LocalOptions,
 }
 
+/// The agents `customs hook` speaks to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Agent {
+    ClaudeCode,
+    Cursor,
+    Gemini,
+}
+
+impl Agent {
+    /// The `client` recorded with each check.
+    fn client(self) -> &'static str {
+        match self {
+            Agent::ClaudeCode => "claude-code-hook",
+            Agent::Cursor => "cursor-hook",
+            Agent::Gemini => "gemini-hook",
+        }
+    }
+}
+
+/// One tool call, whatever agent sent it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ToolCall {
+    Shell {
+        command: String,
+        cwd: Option<PathBuf>,
+    },
+    Edit {
+        path: String,
+        input: Value,
+    },
+}
+
 #[derive(Debug, Deserialize)]
 struct HookInput {
     #[serde(default)]
@@ -54,6 +87,27 @@ pub struct HookDecision {
 }
 
 impl HookDecision {
+    /// The answer in `agent`'s format. `None` is "no objection": nothing for Claude Code,
+    /// an explicit `allow` for Cursor, and `{}` for Gemini CLI, which reads stderr when
+    /// stdout is empty and would take a logged warning as an `allow` decision.
+    pub fn render(d: Option<&HookDecision>, agent: Agent) -> Option<Value> {
+        match (agent, d) {
+            (Agent::ClaudeCode, Some(d)) => Some(d.to_json()),
+            (Agent::ClaudeCode, None) => None,
+            (Agent::Gemini, None) => Some(json!({})),
+            (Agent::Cursor, None) => Some(json!({ "permission": "allow" })),
+            (Agent::Cursor, Some(d)) => Some(json!({
+                "permission": d.decision,
+                "userMessage": d.reason,
+                "agentMessage": d.reason,
+            })),
+            (Agent::Gemini, Some(d)) => Some(json!({
+                "decision": d.decision,
+                "reason": d.reason,
+            })),
+        }
+    }
+
     pub fn to_json(&self) -> Value {
         json!({
             "hookSpecificOutput": {
@@ -263,37 +317,112 @@ pub fn decide(results: &[TargetResult], fail_closed: bool) -> Option<HookDecisio
     None
 }
 
-/// Evaluate one hook invocation. `Err` is an internal failure (bad input, no checker).
-pub async fn evaluate(input: &str, opts: &HookOptions) -> anyhow::Result<Option<HookDecision>> {
-    let input: HookInput =
+/// Read the agent's stdin JSON as a tool call. `Ok(None)`: not a call we look at.
+pub fn parse_input(input: &str, agent: Agent) -> anyhow::Result<Option<ToolCall>> {
+    let v: Value =
         serde_json::from_str(input).map_err(|e| anyhow::anyhow!("invalid hook input: {e}"))?;
-    if input
-        .hook_event_name
-        .as_deref()
-        .is_some_and(|e| e != "PreToolUse")
-    {
-        return Ok(None);
-    }
-    let tool_input = input.tool_input.clone().unwrap_or(Value::Null);
-    match input.tool_name.as_deref() {
-        Some("Bash") => {}
-        Some("Edit" | "Write" | "MultiEdit" | "NotebookEdit") => {
-            let path = ["file_path", "notebook_path"]
-                .iter()
-                .find_map(|k| tool_input.get(k).and_then(Value::as_str))
-                .unwrap_or("");
-            return Ok(tamper::edit_reason(path, &tool_input, &opts.server)
-                .map(|r| tamper_decision(None, &[r])));
+    let str_at = |v: &Value, k: &str| v.get(k).and_then(Value::as_str).map(str::to_string);
+    let event = str_at(&v, "hook_event_name");
+    let cwd = str_at(&v, "cwd").map(PathBuf::from);
+    Ok(match agent {
+        Agent::ClaudeCode => {
+            let input: HookInput = serde_json::from_value(v)
+                .map_err(|e| anyhow::anyhow!("invalid hook input: {e}"))?;
+            if input
+                .hook_event_name
+                .as_deref()
+                .is_some_and(|e| e != "PreToolUse")
+            {
+                return Ok(None);
+            }
+            let tool_input = input.tool_input.unwrap_or(Value::Null);
+            match input.tool_name.as_deref() {
+                Some("Bash") => str_at(&tool_input, "command").map(|command| ToolCall::Shell {
+                    command,
+                    cwd: input.cwd.map(PathBuf::from),
+                }),
+                Some("Edit" | "Write" | "MultiEdit" | "NotebookEdit") => {
+                    let path = ["file_path", "notebook_path"]
+                        .iter()
+                        .find_map(|k| str_at(&tool_input, k))
+                        .unwrap_or_default();
+                    Some(ToolCall::Edit {
+                        path,
+                        input: tool_input,
+                    })
+                }
+                _ => None,
+            }
         }
-        _ => return Ok(None),
+        // Cursor's edit hook (`afterFileEdit`) runs after the change, so only shell
+        // commands can be stopped.
+        Agent::Cursor => {
+            if event
+                .as_deref()
+                .is_some_and(|e| e != "beforeShellExecution")
+            {
+                return Ok(None);
+            }
+            str_at(&v, "command").map(|command| ToolCall::Shell { command, cwd })
+        }
+        Agent::Gemini => {
+            if event.as_deref().is_some_and(|e| e != "BeforeTool") {
+                return Ok(None);
+            }
+            let tool_input = v.get("tool_input").cloned().unwrap_or(Value::Null);
+            match str_at(&v, "tool_name").as_deref() {
+                Some("run_shell_command") => {
+                    // `dir_path` is relative to the project directory.
+                    let cwd = match (cwd, str_at(&tool_input, "dir_path")) {
+                        (Some(c), Some(d)) => Some(c.join(d)),
+                        (None, Some(d)) => Some(PathBuf::from(d)),
+                        (c, None) => c,
+                    };
+                    str_at(&tool_input, "command").map(|command| ToolCall::Shell { command, cwd })
+                }
+                Some("write_file" | "replace") => Some(ToolCall::Edit {
+                    path: str_at(&tool_input, "file_path").unwrap_or_default(),
+                    input: tool_input,
+                }),
+                _ => None,
+            }
+        }
+    })
+}
+
+/// Evaluate one Claude Code hook invocation. `Err` is an internal failure (bad input, no
+/// checker).
+pub async fn evaluate(input: &str, opts: &HookOptions) -> anyhow::Result<Option<HookDecision>> {
+    evaluate_for(input, opts, Agent::ClaudeCode).await
+}
+
+pub async fn evaluate_for(
+    input: &str,
+    opts: &HookOptions,
+    agent: Agent,
+) -> anyhow::Result<Option<HookDecision>> {
+    match parse_input(input, agent)? {
+        Some(call) => evaluate_call(&call, opts, agent.client()).await,
+        None => Ok(None),
     }
-    let Some(command) = tool_input.get("command").and_then(Value::as_str) else {
-        return Ok(None);
+}
+
+/// The decision for one tool call.
+pub async fn evaluate_call(
+    call: &ToolCall,
+    opts: &HookOptions,
+    client: &str,
+) -> anyhow::Result<Option<HookDecision>> {
+    let (command, cwd) = match call {
+        ToolCall::Edit { path, input } => {
+            return Ok(
+                tamper::edit_reason(path, input, &opts.server).map(|r| tamper_decision(None, &[r]))
+            );
+        }
+        ToolCall::Shell { command, cwd } => (command.as_str(), cwd.clone()),
     };
     let tampering = tamper::command_reasons(command, &opts.server);
-    let cwd = input
-        .cwd
-        .map(PathBuf::from)
+    let cwd = cwd
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
     let installs = parse_command(command, &cwd);
@@ -309,13 +438,7 @@ pub async fn evaluate(input: &str, opts: &HookOptions) -> anyhow::Result<Option<
     } else {
         None
     };
-    let results = check_targets_within(
-        targets,
-        checker.as_ref(),
-        "claude-code-hook",
-        Some(HOOK_BUDGET),
-    )
-    .await;
+    let results = check_targets_within(targets, checker.as_ref(), client, Some(HOOK_BUDGET)).await;
     let mut results: Vec<TargetResult> = results
         .into_iter()
         .enumerate()
@@ -441,32 +564,38 @@ pub async fn check_targets_within(
     results
 }
 
-/// Entry point: read stdin, print the decision. Always exits 0 (see module docs).
+/// Claude Code entry point.
 pub async fn run_claude_code(opts: HookOptions) -> i32 {
+    run_agent(opts, Agent::ClaudeCode).await
+}
+
+/// Entry point: read stdin, print the decision. Always exits 0 (see module docs).
+pub async fn run_agent(opts: HookOptions, agent: Agent) -> i32 {
     let mut input = String::new();
     if let Err(e) = std::io::Read::read_to_string(&mut std::io::stdin(), &mut input) {
-        return finish_error(&format!("reading stdin: {e}"), opts.fail_closed);
+        return finish_error(&format!("reading stdin: {e}"), opts.fail_closed, agent);
     }
-    match evaluate(&input, &opts).await {
-        Ok(Some(d)) => {
-            println!("{}", d.to_json());
+    match evaluate_for(&input, &opts, agent).await {
+        Ok(d) => {
+            if let Some(out) = HookDecision::render(d.as_ref(), agent) {
+                println!("{out}");
+            }
             0
         }
-        Ok(None) => 0,
-        Err(e) => finish_error(&e.to_string(), opts.fail_closed),
+        Err(e) => finish_error(&e.to_string(), opts.fail_closed, agent),
     }
 }
 
-fn finish_error(msg: &str, fail_closed: bool) -> i32 {
+fn finish_error(msg: &str, fail_closed: bool, agent: Agent) -> i32 {
     eprintln!("customs hook: {msg}");
-    if fail_closed {
-        let d = HookDecision {
-            decision: "deny",
-            reason: format!(
-                "Customs could not check this command ({msg}) and is configured to fail closed."
-            ),
-        };
-        println!("{}", d.to_json());
+    let d = fail_closed.then(|| HookDecision {
+        decision: "deny",
+        reason: format!(
+            "Customs could not check this command ({msg}) and is configured to fail closed."
+        ),
+    });
+    if let Some(out) = HookDecision::render(d.as_ref(), agent) {
+        println!("{out}");
     }
     0
 }
@@ -578,6 +707,84 @@ mod tests {
         let git = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"pip install git+https://github.com/a/b"},"cwd":"/tmp"}"#;
         assert_eq!(evaluate(git, &opts).await.unwrap().unwrap().decision, "ask");
         assert!(evaluate("not json", &opts).await.is_err());
+    }
+
+    #[test]
+    fn reads_each_agents_input() {
+        let cursor = r#"{"conversation_id":"c","generation_id":"g","hook_event_name":"beforeShellExecution","command":"npm i left-pad","cwd":"/w","workspace_roots":["/w"]}"#;
+        assert_eq!(
+            parse_input(cursor, Agent::Cursor).unwrap(),
+            Some(ToolCall::Shell {
+                command: "npm i left-pad".into(),
+                cwd: Some("/w".into())
+            })
+        );
+        let other = r#"{"hook_event_name":"afterFileEdit","file_path":"/w/a"}"#;
+        assert_eq!(parse_input(other, Agent::Cursor).unwrap(), None);
+        let gemini = r#"{"session_id":"s","transcript_path":"t","cwd":"/w","hook_event_name":"BeforeTool","timestamp":"x","tool_name":"run_shell_command","tool_input":{"command":"pip install requests","dir_path":"sub"}}"#;
+        assert_eq!(
+            parse_input(gemini, Agent::Gemini).unwrap(),
+            Some(ToolCall::Shell {
+                command: "pip install requests".into(),
+                cwd: Some("/w/sub".into())
+            })
+        );
+        let write = r#"{"hook_event_name":"BeforeTool","tool_name":"write_file","tool_input":{"file_path":"/w/customs.toml","content":"mode = 'monitor'"}}"#;
+        assert!(matches!(
+            parse_input(write, Agent::Gemini).unwrap(),
+            Some(ToolCall::Edit { ref path, .. }) if path == "/w/customs.toml"
+        ));
+        let read = r#"{"hook_event_name":"BeforeTool","tool_name":"read_file","tool_input":{"file_path":"/w/a"}}"#;
+        assert_eq!(parse_input(read, Agent::Gemini).unwrap(), None);
+    }
+
+    #[test]
+    fn renders_each_agents_answer() {
+        let d = HookDecision {
+            decision: "deny",
+            reason: "blocked".into(),
+        };
+        assert_eq!(HookDecision::render(None, Agent::ClaudeCode), None);
+        assert_eq!(HookDecision::render(None, Agent::Gemini), Some(json!({})));
+        assert_eq!(
+            HookDecision::render(None, Agent::Cursor),
+            Some(json!({"permission": "allow"}))
+        );
+        assert_eq!(
+            HookDecision::render(Some(&d), Agent::Cursor).unwrap()["permission"],
+            "deny"
+        );
+        let g = HookDecision::render(Some(&d), Agent::Gemini).unwrap();
+        assert_eq!(g, json!({"decision": "deny", "reason": "blocked"}));
+        assert_eq!(
+            HookDecision::render(Some(&d), Agent::ClaudeCode).unwrap()["hookSpecificOutput"]
+                ["permissionDecision"],
+            "deny"
+        );
+    }
+
+    #[tokio::test]
+    async fn other_agents_get_the_same_checks() {
+        let opts = HookOptions {
+            server: "http://127.0.0.1:1".into(),
+            fail_closed: false,
+            local: LocalOptions::default(),
+        };
+        let git = r#"{"hook_event_name":"beforeShellExecution","command":"pip install git+https://github.com/a/b","cwd":"/tmp"}"#;
+        let d = evaluate_for(git, &opts, Agent::Cursor)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(d.decision, "ask");
+        let edit = r#"{"hook_event_name":"BeforeTool","tool_name":"replace","tool_input":{"file_path":"/repo/.gemini/settings.json","old_string":"customs hook gemini","new_string":""}}"#;
+        let d = evaluate_for(edit, &opts, Agent::Gemini)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(d.decision, "ask");
+        assert!(d.reason.contains("Gemini CLI settings"), "{}", d.reason);
+        let ls = r#"{"hook_event_name":"BeforeTool","tool_name":"run_shell_command","tool_input":{"command":"ls"},"cwd":"/tmp"}"#;
+        assert_eq!(evaluate_for(ls, &opts, Agent::Gemini).await.unwrap(), None);
     }
 
     #[tokio::test]

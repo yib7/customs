@@ -114,6 +114,30 @@ By default the hook fails open: if it cannot check a package it writes the reaso
 stderr and returns no decision, so a broken Customs setup does not stop your work. Use
 `--fail-closed` where an unchecked install is worse than a blocked command.
 
+# Cursor and Gemini CLI hooks
+
+The same checks run for two more agents, with the same options as above. Each agent
+gets the decision in its own format.
+
+| Agent | Command | Register in | Sees | Answer |
+|---|---|---|---|---|
+| Cursor | `customs hook cursor` | `.cursor/hooks.json` or `~/.cursor/hooks.json` ([`cursor-hooks.json`](cursor-hooks.json)) | `beforeShellExecution` | `{"permission": "deny" \| "ask" \| "allow", "userMessage", "agentMessage"}` |
+| Gemini CLI | `customs hook gemini` | `.gemini/settings.json` or `~/.gemini/settings.json` ([`gemini-settings.json`](gemini-settings.json)) | `BeforeTool` for `run_shell_command`, `write_file`, `replace` | `{"decision": "deny" \| "ask", "reason"}`, or `{}` |
+
+Notes:
+
+- Cursor's file-edit hook (`afterFileEdit`) runs after the edit, so in Cursor only shell
+  commands are checked for tampering. Leave the Cursor entry without a `matcher`: a
+  matcher limits which commands the hook sees.
+- Gemini CLI resolves `dir_path` against the project directory, and the hook does the
+  same before it reads lockfiles. When the hook has no objection it prints `{}`: with an
+  empty stdout, Gemini CLI would read stderr instead and treat a logged warning as an
+  `allow`.
+- Gemini CLI's hook `timeout` is in milliseconds, and its matcher is a regular expression
+  tested anywhere in the tool name.
+- `customs doctor` reports each registration it finds, and warns when a matcher leaves out
+  shell commands (or, for Gemini CLI, file edits).
+
 # MCP server
 
 `customs mcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server over

@@ -12,7 +12,7 @@ use crate::audit::{AuditOptions, FailOn, Format};
 use crate::client::{Checker, LocalOptions};
 use crate::config::resolve_policy;
 use crate::engine::{default_scanner, load_models, Engine, EngineConfig, Limits};
-use crate::hook::{run_claude_code, HookOptions};
+use crate::hook::{run_agent, run_claude_code, Agent, HookOptions};
 use crate::mcp::{run_mcp, McpOptions};
 use crate::metrics::Metrics;
 use crate::notify::{Format as NotifyFormat, NotifyConfig};
@@ -240,6 +240,37 @@ pub enum HookTarget {
         #[command(flatten)]
         local: LocalArgs,
     },
+    /// Cursor beforeShellExecution hook (register in .cursor/hooks.json).
+    Cursor {
+        #[command(flatten)]
+        args: AgentHookArgs,
+    },
+    /// Gemini CLI BeforeTool hook (register in .gemini/settings.json).
+    Gemini {
+        #[command(flatten)]
+        args: AgentHookArgs,
+    },
+}
+
+#[derive(Debug, Args)]
+pub struct AgentHookArgs {
+    #[arg(long, default_value = DEFAULT_SERVER, env = "CUSTOMS_SERVER")]
+    pub server: String,
+    /// Deny the command when Customs itself fails (default: allow and log to stderr).
+    #[arg(long, env = "CUSTOMS_HOOK_FAIL_CLOSED")]
+    pub fail_closed: bool,
+    #[command(flatten)]
+    pub local: LocalArgs,
+}
+
+impl AgentHookArgs {
+    fn options(self) -> HookOptions {
+        HookOptions {
+            server: self.server,
+            fail_closed: self.fail_closed,
+            local: self.local.options(),
+        }
+    }
 }
 
 pub fn init_logging(json: bool, default_level: &str) {
@@ -309,6 +340,12 @@ pub async fn run(cli: Cli) -> i32 {
             local: local.options(),
         })
         .await),
+        Command::Hook {
+            target: HookTarget::Cursor { args },
+        } => Ok(run_agent(args.options(), Agent::Cursor).await),
+        Command::Hook {
+            target: HookTarget::Gemini { args },
+        } => Ok(run_agent(args.options(), Agent::Gemini).await),
     };
     match result {
         Ok(code) => code,
@@ -727,5 +764,24 @@ mod tests {
         };
         assert_eq!(a.notify_on, NotifyOnArg::Warn);
         assert_eq!(a.notify_format, NotifyFormatArg::Auto);
+        for agent in ["cursor", "gemini"] {
+            let c = Cli::try_parse_from(["customs", "hook", agent, "--fail-closed"]).unwrap();
+            assert!(matches!(
+                c.command,
+                Command::Hook {
+                    target: HookTarget::Cursor {
+                        args: AgentHookArgs {
+                            fail_closed: true,
+                            ..
+                        }
+                    } | HookTarget::Gemini {
+                        args: AgentHookArgs {
+                            fail_closed: true,
+                            ..
+                        }
+                    }
+                }
+            ));
+        }
     }
 }

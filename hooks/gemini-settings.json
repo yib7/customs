@@ -1,0 +1,12 @@
+{
+  "hooks": {
+    "BeforeTool": [
+      {
+        "matcher": "run_shell_command|write_file|replace",
+        "hooks": [
+          { "name": "customs", "type": "command", "command": "customs hook gemini", "timeout": 60000 }
+        ]
+      }
+    ]
+  }
+}

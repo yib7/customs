@@ -146,8 +146,12 @@ pub fn command_reasons(command: &str, server: &str) -> Vec<String> {
     if lower.contains("customs.toml") && writes {
         out.push("edits the Customs policy file".to_string());
     }
-    if lower.contains(".claude/settings") && writes {
-        out.push("edits Claude Code settings, where the Customs hook is registered".to_string());
+    if writes {
+        if let Some((_, agent)) = AGENT_SETTINGS.iter().find(|(p, _)| lower.contains(p)) {
+            out.push(format!(
+                "edits {agent}, where the Customs hook is registered"
+            ));
+        }
     }
     if writes
         && REGISTRY_FILES.iter().any(|f| lower.contains(f))
@@ -255,14 +259,26 @@ pub fn command_reasons(command: &str, server: &str) -> Vec<String> {
 }
 
 /// Reason an Edit, Write or MultiEdit call on `path` would disable or bypass Customs.
+/// Files where an agent registers the Customs hook (project, user and system scopes).
+const AGENT_SETTINGS: [(&str, &str); 4] = [
+    (".claude/settings", "Claude Code settings"),
+    ("cursor/hooks.json", "Cursor hooks"),
+    (".gemini/settings.json", "Gemini CLI settings"),
+    ("gemini-cli/settings.json", "Gemini CLI settings"),
+];
+
 pub fn edit_reason(path: &str, tool_input: &Value, server: &str) -> Option<String> {
     let lower = path.replace('\\', "/").to_ascii_lowercase();
     let name = lower.rsplit('/').next().unwrap_or(&lower);
     if name == "customs.toml" {
         return Some("edits the Customs policy file".into());
     }
-    if lower.contains(".claude/settings") && name.ends_with(".json") {
-        return Some("edits Claude Code settings, where the Customs hook is registered".into());
+    if name.ends_with(".json") {
+        if let Some((_, agent)) = AGENT_SETTINGS.iter().find(|(p, _)| lower.contains(p)) {
+            return Some(format!(
+                "edits {agent}, where the Customs hook is registered"
+            ));
+        }
     }
     if REGISTRY_FILES.contains(&name) {
         let text = tool_input.to_string().to_ascii_lowercase();
@@ -396,6 +412,12 @@ mod tests {
         let none = json!({});
         assert!(edit_reason("/home/u/.config/customs/customs.toml", &none, S).is_some());
         assert!(edit_reason("/repo/.claude/settings.local.json", &none, S).is_some());
+        assert!(edit_reason("/repo/.cursor/hooks.json", &none, S).is_some());
+        assert!(edit_reason("/home/u/.gemini/settings.json", &none, S).is_some());
+        assert!(edit_reason("/repo/.gemini/notes.md", &none, S).is_none());
+        assert!(flagged("rm .cursor/hooks.json"));
+        assert!(flagged("echo '{}' > /etc/gemini-cli/settings.json"));
+        assert!(!flagged("cat .cursor/hooks.json"));
         let npmrc = json!({"content": "registry=https://registry.npmjs.org/\n"});
         assert!(edit_reason("/repo/.npmrc", &npmrc, S).is_some());
         let ok = json!({"content": "registry=http://127.0.0.1:7878/npm/\n"});

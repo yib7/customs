@@ -47,7 +47,7 @@ policy rules, and a direct hook into the agent, in one local binary.
 ```mermaid
 flowchart LR
     A[pip / uv / npm] -->|registry requests| P
-    C[Claude Code] -->|PreToolUse hook| P
+    C[Claude Code, Cursor,<br/>Gemini CLI] -->|pre-execution hook| P
     subgraph P[customs binary, Rust]
       direction TB
       R[registry proxy<br/>PyPI simple + npm] --> POL[policy engine<br/>age, nonexistent names,<br/>allow / deny]
@@ -72,7 +72,7 @@ flowchart LR
   parity tests pinning Rust to the Python reference.
 * **Firewall** (`crates/customs`): an async (tokio + axum) PyPI and npm registry proxy with a
   single-flight scan cache, a TOML policy engine, a REST + Server-Sent Events API,
-  Prometheus metrics, and the Claude Code hook.
+  Prometheus metrics, and hooks for Claude Code, Cursor and Gemini CLI.
 * **Dashboard** (`web/`): React + TypeScript. Live install feed, verdict explanations with
   per-feature contributions and code evidence, a package checker, and policy editing.
 
