@@ -186,7 +186,16 @@ it with the repository through `.mcp.json`. For other clients, merge
 { "mcpServers": { "customs": { "command": "customs", "args": ["mcp"] } } }
 ```
 
-Run `/mcp` in Claude Code to confirm the server is connected.
+Codex CLI reads MCP servers from `~/.codex/config.toml`; `codex mcp add customs -- customs
+mcp` writes the same entry:
+
+```toml
+[mcp_servers.customs]
+command = "customs"
+args = ["mcp"]
+```
+
+Run `/mcp` in Claude Code or Codex to confirm the server is connected.
 
 ## MCP options
 
