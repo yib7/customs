@@ -20,7 +20,7 @@ import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 from sklearn.metrics import roc_curve  # noqa: E402
 
-from . import baselines, config, metrics, names, splits  # noqa: E402
+from . import baselines, config, metrics, names, registry_status, splits  # noqa: E402
 from .pipeline import FPR_BLOCK, FPR_WARN, SCHEME, load_table, log, work  # noqa: E402
 
 FIG_DIR = config.DOCS_DIR / "figures"
@@ -130,6 +130,12 @@ def run(scheme: str = SCHEME, with_guarddog: bool = True) -> dict:
     add("malicious:seen_campaigns", ~novel & (y == 1))
     for kind in ("malicious_intent", "compromised_lib"):
         add(f"malicious:{kind}", ((T.kind == kind) & (y == 1)).to_numpy())
+    snap = registry_status.load()
+    if snap is not None:
+        reg = np.array(registry_status.status_column(T, snap), dtype=object)
+        for c in ("removed", "still_published"):
+            add(f"malicious:registry_{c}", (reg == c) & (y == 1))
+        res["registry_snapshot"] = snap["fetched"]
     for tier in ("top", "mid", "tail"):
         m = ((T.tier == tier) & (y == 0)).to_numpy()
         sl[f"benign:{tier}"] = {

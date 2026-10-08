@@ -212,6 +212,17 @@ def render(scheme: str = SCHEME) -> str:
         "training: the closest thing to a never-seen attack. Size terciles cut on benign "
         "source-line counts, to expose any small-package shortcut.\n"
     )
+    if ev.get("registry_snapshot"):
+        add(
+            "`registry_removed` and `registry_still_published` split test malware by whether "
+            "npm or PyPI still served the flagged version on "
+            f"{ev['registry_snapshot'][:10]} (`customs_ml/registry_status.py`). Registries "
+            "remove confirmed malware within days, so the removed group is the cleaner label. "
+            "The still-published group mixes malware the registry left up (proof-of-concept "
+            "and dependency-confusion probes) with collector false positives, such as "
+            "per-platform prebuilt binaries of open-source projects; part of its misses are "
+            "correct calls.\n"
+        )
 
     mis = _load("misses.json")
     if mis:
@@ -248,6 +259,17 @@ def render(scheme: str = SCHEME) -> str:
             f"{bo['n_train_malware']:,} in training, and {pct(bo['miss_rate'])} of the test "
             "ones are missed at warn."
         )
+        br = bo.get("by_registry")
+        if br and br["removed"]["n"] and br["still_published"]["n"]:
+            sp, rm = br["still_published"], br["removed"]
+            add(
+                f" Most of that is likely label noise: {sp['n']:,} of them are versions the "
+                f"registry still serves, {sp['platform_named']:,} of which are named as "
+                "per-platform prebuilt binaries (`<name>-win32-x64-msvc` and the like), and "
+                f"{pct(sp['miss_rate'])} of those are "
+                f"missed. Of the {rm['n']:,} the registry removed, {pct(rm['miss_rate'])} "
+                "are missed."
+            )
         bs = mis.get("binary_strings") or {}
         tr_m, tr_b = bs.get("train:malicious"), bs.get("train:benign")
         te_m = bs.get("test:malicious")

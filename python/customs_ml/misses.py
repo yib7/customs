@@ -25,7 +25,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from . import splits
+from . import registry_status, splits
 from .pipeline import SCHEME, load_table, log, work
 
 BEHAVIOR = (
@@ -59,6 +59,8 @@ STEALER_STRINGS = {
     "powershell": (b"-encodedcommand", b"-executionpolicy bypass"),
     "autorun": (b"schtasks", b"currentversion\\run"),
 }
+# Per-platform prebuilt packages: `<name>-win32-x64-msvc`, `@scope/pkg-darwin-arm64`.
+PLATFORM_RE = r"-(?:win32|darwin|linux|freebsd|android|windows|macos)(?:-|$)"
 PACKERS = {"pyinstaller": (b"pyinstaller", b"_meipass"), "go_binary": (b"go build id",)}
 IP_URL = re.compile(rb"https?://\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}")
 SCAN_CAP = 24 << 20
@@ -151,6 +153,20 @@ def categorize(df: pd.DataFrame, thr_warn: float, scheme: str = SCHEME) -> dict:
             ).sum()
         ),
     }
+    snap = registry_status.load()
+    if snap is not None:
+        reg = np.array(registry_status.status_column(te, snap), dtype=object)
+        platform = te.name.str.contains(PLATFORM_RE).to_numpy()
+        out["binary_only"]["by_registry"] = {
+            c: {
+                "n": int((binonly & (reg == c)).sum()),
+                "platform_named": int((binonly & (reg == c) & platform).sum()),
+                "miss_rate": float(miss[binonly & (reg == c)].mean())
+                if (binonly & (reg == c)).any()
+                else None,
+            }
+            for c in ("removed", "still_published")
+        }
     return out
 
 

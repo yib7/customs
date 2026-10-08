@@ -1,6 +1,6 @@
 # Customs: evaluation report
 
-Generated 2026-10-08T09:47:53+00:00 by `python -m customs_ml.report` from the artifacts of `python -m customs_ml.pipeline`. Every number below is on held-out test data with thresholds frozen on the validation split, unless a row says otherwise.
+Generated 2026-10-08T10:30:34+00:00 by `python -m customs_ml.report` from the artifacts of `python -m customs_ml.pipeline`. Every number below is on held-out test data with thresholds frozen on the validation split, unless a row says otherwise.
 
 ## Data
 
@@ -70,6 +70,8 @@ At GuardDog's own false-positive rate, Customs' detection-rate gain has a paired
 | malicious:seen_campaigns | 550 | 4,217 | 0.978 | 62.0% | 0.05% |
 | malicious:malicious_intent | 3,903 | 4,217 | 0.977 | 64.7% | 0.05% |
 | malicious:compromised_lib | 197 | 4,217 | 0.913 | 38.6% | 0.05% |
+| malicious:registry_removed | 3,396 | 4,217 | 0.979 | 71.8% | 0.05% |
+| malicious:registry_still_published | 704 | 4,217 | 0.952 | 23.0% | 0.05% |
 | size:tercile_1 | 2,877 | 1,406 | 0.983 | 74.5% | 0.14% |
 | size:tercile_2 | 747 | 1,405 | 0.959 | 49.0% | 0.00% |
 | size:tercile_3 | 476 | 1,406 | 0.936 | 18.9% | 0.00% |
@@ -84,6 +86,8 @@ False-positive rate on benign packages by popularity tier:
 
 `malicious:*` slices are each malicious subset against all benign test packages. `novel_campaigns` are test samples whose near-duplicate cluster has no member in training: the closest thing to a never-seen attack. Size terciles cut on benign source-line counts, to expose any small-package shortcut.
 
+`registry_removed` and `registry_still_published` split test malware by whether npm or PyPI still served the flagged version on 2026-10-08 (`customs_ml/registry_status.py`). Registries remove confirmed malware within days, so the removed group is the cleaner label. The still-published group mixes malware the registry left up (proof-of-concept and dependency-confusion probes) with collector false positives, such as per-platform prebuilt binaries of open-source projects; part of its misses are correct calls.
+
 ## What the misses are
 
 Of 4,100 test malware packages, 878 fall below the warn threshold. Grouped by what the scanner saw:
@@ -97,6 +101,7 @@ Of 4,100 test malware packages, 878 fall below the warn threshold. Grouped by wh
 A hand audit of 20 missed packages with no indicator anywhere (one per campaign, sampled at random) found 12 whose payload is a compiled binary (`.node`, `.exe`, `.so`, a macOS app), 1 that ships no code and depends on a malicious package (which the proxy scans on its own when the client fetches it), and 7 with no malicious content in the archive: two placeholders (a name reserved against dependency confusion that only raises an error, and the PyPA sample project) and five releases that read as clean. Those seven are label noise, so part of this row is not detectable by any scanner.
 
 Binary-only packages (a compiled binary and under 50 lines of source) are a temporal blind spot: 155 test malware packages against 68 in training, and 86.5% of the test ones are missed at warn.
+ Most of that is likely label noise: 127 of them are versions the registry still serves, 117 of which are named as per-platform prebuilt binaries (`<name>-win32-x64-msvc` and the like), and 99.2% of those are missed. Of the 28 the registry removed, 28.6% are missed.
  Searching every packaged binary for infostealer and dropper strings (webhook and bot endpoints, browser credential stores, wallet and SSH key paths, anti-VM process names, autorun commands, IP-literal URLs) does not separate the classes: at least one appears in 4.9% of malicious and 3.2% of benign training binaries, and in 7.5% of malicious test ones. PyInstaller marks 34.5% of malicious training binaries but 2.0% in test, so a feature built on it would learn the past. Binary payloads stay with the policy rules (minimum package age, install scripts in new packages) rather than the classifier.
 
 ## Ablation: what does the code itself say?

@@ -143,6 +143,15 @@ name prefix each), 15 are blocked in full. The rest warn.
 | Caught at exactly 0.1% FPR on the test ROC (threshold-free) | 70.5% (55.2 to 75.3) |
 | Never-seen campaigns (no near-duplicate in training), ROC AUC | 0.974 |
 | Benign false positives at block, popular packages | 0 of 2,064 (top and mid tiers) |
+| Registry-confirmed malware (the registry removed the version), blocked | 71.8% of 3,396, ROC AUC 0.979 |
+
+**Label check.** The malware labels come from a collector's analysis. npm and PyPI remove
+confirmed malware within days, and 704 of the 4,100 flagged test versions were still
+published in October 2026. That group mixes proof-of-concept and dependency-confusion
+probes the registry left up with collector false positives: 117 of the 155 "binary-only"
+test samples, once the model's worst blind spot, are per-platform prebuilt binaries such
+as `bare-build-win32-x64` that are still served. The model blocks 23.0% of the
+still-published group and 71.8% of the removed one.
 
 ![Verdict for a real PyPI stealer, blocked with the code evidence](docs/screenshots/verdict-light.png)
 
@@ -238,6 +247,11 @@ methodology, is in [`docs/EVALUATION.md`](docs/EVALUATION.md).
   the realized FPR sits between 0.05% and 0.17% across recent retrains, close to the 0.07%
   to 0.31% spread of a five-seed study. The threshold-free row (detection at exactly 0.1%
   FPR on the test ROC) separates what the model learned from where the threshold landed.
+  Smoother quantile estimates (Harrell-Davis, an exponential tail fit) did not change
+  that: over 400 bootstrap resamples of validation campaigns, all three land near 0.05% on
+  test, because benign validation packages have a heavier score tail than benign test
+  ones. None of the top-scoring benign packages has been pulled from its registry, and no
+  benign package in the corpus shares a name with an OpenSSF malware report.
 * **Red-teamed.** Held-out malware is rewritten with evasions and re-scanned; evasions used
   in augmentation are reported separately from unseen ones.
 * **Verified end to end.** `scripts/replay.py` serves held-out malware from a fake
