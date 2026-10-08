@@ -18,6 +18,8 @@ const POLICY: Policy = {
   nonregistry_dependency_added: 'block',
   young_dependency_added: 'block',
   young_dependency_days: 7,
+  unread_code: 'block',
+  scan_error: 'block',
   allow: ['pypi:requests', 'npm:react'],
   deny: ['npm:event-stream@3.3.6'],
   upstream: {},
@@ -59,6 +61,8 @@ describe('validateDraft', () => {
       nonregistry_dependency_added: 'block',
       young_dependency_added: 'block',
       young_dependency_days: 7,
+      unread_code: 'block',
+      scan_error: 'block',
       allow: ['pypi:requests', 'npm:react'],
       deny: ['npm:event-stream@3.3.6'],
     });

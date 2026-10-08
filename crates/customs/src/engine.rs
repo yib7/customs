@@ -168,6 +168,9 @@ struct ScanSummary {
     scanned: bool,
     #[serde(default)]
     not_scanned_reason: Option<String>,
+    /// Code files the scanner could not read (over its per-file size cap).
+    #[serde(default)]
+    unread_code: Vec<String>,
 }
 
 type Flight = Arc<OnceCell<Result<Outcome, EngineError>>>;
@@ -589,6 +592,7 @@ impl Engine {
             scanned_ms: 0,
             scanned: false,
             not_scanned_reason: not_scanned,
+            unread_code: Vec::new(),
         }
     }
 
@@ -630,20 +634,7 @@ impl Engine {
             },
         );
         let mut hits = outcome.hits.clone();
-        if !s.scan_errors.is_empty() && !s.scanned {
-            hits.push(PolicyHit {
-                rule: "scan_error".into(),
-                severity: Decision::Warn,
-                detail: format!("archive could not be scanned: {}", s.scan_errors.join("; ")),
-            });
-        }
-        if let Some(r) = &s.not_scanned_reason {
-            hits.push(PolicyHit {
-                rule: "not_scanned".into(),
-                severity: Decision::Allow,
-                detail: r.clone(),
-            });
-        }
+        hits.extend(scan_hits(policy, s));
         let decision = if outcome.denied {
             Decision::Block
         } else if outcome.allowed {
@@ -882,6 +873,42 @@ fn local_verdict(
     )
 }
 
+/// Policy hits about the scan itself: what the scanner could not read.
+fn scan_hits(policy: &Policy, s: &ScanSummary) -> Vec<PolicyHit> {
+    let mut hits = Vec::new();
+    if let Some(severity) = policy.scan_error.decision() {
+        if !s.scan_errors.is_empty() && !s.scanned {
+            hits.push(PolicyHit {
+                rule: "scan_error".into(),
+                severity,
+                detail: format!("archive could not be scanned: {}", s.scan_errors.join("; ")),
+            });
+        }
+    }
+    if let Some(r) = &s.not_scanned_reason {
+        hits.push(PolicyHit {
+            rule: "not_scanned".into(),
+            severity: Decision::Allow,
+            detail: r.clone(),
+        });
+    }
+    if let (Some(severity), Some(first)) = (policy.unread_code.decision(), s.unread_code.first()) {
+        let more = match s.unread_code.len() {
+            1 => String::new(),
+            n => format!(" and {} more", n - 1),
+        };
+        hits.push(PolicyHit {
+            rule: "unread_code".into(),
+            severity,
+            detail: format!(
+                "{first}{more} is too large to scan, so its code was never inspected; \
+                 installing would run it"
+            ),
+        });
+    }
+    hits
+}
+
 /// Run the scanner and the models on an archive. Pure CPU work for `spawn_blocking`.
 fn scan_and_score(
     scanner: &ScanFn,
@@ -913,6 +940,7 @@ fn scan_and_score(
                 scanned_ms: start.elapsed().as_millis() as u64,
                 scanned: true,
                 not_scanned_reason: None,
+                unread_code: report.unread_code,
             }
         }
         Err(e) => {
@@ -933,6 +961,7 @@ fn scan_and_score(
                 scanned_ms: start.elapsed().as_millis() as u64,
                 scanned: false,
                 not_scanned_reason: None,
+                unread_code: Vec::new(),
             }
         }
     }
@@ -1058,6 +1087,57 @@ mod tests {
     }
 
     #[test]
+    fn unread_code_is_a_policy_hit() {
+        let summary = |unread: &[&str]| ScanSummary {
+            risk: Some(0.1),
+            scores: Scores::default(),
+            reasons: vec![],
+            evidence: vec![],
+            install_surface: vec![],
+            scan_errors: vec![],
+            install_scripts: vec![],
+            scanned_ms: 1,
+            scanned: true,
+            not_scanned_reason: None,
+            unread_code: unread.iter().map(|s| s.to_string()).collect(),
+        };
+        let mut policy = Policy::default();
+        assert!(scan_hits(&policy, &summary(&[])).is_empty());
+        let hits = scan_hits(&policy, &summary(&["setup.py", "a.js", "b.js"]));
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].rule, "unread_code");
+        assert_eq!(hits[0].severity, Decision::Block);
+        assert!(hits[0]
+            .detail
+            .starts_with("setup.py and 2 more is too large"));
+        policy.unread_code = RuleSeverity::Warn;
+        assert_eq!(
+            scan_hits(&policy, &summary(&["setup.py"]))[0].severity,
+            Decision::Warn
+        );
+        policy.unread_code = RuleSeverity::Off;
+        assert!(scan_hits(&policy, &summary(&["setup.py"])).is_empty());
+
+        let mut rejected = summary(&[]);
+        rejected.scanned = false;
+        rejected.scan_errors = vec!["archive rejected: archive has more than 20000 entries".into()];
+        let hits = scan_hits(&policy, &rejected);
+        assert_eq!(
+            (hits[0].rule.as_str(), hits[0].severity),
+            ("scan_error", Decision::Block)
+        );
+        policy.scan_error = RuleSeverity::Warn;
+        assert_eq!(scan_hits(&policy, &rejected)[0].severity, Decision::Warn);
+        policy.scan_error = RuleSeverity::Off;
+        assert!(scan_hits(&policy, &rejected).is_empty());
+        // Cached summaries written before the field existed still deserialize.
+        let mut old = serde_json::to_value(summary(&[])).unwrap();
+        old.as_object_mut().unwrap().remove("unread_code");
+        let back: ScanSummary = serde_json::from_value(old).unwrap();
+        assert!(back.unread_code.is_empty());
+    }
+
+    #[test]
     fn install_scripts_from_surface() {
         let r = ScanReport {
             schema_version: 1,
@@ -1071,6 +1151,7 @@ mod tests {
             install_surface: vec!["package.json:scripts.postinstall".into(), "index.js".into()],
             tokens: None,
             errors: vec![],
+            unread_code: vec![],
         };
         assert_eq!(install_scripts_from_report(&r), vec!["postinstall"]);
     }

@@ -71,6 +71,33 @@ fn oversized_entry_is_counted_but_not_analyzed() {
 }
 
 #[test]
+fn oversized_code_is_reported_as_unread() {
+    let pad = "#".repeat(2000);
+    let bytes = tar_gz_files(&[
+        (
+            "pkg-1.0/setup.py",
+            &format!("{pad}\nimport os\nos.system('x')\n"),
+        ),
+        ("pkg-1.0/bin/tool", &format!("#!/bin/sh\n{pad}")),
+        ("pkg-1.0/data/table.json", &format!("[\"{pad}\"]")),
+        ("pkg-1.0/docs/notes.txt", &pad),
+        ("pkg-1.0/pkg/__init__.py", "x = 1\n"),
+    ]);
+    let opts = ScanOptions {
+        max_entry_bytes: 1000,
+        ..Default::default()
+    };
+    let r = scan(&bytes, "pkg-1.0.tar.gz", &opts).unwrap();
+    // Paths are relative to the package root, like evidence paths.
+    assert_eq!(r.unread_code, vec!["setup.py", "bin/tool"]);
+    assert_eq!(r.features["inst_proc_exec"], 0.0);
+
+    let r = scan(&bytes, "pkg-1.0.tar.gz", &ScanOptions::default()).unwrap();
+    assert!(r.unread_code.is_empty());
+    assert!(r.features["inst_proc_exec"] > 0.0);
+}
+
+#[test]
 fn tar_gz_bomb_is_rejected() {
     let zeros = vec![b' '; 40 * 1024 * 1024];
     let bytes = tar_gz(&[TarItem::File("pkg-1.0/data.txt", &zeros)]);
@@ -123,6 +150,43 @@ fn too_many_entries_is_rejected() {
         .collect();
     assert!(matches!(
         scan(&zip_files(&zfiles), "pkg-1.0.zip", &opts),
+        Err(ScanError::Rejected(_))
+    ));
+}
+
+#[test]
+fn nested_archive_over_a_limit_is_left_unexpanded() {
+    // Installers do not unpack a bundled archive, so one too big to expand must not make
+    // the package itself unscannable (cmake's sdist bundles its own source tarball).
+    let names: Vec<String> = (0..20).map(|i| format!("src/f{i}.py")).collect();
+    let inner_files: Vec<(&str, &[u8])> = names
+        .iter()
+        .map(|n| (n.as_str(), &b"eval(x)\n"[..]))
+        .collect();
+    let inner = zip_files(&inner_files);
+    let bytes = tar_gz(&[
+        TarItem::File("pkg-1.0/setup.py", b"import os\nos.system('id')\n"),
+        TarItem::File("pkg-1.0/vendor/src.zip", &inner),
+    ]);
+    let opts = ScanOptions {
+        max_entries: 10,
+        ..Default::default()
+    };
+    let r = scan(&bytes, "pkg-1.0.tar.gz", &opts).unwrap();
+    assert_eq!(r.features["n_files"], 2.0);
+    assert_eq!(r.features["inst_proc_exec"], 1.0);
+    assert_eq!(r.features["all_dyn_code"], 0.0);
+    assert!(
+        r.errors
+            .iter()
+            .any(|e| e.starts_with("nested archive not expanded (archive has more than 10")),
+        "{:?}",
+        r.errors
+    );
+    // The outer archive itself over the limit is still rejected.
+    let outer: Vec<(&str, &str)> = names.iter().map(|n| (n.as_str(), "x = 1\n")).collect();
+    assert!(matches!(
+        scan(&tar_gz_files(&outer), "pkg-1.0.tar.gz", &opts),
         Err(ScanError::Rejected(_))
     ));
 }

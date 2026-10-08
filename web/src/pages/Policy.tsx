@@ -399,6 +399,25 @@ function PolicyForm({
         </div>
       </Card>
 
+      <Card id="scan-coverage" title="Scan coverage" description="What happens when the scanner cannot read part of a package">
+        <SeverityField
+          id="rule-unread_code"
+          label="Code too large to scan"
+          description="The package ships a code file or manifest over the scanner's 32 MiB per-file limit. The installer still runs it, and padding a payload past the limit hides it from every rule and the model. No benign package in the training corpus has one, so it blocks by default."
+          value={draft.unread_code}
+          onChange={(v) => set('unread_code', v)}
+        />
+        <div className="border-t border-line">
+          <SeverityField
+            id="rule-scan_error"
+            label="Archive could not be scanned"
+            description="The scanner rejected the archive: over 20,000 files or 256 MiB unpacked, an archive bomb, or a corrupt or unknown format. Making a package unscannable is cheap for an attacker, and no benign package in the training corpus is, so it blocks by default."
+            value={draft.scan_error}
+            onChange={(v) => set('scan_error', v)}
+          />
+        </div>
+      </Card>
+
       <Card
         id="release-history"
         title="Release history"

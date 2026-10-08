@@ -343,8 +343,23 @@ counted with their declared size but not analyzed), 256 MiB decompressed in tota
 compression ratio of 250 (checked once 1 MiB has been decompressed), and one level of
 nested archives (`.zip .whl .tar.gz .tgz .tar.bz2 .tar .egg` inside the package are expanded
 into `outer!/inner` paths that count toward `all_` and the structural features only).
-Exceeding the entry, total or ratio cap rejects the archive; unsafe and link entries are
-skipped and counted. Only content needed for analysis is kept in memory (source, manifest,
+Exceeding the entry, total or ratio cap rejects the archive; a nested archive that would
+exceed one is left unexpanded instead (its entries are dropped, its decompressed bytes stay
+counted), since installers never unpack it: cmake's sdist bundles its own 20,000-file source
+tarball and was rejected whole before. Unsafe and link entries are skipped and counted.
+
+Content the scanner does not read cannot be judged, and an attacker controls what it does
+not read. Padding `setup.py` past the per-entry cap with comment lines turned a test
+payload scored 1.00 into 0.59 (allowed), and 20,001 empty files made any archive
+unscannable, which the proxy only warned about. Two policy rules close this, both
+blocking by default: `unread_code` fires when a code file or manifest (source and script
+extensions, `binding.gyp`, `package.json`, `setup.cfg`, `pyproject.toml`, `PKG-INFO`,
+extensionless files starting with `#!`) was over the per-entry cap, and `scan_error` when
+the archive was rejected. In a rescan of the 42,748 corpus archives, neither fires on a
+single benign archive (no entry of any kind exceeds 32 MiB; the only two rejections were
+the nested cases above). Archives above the 256 MiB download scan limit are still scored
+on name and metadata only (`not_scanned`): large legitimate wheels are common, PyPI caps
+uploads at 100 MB by default, and age and history rules still apply to them. Only content needed for analysis is kept in memory (source, manifest,
 README and nested-archive entries in full, a short magic-number prefix otherwise).
 
 Root normalization: top-level directories are stripped while the current level holds
@@ -538,8 +553,9 @@ hits (`allow`, `not_scanned`), else `warn` or `block`. Rules: `deny`, `allow`,
 `block_nonexistent`, `min_age_days`, `block_install_scripts_from_new`, the release history
 rules of section 8 (`provenance_dropped`, `install_script_added`, `publisher_changed`,
 `dormant_revival`, `version_anomaly`, `nonregistry_dependency_added`,
-`young_dependency_added`), `scan_error` (scanner rejected the archive, warn),
-`not_scanned` (archive above the scan size limit).
+`young_dependency_added`), `scan_error` (scanner rejected the archive, block by default),
+`unread_code` (a code file over the per-file scan limit, block by default), `not_scanned`
+(archive above the scan size limit).
 `reasons` mix model features (positive contributions to the stacked logit, largest first)
 and name signals (`name_dist1`, `name_contains_popular_token`, ...). In `monitor` mode the
 proxy records the verdict and serves the artifact anyway (`mode` says which applied).
@@ -629,6 +645,9 @@ version_anomaly = "off"        # major version jump, or a release on a long-quie
 nonregistry_dependency_added = "block"  # npm: new git/URL/file dependency since the previous release
 young_dependency_added = "block"        # npm: new dependency first published days before, by strangers
 young_dependency_days = 7
+# Scan coverage: "off", "warn" or "block"
+unread_code = "block"       # a code file or manifest over the 32 MiB per-file scan limit
+scan_error = "block"        # the scanner rejected the archive (limits, bomb, corrupt)
 allow = ["pypi:requests", "npm:react"]  # always allow (exact names)
 deny  = ["npm:event-stream@3.3.6"]
 [upstream]

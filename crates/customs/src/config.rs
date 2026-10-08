@@ -250,6 +250,18 @@ pub struct Policy {
     pub young_dependency_added: RuleSeverity,
     #[serde(default = "default_young_dependency_days")]
     pub young_dependency_days: u32,
+    /// The archive holds a code file or manifest larger than the scanner reads (32 MiB):
+    /// the installer runs it, but no rule or model saw its content. Legitimate packages
+    /// almost never ship one (none of 22,258 benign archives in the corpus), while
+    /// padding `setup.py` past the cap hides any payload.
+    #[serde(default = "default_block")]
+    pub unread_code: RuleSeverity,
+    /// The scanner rejected the archive (more than 20,000 entries or 256 MiB unpacked, an
+    /// archive bomb, a corrupt or unknown format), so the model never saw its code. None
+    /// of 22,258 benign archives in the corpus is rejected, while 20,001 empty files are
+    /// enough to make any package unscannable.
+    #[serde(default = "default_block")]
+    pub scan_error: RuleSeverity,
     #[serde(default)]
     pub allow: Vec<String>,
     #[serde(default)]
@@ -277,6 +289,8 @@ impl Default for Policy {
             nonregistry_dependency_added: default_block(),
             young_dependency_added: default_block(),
             young_dependency_days: default_young_dependency_days(),
+            unread_code: default_block(),
+            scan_error: default_block(),
             allow: Vec::new(),
             deny: Vec::new(),
             upstream: Upstream::default(),
@@ -600,6 +614,8 @@ npm = "https://registry.npmjs.org"
 
         assert_eq!(p.nonregistry_dependency_added, RuleSeverity::Block);
         assert_eq!(p.young_dependency_added, RuleSeverity::Block);
+        assert_eq!(p.unread_code, RuleSeverity::Block);
+        assert_eq!(p.scan_error, RuleSeverity::Block);
         assert_eq!(Policy::default().young_dependency_days, 7);
         let e = Policy::from_toml("young_dependency_days = 0").unwrap_err();
         assert_eq!(e.key, "young_dependency_days");

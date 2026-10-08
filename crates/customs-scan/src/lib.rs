@@ -123,6 +123,12 @@ pub struct ScanReport {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tokens: Option<Vec<String>>,
     pub errors: Vec<String>,
+    /// Code and manifest files (`setup.py`, `package.json`, `*.js`, ...) whose content
+    /// exceeded `max_entry_bytes` and was not read. The installer still runs them, so the
+    /// features say nothing about them; padding a payload past the cap would otherwise hide
+    /// it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unread_code: Vec<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -993,6 +999,19 @@ impl<'a> Scanner<'a> {
             out
         });
 
+        let unread_code = self
+            .c
+            .entries
+            .iter()
+            .filter(|e| {
+                !e.full
+                    && e.size > self.opts.max_entry_bytes
+                    && archive::wants_full(&e.path)
+                    && !archive::is_nested_archive(&e.path)
+                    && archive::is_code_like(&e.path, &e.data)
+            })
+            .map(|e| e.path.clone())
+            .collect();
         let mut errors = self.c.errors.clone();
         errors.append(&mut self.errors);
         const MAX_ERRORS: usize = 100;
@@ -1014,6 +1033,7 @@ impl<'a> Scanner<'a> {
             install_surface: self.install_surface,
             tokens,
             errors,
+            unread_code,
         }
     }
 

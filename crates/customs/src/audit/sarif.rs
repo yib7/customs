@@ -91,6 +91,12 @@ fn rule(id: &str) -> Rule {
             "The lockfile entry's resolved URL is a registry tarball of another package or version, or not a tarball at all. npm installs from that URL, so the dependency named here is not the code that gets installed.",
             "error",
         ),
+        "customs/unread-code" => (
+            "UnreadCode",
+            "Package ships code too large to scan",
+            "The archive holds a code file or manifest above the scanner's 32 MiB per-file limit. The installer runs it, but no rule or model inspected it; padding a payload past the limit is an evasion.",
+            "error",
+        ),
         "customs/unavailable" => (
             "UnavailableVersion",
             "Pinned version is not available on the registry",
@@ -157,6 +163,7 @@ fn primary_rule(v: &Verdict) -> String {
         };
     }
     let order = [
+        "unread_code",
         "block_install_scripts_from_new",
         "min_age_days",
         "scan_error",

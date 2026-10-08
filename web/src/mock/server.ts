@@ -198,6 +198,8 @@ export class MockServer {
       'version_anomaly',
       'nonregistry_dependency_added',
       'young_dependency_added',
+      'unread_code',
+      'scan_error',
     ] as const) {
       const v = body[f];
       if (v !== undefined && v !== 'off' && v !== 'warn' && v !== 'block') {

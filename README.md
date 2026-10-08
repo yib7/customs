@@ -281,6 +281,12 @@ a scan super-linear (one input took 8 minutes); after the fixes, 514K mutated ar
 minutes produced no panic and no slow scan, and corpus scanning got 4.2x faster. Details
 in [DESIGN.md section 4.8](docs/DESIGN.md#48-hostile-inputs).
 
+What the scanner cannot read, it cannot judge, so unread code fails closed. Padding
+`setup.py` past the 32 MiB per-file limit dropped a test payload's risk from 1.00 to 0.59,
+and 20,001 empty files made any archive unscannable; both now block (`unread_code`,
+`scan_error`), and neither fires on any of the 22,258 benign corpus archives. See
+[DESIGN.md section 4.7](docs/DESIGN.md#47-archive-handling).
+
 ## License
 
 MIT

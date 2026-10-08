@@ -82,6 +82,8 @@ const POLICY_RULES: Record<string, string> = {
   version_anomaly: 'Unusual version jump',
   nonregistry_dependency_added: 'Release added a dependency fetched outside the registry',
   young_dependency_added: 'Release added a brand-new dependency from outside the maintainers',
+  unread_code: 'Ships a code file too large to scan',
+  scan_error: 'Archive could not be scanned',
   deny: 'Matches the deny list',
   allow: 'Matches the allow list',
   model: 'Model risk above threshold',

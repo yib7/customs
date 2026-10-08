@@ -173,6 +173,7 @@ describe('parsePolicy', () => {
       install_script_added: 'off',
       publisher_changed: 'sometimes',
       dormant_days: 730,
+      scan_error: 'warn',
       allow: ['pypi:requests', 5],
       deny: ['npm:event-stream@3.3.6'],
       upstream: { npm: 'https://registry.npmjs.org', bad: 1 },
@@ -193,6 +194,8 @@ describe('parsePolicy', () => {
       nonregistry_dependency_added: 'block',
       young_dependency_added: 'block',
       young_dependency_days: 7,
+      unread_code: 'block',
+      scan_error: 'warn',
       allow: ['pypi:requests'],
       deny: ['npm:event-stream@3.3.6'],
       upstream: { npm: 'https://registry.npmjs.org' },
@@ -210,6 +213,8 @@ describe('parsePolicy', () => {
     expect(p.install_script_added).toBe('block');
     expect(p.young_dependency_added).toBe('block');
     expect(p.young_dependency_days).toBe(7);
+    expect(p.unread_code).toBe('block');
+    expect(p.scan_error).toBe('block');
   });
 });
 

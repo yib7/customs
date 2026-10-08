@@ -78,7 +78,7 @@ pub fn extension(path: &str) -> &str {
     }
 }
 
-fn wants_full(path: &str) -> bool {
+pub(crate) fn wants_full(path: &str) -> bool {
     let name = path.rsplit('/').next().unwrap_or(path);
     let ext = extension(path).to_ascii_lowercase();
     ext.is_empty()
@@ -86,6 +86,35 @@ fn wants_full(path: &str) -> bool {
         || matches!(name, "PKG-INFO" | "METADATA" | "WHEEL" | "RECORD")
         || name.to_ascii_lowercase().starts_with("readme")
         || is_nested_archive(path)
+}
+
+/// Files an installer or the package can run or that steer installation: source and script
+/// extensions, `binding.gyp`, manifests, and extensionless files starting with `#!`.
+/// `prefix` is the start of the content (the reader keeps a few bytes of skipped entries).
+pub(crate) fn is_code_like(path: &str, prefix: &[u8]) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let ext = extension(path).to_ascii_lowercase();
+    matches!(
+        ext.as_str(),
+        "py" | "pyw"
+            | "pth"
+            | "pyi"
+            | "js"
+            | "mjs"
+            | "cjs"
+            | "ts"
+            | "jsx"
+            | "tsx"
+            | "sh"
+            | "bash"
+            | "bat"
+            | "cmd"
+            | "ps1"
+            | "gyp"
+    ) || matches!(
+        name,
+        "package.json" | "setup.cfg" | "pyproject.toml" | "PKG-INFO" | "METADATA"
+    ) || (ext.is_empty() && prefix.starts_with(b"#!"))
 }
 
 pub fn is_nested_archive(path: &str) -> bool {
@@ -230,11 +259,23 @@ fn read_into(
         }
         let data = std::mem::take(&mut out.entries[i].data);
         let inner_prefix = format!("{}!/", out.entries[i].path);
+        let (n_entries, n_budget) = (out.entries.len(), budget.entries);
         let result = read_into(&data, &inner_prefix, depth + 1, opts, budget, out);
         out.entries[i].data = data;
         match result {
             Ok(()) => {}
-            Err(e @ ScanError::Rejected(_)) => return Err(e),
+            // A nested archive over a limit is left unexpanded, like one past the depth
+            // cap: installers do not unpack it, so it must not make the whole package
+            // unscannable (cmake's sdist bundles its 20,000-file source tarball). Its
+            // decompressed bytes stay spent, so many of them cannot multiply the work.
+            Err(ScanError::Rejected(r)) => {
+                out.entries.truncate(n_entries);
+                budget.entries = n_budget;
+                out.errors.push(format!(
+                    "nested archive not expanded ({r}): {}",
+                    out.entries[i].path
+                ));
+            }
             Err(e) => out.errors.push(format!(
                 "nested archive {} unreadable: {e}",
                 out.entries[i].path

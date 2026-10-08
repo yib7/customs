@@ -57,6 +57,8 @@ fn pypi_packages() -> Vec<(&'static str, &'static str, &'static [u8], String)> {
         ("reqeusts", "2.0.0", b"benign typosquat", old.clone()),
         ("slowpkg", "1.0.0", b"benign slow", old.clone()),
         ("newpkg", "1.0.0", b"benign but new", fresh),
+        // The stand-in scanner reports a `setup.py` too large to read.
+        ("paddedpkg", "1.0.0", b"benign but padded", old.clone()),
         // A release after five quiet years.
         (
             "revived",
@@ -338,6 +340,11 @@ fn fake_scanner(calls: Arc<AtomicUsize>) -> ScanFn {
             install_surface,
             tokens: None,
             errors: vec![],
+            unread_code: if bytes.ends_with(b"padded") {
+                vec!["setup.py".into()]
+            } else {
+                vec![]
+            },
         })
     })
 }
@@ -530,6 +537,26 @@ async fn pypi_malicious_file_is_blocked_with_explanation() {
     assert_eq!(v["model_decision"], "block");
     assert_eq!(v["reasons"][0]["feature"], "inst_download_exec");
     assert_eq!(v["evidence"][0]["file"], "setup.py");
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn code_too_large_to_scan_is_blocked() {
+    let h = Harness::start(|_| {}).await;
+    let r = h.get(&pypi_file_path("paddedpkg", "1.0.0")).await;
+    assert_eq!(r.status(), 403);
+    assert_eq!(r.headers()["x-customs-decision"], "block");
+    let body = r.text().await.unwrap();
+    assert!(body.contains("setup.py is too large to scan"), "{body}");
+    let (_, v) = h.check("pypi", "paddedpkg", None).await;
+    assert_eq!(v["decision"], "block");
+    assert_eq!(v["model_decision"], "allow");
+    assert_eq!(v["policy_hits"][0]["rule"], "unread_code");
+    h.stop().await;
+
+    let h = Harness::start(|p| p.unread_code = RuleSeverity::Off).await;
+    let r = h.get(&pypi_file_path("paddedpkg", "1.0.0")).await;
+    assert_eq!(r.status(), 200);
     h.stop().await;
 }
 

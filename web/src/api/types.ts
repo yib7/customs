@@ -139,6 +139,8 @@ export interface Policy {
   nonregistry_dependency_added: RuleSeverity;
   young_dependency_added: RuleSeverity;
   young_dependency_days: number;
+  unread_code: RuleSeverity;
+  scan_error: RuleSeverity;
   allow: string[];
   deny: string[];
   upstream: Record<string, string>;
