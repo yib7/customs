@@ -598,6 +598,37 @@ pub fn decode_escapes(s: &str) -> Option<String> {
     Some(out)
 }
 
+/// A string literal's text as the code it holds when it is run (`exec('...')`): `\n`,
+/// `\t` and `\r` become the characters, `\\` and escaped quotes lose their backslash,
+/// and an escaped line break disappears. Other escapes stay as written. Applied
+/// on top of [`decode_escapes`], only to literals that are run as code.
+pub fn unescape_code(s: &str) -> std::borrow::Cow<'_, str> {
+    if !s.contains('\\') {
+        return std::borrow::Cow::Borrowed(s);
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some('r') => out.push('\r'),
+            Some('\n') => {}
+            Some(q @ ('\\' | '\'' | '"' | '`')) => out.push(q),
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    std::borrow::Cow::Owned(out)
+}
+
 /// Decoded text for each string token (`None` where nothing changed); see
 /// [`decode_escapes`]. Shell strings and Python raw strings are left alone. `src` is the
 /// text `toks` were lexed from.
