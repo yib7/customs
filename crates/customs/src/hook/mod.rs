@@ -218,6 +218,7 @@ pub fn target_label(t: &Target) -> String {
         Target::Unverifiable {
             ecosystem, spec, ..
         } => format!("{}:{spec}", ecosystem_str(*ecosystem)),
+        Target::RemoteScript { url, .. } => format!("script {url}"),
         Target::Project { manager, dir, .. } => {
             format!("{} project in {}", manager.as_str(), dir.display())
         }
@@ -680,6 +681,13 @@ pub async fn check_targets_within(
             let label = target_label(&t);
             match t {
                 Target::Unverifiable { reason, .. } => TargetResult::Unverifiable { label, reason },
+                Target::RemoteScript { runner, .. } => TargetResult::Unverifiable {
+                    label,
+                    reason: format!(
+                        "downloads a script and runs it with {runner}; it never passes the \
+                         registry proxy, so nothing checked it"
+                    ),
+                },
                 Target::Project { .. } => TargetResult::Failed {
                     label,
                     message: "project install was not expanded".into(),
@@ -875,6 +883,25 @@ mod tests {
         let git = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"pip install git+https://github.com/a/b"},"cwd":"/tmp"}"#;
         assert_eq!(evaluate(git, &opts).await.unwrap().unwrap().decision, "ask");
         assert!(evaluate("not json", &opts).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn asks_before_running_a_downloaded_script() {
+        let opts = HookOptions {
+            server: "http://127.0.0.1:1".into(),
+            fail_closed: false,
+            local: LocalOptions::default(),
+        };
+        let cmd = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"curl --proto '=https' -sSf https://sh.rustup.rs | sh -s -- -y"},"cwd":"/tmp"}"#;
+        let d = evaluate(cmd, &opts).await.unwrap().unwrap();
+        assert_eq!(d.decision, "ask");
+        assert!(
+            d.reason.contains(
+                "script https://sh.rustup.rs: not checked, downloads a script and runs it with sh"
+            ),
+            "{}",
+            d.reason
+        );
     }
 
     #[test]

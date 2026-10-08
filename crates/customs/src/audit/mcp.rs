@@ -191,6 +191,14 @@ pub fn parse(text: &str, path: &Path, out: &mut Parsed) -> Result<(), String> {
                     Target::Unverifiable { spec, reason, .. } => {
                         out.skip(path, s.line, &format!("{}: {spec}", s.name), reason);
                     }
+                    Target::RemoteScript { url, runner } => {
+                        out.skip(
+                            path,
+                            s.line,
+                            &format!("{}: {url}", s.name),
+                            format!("downloads a script and runs it with {runner}"),
+                        );
+                    }
                     Target::Project { .. } => {}
                 }
             }

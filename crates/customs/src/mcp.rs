@@ -981,12 +981,13 @@ fn command_report(
         let (eco, spec) = match t {
             Target::Package {
                 ecosystem, name, ..
-            } => (*ecosystem, name.clone()),
+            } => (Some(*ecosystem), name.clone()),
             Target::Unverifiable {
                 ecosystem, spec, ..
-            } => (*ecosystem, spec.clone()),
+            } => (Some(*ecosystem), spec.clone()),
+            Target::RemoteScript { url, .. } => (None, url.clone()),
             Target::Project { manager, dir, .. } => {
-                (manager.ecosystem(), dir.display().to_string())
+                (Some(manager.ecosystem()), dir.display().to_string())
             }
         };
         let (label, decision, status, why, verdict) = match r {
@@ -1054,7 +1055,7 @@ fn command_report(
             id.map(|i| i.to_string()).unwrap_or_else(|| "-".into())
         ));
         rows.push(json!({
-            "ecosystem": ecosystem_str(eco),
+            "ecosystem": eco.map(ecosystem_str),
             "spec": spec,
             "label": label,
             "status": status,

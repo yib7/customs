@@ -1084,6 +1084,19 @@ Specs that cannot be checked (git, URL, local path, custom index) produce `ask`;
 local paths are skipped. When Customs itself fails, the hook fails open (no decision,
 message on stderr) unless run with `--fail-closed`, which denies. Setup: `hooks/README.md`.
 
+**Downloaded scripts.** A script fetched and run in one step never reaches the registry
+proxy: `curl -fsSL URL | sh`, `wget -qO- URL | sudo bash`, `curl URL | python3 -`,
+`bash <(curl URL)`, `source <(wget -qO- URL)`, `/bin/bash -c "$(curl -fsSL URL)"`, `eval
+"$(curl URL)"`, and PowerShell's `irm URL | iex`. These are how agents install toolchains
+(rustup, uv, Homebrew, nvm) and how a prompt-injected agent would fetch a payload, so the
+hook reports each one as `script <URL>` and asks, like any other spec it cannot check. A
+downloader counts when its output reaches, through any filters in the pipeline, a shell
+without `-c`, an interpreter (`python`, `node`, `perl`, `ruby`, `php`, `pwsh`) with no
+argument or `-`, or `iex`; `sudo`, `env` and similar wrappers are looked through, and
+pipelines inside `bash -c '...'` are read. Downloads piped into a parser
+(`| python3 -m json.tool`, `| jq`, `| tar xz`) and scripts already on disk (`cat x.sh |
+bash`) are left alone.
+
 **Project installs.** `npm install` or `npm ci` with no package (also `--prefix`), `pnpm
 install` (`-C`), bare `yarn` or `yarn install` (`--cwd`), `bun install` (`--cwd`), `deno
 install` with no package and `deno ci`, `uv sync`

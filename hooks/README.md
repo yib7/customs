@@ -7,7 +7,7 @@ the hook finds package installs in it, checks every package, and answers:
 | Outcome | Hook output |
 |---|---|
 | any package is blocked (malicious, nonexistent, too new, denied) | `permissionDecision: "deny"` with the reasons |
-| any package is warned, or cannot be checked (git URL, local path, custom index) | `permissionDecision: "ask"` so you decide |
+| any package is warned, or cannot be checked (git URL, local path, custom index, a downloaded script such as `curl ... \| sh`) | `permissionDecision: "ask"` so you decide |
 | everything is allowed, or the command installs nothing | no output, exit 0 (normal permission flow) |
 
 The hook always exits 0 and speaks JSON on stdout, for example:
@@ -76,6 +76,12 @@ resolved by the server to the version a fresh install would pick. `-r requiremen
 and every line checked. Editable installs of local paths (`-e .`) are skipped; git, URL,
 local path, and tarball specs and custom indexes (`-i`, `--extra-index-url`, `--registry`)
 cannot be checked and produce `ask`.
+
+Scripts downloaded and run in one step never reach the proxy, so they produce `ask` too,
+named by URL: `curl -fsSL URL | sh` (also `wget -qO-`, `| sudo bash`, `| python3 -`),
+`bash <(curl URL)`, `source <(curl URL)`, `/bin/bash -c "$(curl -fsSL URL)"`, `eval
+"$(curl URL)"` and PowerShell's `irm URL | iex`. A download piped into `jq`,
+`python3 -m json.tool` or `tar` is not a script and passes.
 
 ## Tampering
 

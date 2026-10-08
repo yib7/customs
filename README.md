@@ -96,7 +96,9 @@ package installs in it (`pip install`, `uv add`, `npm i`, `npx`, requirement fil
 chained commands) and denies the command when a package is blocked, with the reason, so
 the agent stops and asks you. Project installs (`npm ci`, `npm install`, `uv sync`,
 `poetry install` and the rest) are checked against the project's lockfile, plus any
-dependency added to the manifest but not locked yet. Commands and file edits that would
+dependency added to the manifest but not locked yet. A script downloaded and run in one
+step (`curl ... | sh`, `bash <(curl ...)`, `irm ... | iex`) never reaches the proxy, so the
+hook asks first and names its URL. Commands and file edits that would
 switch Customs off (a policy change, stopping the server, removing the hook from Claude
 Code's settings, pointing pip or npm back at the public registry) come back to you for
 confirmation. A server set up for a team takes policy changes only with its admin token

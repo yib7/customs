@@ -365,6 +365,7 @@ mod tests {
                     format!("{name} {}", version.as_deref().unwrap_or("-"))
                 }
                 Target::Unverifiable { spec, .. } => format!("? {spec}"),
+                Target::RemoteScript { url, .. } => format!("script {url}"),
                 Target::Project { .. } => "project".into(),
             })
             .collect()

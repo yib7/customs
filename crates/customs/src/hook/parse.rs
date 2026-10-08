@@ -10,7 +10,7 @@ use std::sync::OnceLock;
 use customs_scan::Ecosystem;
 use regex::Regex;
 
-use super::shell::split_commands;
+use super::shell::{pipelines, split_commands};
 use crate::util::normalize_name;
 
 /// One thing an install command would fetch.
@@ -29,6 +29,9 @@ pub enum Target {
         spec: String,
         reason: String,
     },
+    /// A script downloaded and run in one step (`curl ... | sh`, `bash <(curl ...)`,
+    /// `irm ... | iex`). It never passes the registry proxy, so nothing checks it.
+    RemoteScript { url: String, runner: String },
     /// Every package of the project in `dir`: what `npm install`, `npm ci` or `uv sync`
     /// fetch from its lockfile and manifest, or `pip install -e .[extras]` from its
     /// `pyproject.toml`. See [`super::project`].
@@ -171,7 +174,165 @@ pub fn parse_command(cmd: &str, cwd: &Path) -> Vec<Install> {
     for words in split_commands(cmd) {
         parse_simple(&words, cwd, &mut out, 0);
     }
+    let mut scripts = Vec::new();
+    remote_scripts(cmd, &mut scripts, 0);
+    for (url, runner, tool) in scripts {
+        out.push(Install {
+            tool,
+            targets: vec![Target::RemoteScript { url, runner }],
+        });
+    }
     out
+}
+
+/// Commands that print a downloaded file to standard output (curl, wget -O-, and the
+/// PowerShell web cmdlets and their aliases). Lower case.
+const DOWNLOADERS: [&str; 7] = [
+    "curl",
+    "wget",
+    "fetch",
+    "iwr",
+    "irm",
+    "invoke-webrequest",
+    "invoke-restmethod",
+];
+
+fn is_downloader(word: &str) -> bool {
+    let w = basename(word).to_ascii_lowercase();
+    DOWNLOADERS.contains(&w.trim_end_matches(".exe"))
+}
+
+/// Shells, which run a script read from standard input unless given `-c`.
+const SHELLS: [&str; 7] = ["sh", "bash", "zsh", "dash", "ksh", "ash", "fish"];
+/// Interpreters that run a script from standard input only with no argument or `-`.
+const INTERPRETERS: [&str; 9] = [
+    "python",
+    "python2",
+    "python3",
+    "node",
+    "perl",
+    "ruby",
+    "php",
+    "pwsh",
+    "powershell",
+];
+
+/// Strip wrappers (`sudo -E`, `env FOO=1`, `doas`, `nohup`, `command`, `exec`) and
+/// leading assignments.
+fn unwrap_runner(mut w: &[String]) -> &[String] {
+    loop {
+        while w.first().is_some_and(|x| is_assignment(x)) {
+            w = &w[1..];
+        }
+        match w.first().map(|x| basename(x)) {
+            Some("sudo" | "doas") => {
+                w = skip_opts(&w[1..], &["-u", "-g", "-h", "-p", "-C", "-U", "-r", "-t"])
+            }
+            Some("env") => w = skip_opts(&w[1..], &["-u", "-C", "-S"]),
+            Some("nohup" | "command" | "exec" | "time") => w = &w[1..],
+            _ => return w,
+        }
+    }
+}
+
+/// The runner when `words` would run a script read from standard input.
+fn stdin_runner(words: &[String]) -> Option<String> {
+    let w = unwrap_runner(words);
+    let first = w.first()?;
+    let name = basename(first).trim_end_matches(".exe");
+    let lower = name.to_ascii_lowercase();
+    let args = &w[1..];
+    if SHELLS.contains(&lower.as_str()) {
+        return (!args.iter().any(|a| a == "-c")).then(|| name.to_string());
+    }
+    let version = lower.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.');
+    if INTERPRETERS.contains(&lower.as_str()) || INTERPRETERS.contains(&version) {
+        return (args.is_empty() || args.iter().all(|a| a == "-")).then(|| name.to_string());
+    }
+    matches!(lower.as_str(), "iex" | "invoke-expression").then(|| name.to_string())
+}
+
+/// The URL a downloader command fetches: its first `http(s)://` argument, else its first
+/// argument that is not an option.
+fn download_url(words: &[String]) -> String {
+    let args = &words[1..];
+    args.iter()
+        .find(|a| {
+            let l = a.to_ascii_lowercase();
+            l.starts_with("https://") || l.starts_with("http://")
+        })
+        .or_else(|| args.iter().find(|a| !a.starts_with('-')))
+        .cloned()
+        .unwrap_or_else(|| "an unknown URL".into())
+}
+
+/// The downloader commands of a substitution body (`curl -s URL` in `$(curl -s URL)`).
+fn downloads_in(body: &str) -> Vec<String> {
+    let p = pipelines(body);
+    p.commands
+        .iter()
+        .map(|c| unwrap_runner(c))
+        .filter(|c| c.first().is_some_and(|w| is_downloader(w)))
+        .map(download_url)
+        .collect()
+}
+
+/// Find scripts that `cmd` downloads and runs in one step, as `(url, runner, tool)`.
+fn remote_scripts(cmd: &str, out: &mut Vec<(String, String, String)>, depth: usize) {
+    if depth > 3 {
+        return;
+    }
+    let p = pipelines(cmd);
+    // `curl URL | ... | sh`: a downloader whose output reaches a runner in the pipeline.
+    let mut start = 0;
+    for i in 0..p.commands.len() {
+        if p.piped.get(i).copied().unwrap_or(false) {
+            continue;
+        }
+        let line = &p.commands[start..=i];
+        start = i + 1;
+        for (k, c) in line.iter().enumerate() {
+            let c = unwrap_runner(c);
+            if !c.first().is_some_and(|w| is_downloader(w)) {
+                continue;
+            }
+            if let Some(runner) = line[k + 1..].iter().find_map(|r| stdin_runner(r)) {
+                let tool = format!("{} | {runner}", basename(&c[0]));
+                out.push((download_url(c), runner, tool));
+                break;
+            }
+        }
+    }
+    for (i, words) in p.commands.iter().enumerate() {
+        let w = unwrap_runner(words);
+        let Some(first) = w.first() else { continue };
+        let name = basename(first);
+        let shell = SHELLS.contains(&name) || matches!(name, "source" | "." | "eval");
+        if !shell {
+            continue;
+        }
+        // `bash <(curl URL)`, `source <(wget -qO- URL)`.
+        for (_, body) in p.process_subs.iter().filter(|(k, _)| *k == i) {
+            for url in downloads_in(body) {
+                out.push((url, name.to_string(), format!("{name} <(download)")));
+            }
+        }
+        for (j, arg) in w.iter().enumerate().skip(1) {
+            // `bash -c "$(curl URL)"`, `eval "$(curl URL)"`.
+            let body = arg
+                .strip_prefix("$(")
+                .and_then(|b| b.strip_suffix(')'))
+                .or_else(|| arg.strip_prefix('`').and_then(|b| b.strip_suffix('`')));
+            if let Some(body) = body {
+                for url in downloads_in(body) {
+                    out.push((url, name.to_string(), format!("{name} $(download)")));
+                }
+            } else if j >= 2 && w[j - 1] == "-c" && SHELLS.contains(&name) {
+                // A pipeline inside `bash -c '...'`.
+                remote_scripts(arg, out, depth + 1);
+            }
+        }
+    }
 }
 
 /// Skip options of a wrapper command. `with_value` lists options that take an argument.
@@ -1661,6 +1822,98 @@ mod tests {
             .into_iter()
             .map(|i| i.tool)
             .collect()
+    }
+
+    fn scripts(cmd: &str) -> Vec<(String, String)> {
+        targets(cmd)
+            .into_iter()
+            .filter_map(|t| match t {
+                Target::RemoteScript { url, runner } => Some((url, runner)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn script(url: &str, runner: &str) -> Vec<(String, String)> {
+        vec![(url.to_string(), runner.to_string())]
+    }
+
+    #[test]
+    fn remote_scripts_piped_into_an_interpreter() {
+        assert_eq!(
+            scripts("curl -fsSL https://sh.rustup.rs | sh -s -- -y"),
+            script("https://sh.rustup.rs", "sh")
+        );
+        assert_eq!(
+            scripts("wget -qO- https://x.example/i.sh | sudo -E bash"),
+            script("https://x.example/i.sh", "bash")
+        );
+        assert_eq!(
+            scripts("curl -s https://x.example/get.py | tr -d '\\r' | python3 -"),
+            script("https://x.example/get.py", "python3")
+        );
+        assert_eq!(
+            scripts("cd /tmp && curl https://x.example/a.sh | env FOO=1 /bin/bash"),
+            script("https://x.example/a.sh", "bash")
+        );
+        assert_eq!(
+            tools("curl -fsSL https://sh.rustup.rs | sh"),
+            vec!["curl | sh"]
+        );
+    }
+
+    #[test]
+    fn remote_scripts_in_substitutions() {
+        assert_eq!(
+            scripts(r#"/bin/bash -c "$(curl -fsSL https://x.example/install.sh)""#),
+            script("https://x.example/install.sh", "bash")
+        );
+        assert_eq!(
+            scripts("bash <(curl -s https://x.example/i.sh)"),
+            script("https://x.example/i.sh", "bash")
+        );
+        assert_eq!(
+            scripts("source <(wget -qO- https://x.example/env.sh)"),
+            script("https://x.example/env.sh", "source")
+        );
+        assert_eq!(
+            scripts(r#"eval "$(curl -s https://x.example/init)""#),
+            script("https://x.example/init", "eval")
+        );
+        // A pipe inside `bash -c '...'` still runs.
+        assert_eq!(
+            scripts("bash -c 'curl -s https://x.example/i.sh | sh'"),
+            script("https://x.example/i.sh", "sh")
+        );
+    }
+
+    #[test]
+    fn remote_scripts_in_powershell() {
+        assert_eq!(
+            scripts("irm https://x.example/install.ps1 | iex"),
+            script("https://x.example/install.ps1", "iex")
+        );
+        assert_eq!(
+            scripts("iwr -useb https://x.example/i.ps1 | Invoke-Expression"),
+            script("https://x.example/i.ps1", "Invoke-Expression")
+        );
+    }
+
+    #[test]
+    fn downloads_that_do_not_run_a_script() {
+        for cmd in [
+            "curl -s https://api.example.com/v1/x | python3 -m json.tool",
+            "curl -s https://api.example.com/v1/x | jq .name",
+            "curl -s https://api.example.com/v1/x | python -c 'import json,sys; print(json.load(sys.stdin))'",
+            "curl -o install.sh https://x.example/i.sh",
+            "curl -s https://x.example/a | node -e 'process.stdin.pipe(process.stdout)'",
+            "echo hi | sh",
+            "cat script.sh | bash",
+            "bash -c 'echo $(curl -s https://x.example/ip)'",
+            "curl https://x.example/a.tgz | tar xz",
+        ] {
+            assert!(scripts(cmd).is_empty(), "{cmd}: {:?}", scripts(cmd));
+        }
     }
 
     fn proj(manager: Manager, dir: &str) -> Target {

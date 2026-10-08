@@ -15,10 +15,37 @@ pub fn split_commands(input: &str) -> Vec<Vec<String>> {
     out
 }
 
+/// The top-level commands of a command line with what joins them, for the checks that
+/// need to know which command's output feeds which (`curl ... | sh`).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Pipelines {
+    pub commands: Vec<Vec<String>>,
+    /// `piped[i]`: the output of command `i` goes to command `i + 1` (`|` or `|&`).
+    pub piped: Vec<bool>,
+    /// `(i, body)` for each process substitution `<( body )` among command `i`'s words.
+    pub process_subs: Vec<(usize, String)>,
+}
+
+/// Split a command line into top-level commands, keeping pipes and process substitutions
+/// (see [`Pipelines`]). Bodies of `$(...)` stay inside their words.
+pub fn pipelines(input: &str) -> Pipelines {
+    let mut lx = Lexer::new(input);
+    lx.run();
+    Pipelines {
+        commands: lx.commands,
+        piped: lx.piped,
+        process_subs: lx.process_subs,
+    }
+}
+
 struct Lexer {
     chars: Vec<char>,
     pos: usize,
     commands: Vec<Vec<String>>,
+    piped: Vec<bool>,
+    process_subs: Vec<(usize, String)>,
+    /// The command being ended is joined to the next by a pipe.
+    pipe_next: bool,
     nested: Vec<Vec<String>>,
     current: Vec<String>,
     word: String,
@@ -33,6 +60,9 @@ impl Lexer {
             chars: input.chars().collect(),
             pos: 0,
             commands: Vec::new(),
+            piped: Vec::new(),
+            process_subs: Vec::new(),
+            pipe_next: false,
             nested: Vec::new(),
             current: Vec::new(),
             word: String::new(),
@@ -63,7 +93,9 @@ impl Lexer {
         self.skip_next = false;
         if !self.current.is_empty() {
             self.commands.push(std::mem::take(&mut self.current));
+            self.piped.push(self.pipe_next);
         }
+        self.pipe_next = false;
     }
 
     /// Read a balanced `( ... )` body starting after the opening parenthesis.
@@ -185,6 +217,7 @@ impl Lexer {
             self.pos += 1;
             let body = self.read_balanced();
             self.substitution(&body);
+            self.process_subs.push((self.commands.len(), body));
             return;
         }
         while matches!(self.peek(0), Some('>') | Some('<') | Some('|')) {
@@ -275,6 +308,7 @@ impl Lexer {
                 '$' => self.dollar(),
                 '`' => self.backtick(),
                 ';' | '|' | '(' | ')' => {
+                    self.pipe_next = c == '|' && self.peek(1) != Some('|');
                     self.end_command();
                     self.pos += 1;
                     if c == '|' && matches!(self.peek(0), Some('|') | Some('&')) {
