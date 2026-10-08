@@ -74,8 +74,13 @@ project before it runs a command, so it gets the same check for the dependencies
 
 The command is split like a shell would: `&&`, `||`, `;`, pipes, subshells, quotes,
 escapes, line continuations, comments, redirections, `$(...)` and backticks, and wrappers
-such as `sudo`, `env FOO=1`, `timeout 60`, `nohup`, `bash -c '...'`, and `eval`. Option
-values (`--target dir`, `-c constraints.txt`) are never mistaken for packages.
+such as `sudo`, `env FOO=1`, `timeout 60`, `nohup`, `watch`, `flock`, `ionice`, `taskset`,
+`script -c '...'`, `bash -c '...'`, and `eval`. Option values (`--target dir`, `-c
+constraints.txt`) are never mistaken for packages. An install run through `xargs` takes
+its package names from input the hook cannot see, so it comes back for review. Inline code
+that shells out to an installer is read too: `python -c "subprocess.run(['pip', 'install',
+'x'])"`, `os.system('npm i x')`, `[sys.executable, '-m', 'pip', 'install', 'x']`, and
+`node -e "execSync('npx x')"`.
 
 Requirements: `pkg`, `pkg==1.2`, `pkg>=1,<2`, `pkg[extra]`, `pkg; markers`, Poetry and uv
 `pkg@^1.2`, npm `pkg@1.2.3`, `@scope/pkg@^1`, dist-tags, and aliases `a@npm:b@1`. Ranges are

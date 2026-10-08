@@ -476,6 +476,139 @@ fn remote_scripts(cmd: &str, out: &mut Vec<(String, String, String)>, depth: usi
     }
 }
 
+/// Parse `script` as shell commands one level down (`bash -c`, `flock -c`, `script -c`).
+fn run_script_text(script: &str, cwd: &Path, out: &mut Vec<Install>, depth: usize) {
+    for cmd in split_commands(script) {
+        parse_simple(&cmd, cwd, out, depth + 1);
+    }
+}
+
+/// `xargs [opts] cmd args`: an install it runs gets package names from xargs input, which
+/// the hook cannot see, so each such install also reports that input as unverifiable.
+fn xargs(args: &[String], cwd: &Path, out: &mut Vec<Install>, depth: usize) {
+    const VALUE: &[&str] = &[
+        "-n",
+        "-L",
+        "-P",
+        "-d",
+        "-a",
+        "-E",
+        "-s",
+        "--max-args",
+        "--max-lines",
+        "--max-procs",
+        "--delimiter",
+        "--arg-file",
+        "--eof",
+        "--max-chars",
+    ];
+    let mut replace: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        if a == "--" {
+            i += 1;
+            break;
+        }
+        if !a.starts_with('-') {
+            break;
+        }
+        if a == "-I" {
+            replace = args.get(i + 1).cloned();
+            i += 2;
+            continue;
+        }
+        if let Some(r) = a
+            .strip_prefix("-I")
+            .or_else(|| a.strip_prefix("--replace="))
+        {
+            replace = Some(r.to_string());
+        } else if a == "-i" || a == "--replace" {
+            replace = Some("{}".into());
+        }
+        i += if VALUE.contains(&a) { 2 } else { 1 };
+    }
+    let cmd: Vec<String> = args[i.min(args.len())..]
+        .iter()
+        .filter(|a| replace.as_ref().is_none_or(|r| !a.contains(r.as_str())))
+        .cloned()
+        .collect();
+    let mut found = Vec::new();
+    parse_simple(&cmd, cwd, &mut found, depth + 1);
+    for mut install in found {
+        // With names appended, `npm i` is no longer a whole-project install.
+        install
+            .targets
+            .retain(|t| !matches!(t, Target::Project { .. }));
+        let ecosystem = install
+            .targets
+            .iter()
+            .find_map(|t| match t {
+                Target::Package { ecosystem, .. } | Target::Unverifiable { ecosystem, .. } => {
+                    Some(*ecosystem)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| tool_ecosystem(&install.tool));
+        install.targets.push(Target::Unverifiable {
+            ecosystem,
+            spec: "xargs input".into(),
+            reason: "xargs adds package names from its input, which the hook cannot see".into(),
+        });
+        out.push(install);
+    }
+}
+
+/// The ecosystem an install tool fetches from, judged by its name.
+fn tool_ecosystem(tool: &str) -> Ecosystem {
+    let first = tool.split_whitespace().next().unwrap_or("");
+    if matches!(
+        first,
+        "npm" | "pnpm" | "pnpx" | "yarn" | "bun" | "bunx" | "npx" | "deno" | "dx"
+    ) {
+        Ecosystem::Npm
+    } else {
+        Ecosystem::Pypi
+    }
+}
+
+fn inline_install_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(concat!(
+            r"(?:^|[\s;&|])((?:-m\s+(?:pip|uv|pipx)|pip[0-9.]*|npm|pnpm|yarn|bunx?|uvx?|npx",
+            r"|pipx|poetry|pdm)\s[^)\]};\n]*)"
+        ))
+        .unwrap()
+    })
+}
+
+/// Installs that inline code (`python -c`, `node -e`) runs through a subprocess:
+/// `subprocess.run(['pip', 'install', 'x'])`, `os.system('npm i x')`, `execSync('npx x')`.
+/// Quotes, commas and opening brackets become spaces, so a list of arguments reads as a
+/// command line, which ends at a closing bracket, a semicolon or a line break.
+fn inline_code(code: &str, cwd: &Path, out: &mut Vec<Install>, depth: usize) {
+    let text: String = code
+        .chars()
+        .map(|c| {
+            if matches!(c, '"' | '\'' | '`' | ',' | '[' | '(') {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect();
+    for c in inline_install_re().captures_iter(&text) {
+        let cmd = &c[1];
+        let cmd = if cmd.starts_with("-m") {
+            format!("python {cmd}")
+        } else {
+            cmd.to_string()
+        };
+        run_script_text(&cmd, cwd, out, depth);
+    }
+}
+
 /// Skip options of a wrapper command. `with_value` lists options that take an argument.
 fn skip_opts<'a>(mut w: &'a [String], with_value: &[&str]) -> &'a [String] {
     while let Some(first) = w.first() {
@@ -528,7 +661,50 @@ fn parse_simple(words: &[String], cwd: &Path, out: &mut Vec<Install>, depth: usi
             }
             "nice" => w = skip_opts(&w[1..], &["-n", "--adjustment"]),
             "stdbuf" => w = skip_opts(&w[1..], &["-i", "-o", "-e"]),
-            "xargs" => w = skip_opts(&w[1..], &["-n", "-I", "-L", "-P", "-d", "-a", "-E", "-s"]),
+            "xargs" => return xargs(&w[1..], cwd, out, depth),
+            "watch" => w = skip_opts(&w[1..], &["-n", "--interval", "-q", "--equexit"]),
+            "ionice" => w = skip_opts(&w[1..], &["-c", "--class", "-n", "--classdata"]),
+            "setsid" | "unbuffer" => w = skip_opts(&w[1..], &[]),
+            // `taskset MASK cmd`, `chrt PRIORITY cmd`.
+            "taskset" | "chrt" => {
+                w = skip_opts(&w[1..], &[]);
+                if !w.is_empty() {
+                    w = &w[1..];
+                }
+            }
+            // `flock FILE cmd` or `flock FILE -c 'script'`.
+            "flock" => {
+                w = skip_opts(&w[1..], &["-w", "--timeout", "-E", "--conflict-exit-code"]);
+                if !w.is_empty() {
+                    w = &w[1..];
+                }
+                if w.first().is_some_and(|a| a == "-c" || a == "--command") {
+                    if let Some(script) = w.get(1) {
+                        run_script_text(script, cwd, out, depth);
+                    }
+                    return;
+                }
+            }
+            // `script -c 'cmd' [file]` runs cmd under a pseudo-terminal.
+            "script" => {
+                let mut it = w[1..].iter();
+                while let Some(a) = it.next() {
+                    let value = if let Some(v) = a.strip_prefix("--command=") {
+                        Some(v.to_string())
+                    } else if a == "--command"
+                        || (a.starts_with('-') && !a.starts_with("--") && a.ends_with('c'))
+                    {
+                        it.next().cloned()
+                    } else {
+                        None
+                    };
+                    if let Some(script) = value {
+                        run_script_text(&script, cwd, out, depth);
+                        break;
+                    }
+                }
+                return;
+            }
             "timeout" => {
                 w = skip_opts(&w[1..], &["-s", "-k", "--signal", "--kill-after"]);
                 if !w.is_empty() {
@@ -602,8 +778,14 @@ fn parse_simple(words: &[String], cwd: &Path, out: &mut Vec<Install>, depth: usi
                 }
                 return;
             }
-            if !a.starts_with('-') || a == "-c" {
-                return; // running a script or inline code
+            if a == "-c" {
+                if let Some(code) = args.get(i + 1) {
+                    inline_code(code, cwd, out, depth);
+                }
+                return;
+            }
+            if !a.starts_with('-') {
+                return; // running a script
             }
             i += if matches!(a, "-W" | "-X" | "-Q") {
                 2
@@ -633,6 +815,27 @@ fn parse_simple(words: &[String], cwd: &Path, out: &mut Vec<Install>, depth: usi
             "bunx" => npx_like(args, out, "bunx"),
             "npx" => npx_like(args, out, "npx"),
             "deno" => deno(args, cwd, out),
+            "node" | "nodejs" => {
+                let mut it = args.iter();
+                while let Some(a) = it.next() {
+                    let code = if let Some(v) = a
+                        .strip_prefix("--eval=")
+                        .or_else(|| a.strip_prefix("--print="))
+                    {
+                        Some(v.to_string())
+                    } else if matches!(a.as_str(), "-e" | "--eval" | "-p" | "--print") {
+                        it.next().cloned()
+                    } else if a.starts_with('-') {
+                        continue;
+                    } else {
+                        break; // a script file
+                    };
+                    if let Some(code) = code {
+                        inline_code(&code, cwd, out, depth);
+                    }
+                    break;
+                }
+            }
             "dx" => deno_x(args, out, "dx"),
             _ => {}
         }
@@ -3232,6 +3435,77 @@ mod tests {
             parse_command("deno run -A main.ts", d.path())[0].tool,
             "deno run main.ts"
         );
+    }
+
+    #[test]
+    fn installs_behind_more_wrappers() {
+        for c in [
+            "watch -n 5 pip install x",
+            "flock /tmp/l pip install x",
+            "flock -w 10 /tmp/l -c 'pip install x'",
+            "ionice -c3 pip install x",
+            "script -qc 'pip install x' /dev/null",
+            "setsid pip install x",
+            "unbuffer pip install x",
+            "taskset -c 0 pip install x",
+            "chrt -f 10 pip install x",
+        ] {
+            assert_eq!(targets(c), vec![py("x", None)], "{c}");
+        }
+    }
+
+    #[test]
+    fn xargs_input_is_not_visible() {
+        for c in [
+            "echo x | xargs pip install",
+            "cat pkgs.txt | xargs -n1 npm i",
+            "xargs -I{} pip install {} < list.txt",
+            "xargs -a list.txt uv pip install",
+        ] {
+            let t = targets(c);
+            assert!(t.len() == 1 && is_unverifiable(&t[0]), "{c}: {t:?}");
+        }
+        assert_eq!(
+            targets("cat list | xargs pip install requests")[0],
+            py("requests", None)
+        );
+        // Not an install.
+        assert!(targets("ls | xargs rm").is_empty());
+        assert!(targets("echo a | xargs pip show").is_empty());
+    }
+
+    #[test]
+    fn installs_in_inline_code() {
+        assert_eq!(
+            targets(
+                r#"python3 -c "import subprocess; subprocess.run(['pip','install','x'], check=True)""#
+            ),
+            vec![py("x", None)]
+        );
+        assert_eq!(
+            targets(r#"python -c "import os; os.system('pip install x && npm i y')""#),
+            vec![py("x", None), js("y", None)]
+        );
+        assert_eq!(
+            targets(
+                r#"python3 -c "import sys,subprocess; subprocess.check_call([sys.executable,'-m','pip','install','x==1.0'])""#
+            ),
+            vec![py("x", Some("1.0"))]
+        );
+        assert_eq!(
+            targets(r#"node -e "require('child_process').execSync('npm i y')""#),
+            vec![js("y", None)]
+        );
+        assert_eq!(
+            targets(
+                r#"node --eval 'const {execSync} = require("child_process"); execSync(`npx y`)'"#
+            ),
+            vec![js("y", None)]
+        );
+        assert!(targets(r#"python3 -c "print('hello')""#).is_empty());
+        assert!(targets(r#"python3 -c "import uv; print(uv.__version__)""#).is_empty());
+        assert!(targets("node -e 'console.log(1)'").is_empty());
+        assert!(targets("node script.js --install").is_empty());
     }
 
     #[test]

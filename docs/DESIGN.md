@@ -1081,7 +1081,12 @@ program has some), resolves each requirement, calls the
 running server's `/api/check` (or scans in-process when no server is running), and returns
 a PreToolUse decision: `deny` with an explanation when any package is blocked, `ask` when
 any is warned, nothing otherwise. Local paths, URLs, `-r requirements.txt` and editable
-installs are handled (requirements files are read and each line checked).
+installs are handled (requirements files are read and each line checked). Commands are
+found behind wrappers (`sudo`, `env`, `timeout`, `nice`, `watch`, `flock`, `ionice`,
+`taskset`, `chrt`, `setsid`, `script -c`, `bash -c`, `eval`) and in the inline code of
+`python -c` and `node -e|-p`, where quotes, commas and opening brackets are read as spaces
+so `subprocess.run(['pip', 'install', 'x'])` reads as `pip install x`. An install run by
+`xargs` also reports its input as unverifiable, since the package names come from there.
 
 Output is JSON on stdout with exit code 0:
 `{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny" | "ask", "permissionDecisionReason": "..."}}`.
