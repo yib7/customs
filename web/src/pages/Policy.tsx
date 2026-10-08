@@ -5,7 +5,8 @@ import { ChipInput } from '../components/ChipInput';
 import { IconCheck } from '../components/Icons';
 import { btn, errorMessage, inputCls } from '../components/styles';
 import { Card, ErrorBox, Loading, PageHeader } from '../components/ui';
-import { safeLabel } from '../lib/format';
+import { formatDateTime, relativeTime, safeLabel } from '../lib/format';
+import { describeFieldChange } from '../lib/policyLog';
 import {
   HISTORY_RULES,
   policyToDraft,
@@ -15,6 +16,7 @@ import {
   type PolicyErrors,
   type PolicyField,
 } from '../lib/policy';
+import { useAsync } from '../lib/useAsync';
 import { useTitle } from '../lib/useTitle';
 
 const TOKEN_KEY = 'customs-admin-token';
@@ -605,6 +607,45 @@ function PolicyForm({
   );
 }
 
+/** Policy changes made through the API. Hidden when the server does not report them. */
+function PolicyChanges({ version }: { version: number }) {
+  const { data, error } = useAsync((signal) => api.policyChanges(10, signal), String(version));
+  if (error || !data) return null;
+  return (
+    <Card
+      id="policy-changes"
+      title="Recent changes"
+      description="Changes made from this page or through the API, newest first. The webhook, when set, announces each one."
+      className="mt-4"
+    >
+      {data.length === 0 ? (
+        <p className="text-sm text-ink-2">No changes yet.</p>
+      ) : (
+        <ol className="flex flex-col divide-y divide-line" data-testid="policy-changes">
+          {data.map((c) => (
+            <li key={c.id} className="py-2 first:pt-0 last:pb-0">
+              <p className="text-xs text-muted">
+                <time dateTime={c.ts} title={formatDateTime(c.ts)}>
+                  {relativeTime(c.ts)}
+                </time>
+                {c.remote ? <> from {safeLabel(c.remote, 60)}</> : null}
+                {c.auth === 'token' ? ', with the admin token' : ', without a token'}
+              </p>
+              <ul className="mt-1 text-sm text-ink">
+                {c.changes.map((f) => (
+                  <li key={f.field} className="font-mono text-xs break-all">
+                    {safeLabel(describeFieldChange(f), 300)}
+                  </li>
+                ))}
+              </ul>
+            </li>
+          ))}
+        </ol>
+      )}
+    </Card>
+  );
+}
+
 export function PolicyPage() {
   useTitle('Policy');
   const [state, setState] = useState<{ policy: Policy; raw: Record<string, unknown> } | null>(null);
@@ -649,6 +690,7 @@ export function PolicyPage() {
           }}
         />
       ) : null}
+      {state ? <PolicyChanges version={version} /> : null}
     </>
   );
 }

@@ -73,6 +73,11 @@ describe('Policy page', () => {
       expect(await screen.findByTestId('policy-saved')).toBeInTheDocument();
       expect(mock.policy).toMatchObject({ min_age_days: 5 });
       expect(sessionStorage.getItem('customs-admin-token')).toBe('team-token-0123456789');
+      // The change heads the log; the refused attempts are not in it.
+      const log = await screen.findByTestId('policy-changes');
+      await waitFor(() => expect(log.querySelector('li')).toHaveTextContent('min_age_days: 3 -> 5'));
+      expect(log.querySelector('li')).toHaveTextContent('with the admin token');
+      expect(mock.policyChanges.filter((c) => c.changes.some((f) => f.field === 'min_age_days' && f.after === 5))).toHaveLength(1);
     } finally {
       mock.adminToken = null;
       sessionStorage.clear();

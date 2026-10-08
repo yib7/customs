@@ -70,6 +70,7 @@ struct Inner {
     cache: BTreeMap<String, u64>,
     singleflight_joins: u64,
     notifications: BTreeMap<String, u64>,
+    policy_changes: BTreeMap<String, u64>,
     scan: Option<Histogram>,
     upstream: BTreeMap<String, Histogram>,
 }
@@ -119,6 +120,11 @@ impl Metrics {
     /// `outcome` is `sent`, `failed`, `repeat`, `rate_limited`, or `dropped`.
     pub fn notification(&self, outcome: &str) {
         self.with(|m| *m.notifications.entry(outcome.to_string()).or_default() += 1);
+    }
+
+    /// `result` is `applied` or `refused` (no or a wrong admin token, or changes disabled).
+    pub fn policy_change(&self, result: &str) {
+        self.with(|m| *m.policy_changes.entry(result.to_string()).or_default() += 1);
     }
 
     pub fn singleflight_join(&self) {
@@ -179,6 +185,11 @@ impl Metrics {
             out.push_str("# TYPE customs_notifications_total counter\n");
             for (k, n) in &m.notifications {
                 let _ = writeln!(out, "customs_notifications_total{{outcome=\"{k}\"}} {n}");
+            }
+            out.push_str("# HELP customs_policy_changes_total Policy changes through the API, applied or refused.\n");
+            out.push_str("# TYPE customs_policy_changes_total counter\n");
+            for (k, n) in &m.policy_changes {
+                let _ = writeln!(out, "customs_policy_changes_total{{result=\"{k}\"}} {n}");
             }
             out.push_str("# HELP customs_scan_duration_seconds Time to scan and score one artifact.\n");
             out.push_str("# TYPE customs_scan_duration_seconds histogram\n");

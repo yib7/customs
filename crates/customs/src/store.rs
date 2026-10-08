@@ -14,6 +14,7 @@ use customs_scan::Ecosystem;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 
+use crate::policy_log::PolicyChange;
 use crate::util::{ecosystem_str, now_ts, parse_ecosystem};
 use crate::verdict::{Event, EventKind, Verdict};
 
@@ -58,6 +59,14 @@ CREATE TABLE IF NOT EXISTS artifacts (
     filename TEXT NOT NULL,
     size INTEGER NOT NULL,
     fetched TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS policy_changes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,
+    remote TEXT,
+    client TEXT,
+    auth TEXT NOT NULL,
+    changes TEXT NOT NULL
 );
 "#;
 
@@ -260,6 +269,43 @@ impl Store {
             decision: e.decision,
             risk: e.risk,
             verdict_id: e.verdict_id,
+        })
+    }
+
+    /// Record a policy change; `id` and `ts` of the argument are replaced.
+    pub fn insert_policy_change(&self, mut ch: PolicyChange) -> Result<PolicyChange> {
+        ch.ts = now_ts();
+        let changes = serde_json::to_string(&ch.changes)?;
+        ch.id = self.with(|c| {
+            c.execute(
+                "INSERT INTO policy_changes (ts, remote, client, auth, changes)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![ch.ts, ch.remote, ch.client, ch.auth, changes],
+            )?;
+            Ok(c.last_insert_rowid())
+        })?;
+        Ok(ch)
+    }
+
+    /// Newest first.
+    pub fn policy_changes(&self, limit: u32) -> Result<Vec<PolicyChange>> {
+        self.with(|c| {
+            let mut stmt = c.prepare(
+                "SELECT id, ts, remote, client, auth, changes FROM policy_changes
+                 ORDER BY id DESC LIMIT ?1",
+            )?;
+            let rows = stmt.query_map(params![limit], |r| {
+                let changes: String = r.get(5)?;
+                Ok(PolicyChange {
+                    id: r.get(0)?,
+                    ts: r.get(1)?,
+                    remote: r.get(2)?,
+                    client: r.get(3)?,
+                    auth: r.get(4)?,
+                    changes: serde_json::from_str(&changes).unwrap_or_default(),
+                })
+            })?;
+            rows.collect()
         })
     }
 

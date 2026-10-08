@@ -2152,9 +2152,36 @@ async fn blocks_are_posted_to_the_webhook_once() {
     assert_eq!(got[0]["verdict"]["decision"], "block");
     let url = got[0]["url"].as_str().unwrap();
     assert!(url.starts_with("http://customs.test/verdicts/"), "{url}");
+
+    // A policy change is announced, whatever the rate limit holds back.
+    let mut p: Value = h.get("/api/policy").await.json().await.unwrap();
+    p["mode"] = json!("monitor");
+    p["deny"] = json!([]);
+    let r = h
+        .http
+        .put(format!("{}/api/policy", h.base))
+        .json(&p)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while received.lock().unwrap().len() < 2 && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let got = received.lock().unwrap().clone();
+    assert_eq!(got.len(), 2, "{got:?}");
+    let text = got[1]["text"].as_str().unwrap();
+    assert_eq!(
+        text,
+        "Customs policy loosened (from 127.0.0.1, without a token)\n\
+         - deny: removed pypi:goodpkg@1.0.0\n- mode: enforce -> monitor\n\
+         http://customs.test/policy"
+    );
+    assert_eq!(got[1]["loosened"], json!(true));
     let metrics = h.get("/metrics").await.text().await.unwrap();
     assert!(
-        metrics.contains("customs_notifications_total{outcome=\"sent\"} 1"),
+        metrics.contains("customs_notifications_total{outcome=\"sent\"} 2"),
         "{metrics}"
     );
     h.stop().await;
@@ -2288,6 +2315,28 @@ async fn policy_changes_need_the_admin_token_when_one_is_set() {
     assert_eq!(h.engine.policy().mode, customs::config::Mode::Monitor);
     // Reads and checks need no token.
     assert_eq!(h.get("/api/events").await.status(), 200);
+
+    // The change is logged with where it came from; resending the same policy is not.
+    let r = put(Some(&format!("Bearer {token}"))).await.unwrap();
+    assert_eq!(r.status(), 200);
+    let log: Value = h.get("/api/policy/changes").await.json().await.unwrap();
+    let changes = log["changes"].as_array().unwrap();
+    assert_eq!(changes.len(), 1, "{log}");
+    assert_eq!(changes[0]["auth"], "token");
+    assert_eq!(changes[0]["remote"], "127.0.0.1");
+    assert_eq!(
+        changes[0]["changes"],
+        json!([{"field": "mode", "before": "enforce", "after": "monitor"}])
+    );
+    let metrics = h.get("/metrics").await.text().await.unwrap();
+    assert!(
+        metrics.contains("customs_policy_changes_total{result=\"applied\"} 1"),
+        "{metrics}"
+    );
+    assert!(
+        metrics.contains("customs_policy_changes_total{result=\"refused\"} 2"),
+        "{metrics}"
+    );
     h.stop().await;
 }
 

@@ -15,6 +15,8 @@ import type {
   ModelInfo,
   ModelMetrics,
   Policy,
+  PolicyChange,
+  PolicyFieldChange,
   PolicyHit,
   PolicyMode,
   Reason,
@@ -441,4 +443,32 @@ export function parseModelInfo(v: unknown): ModelInfo {
     thresholds: parseThresholds(r.thresholds ?? ensemble.thresholds ?? ensemble),
     metrics: parseModelMetrics(r.metrics, r),
   };
+}
+
+function parsePolicyFieldChange(v: unknown): PolicyFieldChange | null {
+  if (!isRecord(v)) return null;
+  const field = asString(v.field);
+  if (!field) return null;
+  return { field, before: v.before ?? null, after: v.after ?? null };
+}
+
+/** `GET /api/policy/changes`: `{changes: [...]}`, newest first. Entries without an id are dropped. */
+export function parsePolicyChanges(v: unknown): PolicyChange[] {
+  const list = isRecord(v) ? asArray(v.changes) : asArray(v);
+  const out: PolicyChange[] = [];
+  for (const item of list) {
+    if (!isRecord(item)) continue;
+    const id = asNumber(item.id);
+    const ts = parseTimestamp(item.ts);
+    if (id === null || ts === null) continue;
+    out.push({
+      id,
+      ts,
+      remote: asString(item.remote),
+      client: asString(item.client),
+      auth: item.auth === 'token' ? 'token' : 'none',
+      changes: compact(asArray(item.changes).map(parsePolicyFieldChange)),
+    });
+  }
+  return out;
 }

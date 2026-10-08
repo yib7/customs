@@ -4,6 +4,8 @@
 //! one message per new verdict at or above the configured decision. Repeats of the same
 //! verdict (an agent retrying an install) are sent once per [`REPEAT_WINDOW`], and a token
 //! bucket caps bursts; what it holds back is counted in the next message that goes out.
+//! Every policy change made through the API is announced too, outside the rate limit:
+//! they are rare, and switching to monitor mode turns protection off for everyone.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -15,6 +17,7 @@ use tokio::sync::broadcast::error::RecvError;
 
 use crate::config::Mode;
 use crate::engine::Engine;
+use crate::policy_log::{describe, loosens, PolicyChange};
 use crate::util::ecosystem_str;
 use crate::verdict::{Event, EventKind, Verdict};
 
@@ -226,22 +229,100 @@ pub fn payload(format: Format, text: &str, ev: &Event, v: &Verdict, link: Option
     }
 }
 
+/// Text for a policy change: who made it, then one line per changed field. A change
+/// that can let through what the old policy stopped says so first.
+pub fn policy_message(ch: &PolicyChange, link: Option<&str>) -> String {
+    let verb = if ch.changes.iter().any(loosens) {
+        "loosened"
+    } else {
+        "changed"
+    };
+    let mut who = Vec::new();
+    if let Some(r) = &ch.remote {
+        who.push(format!("from {r}"));
+    }
+    if let Some(c) = &ch.client {
+        who.push(format!("client {c}"));
+    }
+    who.push(if ch.auth == "token" {
+        "with the admin token".into()
+    } else {
+        "without a token".into()
+    });
+    let mut text = format!("Customs policy {verb} ({})", who.join(", "));
+    for c in &ch.changes {
+        text.push_str("\n- ");
+        text.push_str(&describe(c));
+    }
+    if let Some(l) = link {
+        text.push('\n');
+        text.push_str(l);
+    }
+    if text.chars().count() > MAX_TEXT_CHARS {
+        text = text.chars().take(MAX_TEXT_CHARS - 3).collect::<String>() + "...";
+    }
+    text
+}
+
+pub fn policy_payload(format: Format, text: &str, ch: &PolicyChange) -> Value {
+    match format {
+        Format::Slack => json!({ "text": slack_escape(text) }),
+        Format::Discord => json!({ "content": text, "allowed_mentions": { "parse": [] } }),
+        Format::Json => json!({
+            "text": text,
+            "policy_change": ch,
+            "loosened": ch.changes.iter().any(loosens),
+        }),
+    }
+}
+
 /// Follow the engine's events until the process exits.
 pub fn spawn(engine: Arc<Engine>, cfg: NotifyConfig) -> tokio::task::JoinHandle<()> {
     let rx = engine.subscribe();
-    tokio::spawn(run(engine, cfg, rx))
+    let policy_rx = engine.subscribe_policy_changes();
+    tokio::spawn(run(engine, cfg, rx, policy_rx))
+}
+
+async fn send(engine: &Engine, cfg: &NotifyConfig, body: &Value, what: &str) {
+    match deliver(engine, &cfg.url, body).await {
+        Ok(()) => engine.metrics.notification("sent"),
+        Err(e) => {
+            engine.metrics.notification("failed");
+            tracing::warn!(host = %cfg.host(), what, "webhook notification failed: {e}");
+        }
+    }
 }
 
 async fn run(
     engine: Arc<Engine>,
     cfg: NotifyConfig,
     mut rx: tokio::sync::broadcast::Receiver<Event>,
+    mut policy_rx: tokio::sync::broadcast::Receiver<PolicyChange>,
 ) {
     let host = cfg.host();
     tracing::info!(%host, format = ?cfg.format, on = cfg.min_decision.as_str(), "webhook notifications on");
     let mut limiter = Limiter::new(Instant::now());
+    let mut policy_open = true;
     loop {
-        let ev = match rx.recv().await {
+        let received = tokio::select! {
+            r = rx.recv() => r,
+            ch = policy_rx.recv(), if policy_open => {
+                match ch {
+                    Ok(ch) => {
+                        let link = cfg
+                            .public_url
+                            .as_deref()
+                            .map(|base| format!("{}/policy", base.trim_end_matches('/')));
+                        let text = policy_message(&ch, link.as_deref());
+                        send(&engine, &cfg, &policy_payload(cfg.format, &text, &ch), "policy change").await;
+                    }
+                    Err(RecvError::Lagged(_)) => engine.metrics.notification("dropped"),
+                    Err(RecvError::Closed) => policy_open = false,
+                }
+                continue;
+            }
+        };
+        let ev = match received {
             Ok(ev) => ev,
             Err(RecvError::Lagged(n)) => {
                 limiter.held += n;
@@ -276,14 +357,7 @@ async fn run(
         let held = std::mem::take(&mut limiter.held);
         let text = message(&ev, &v, link.as_deref(), held);
         let body = payload(cfg.format, &text, &ev, &v, link.as_deref());
-        let outcome = deliver(&engine, &cfg.url, &body).await;
-        match &outcome {
-            Ok(()) => engine.metrics.notification("sent"),
-            Err(e) => {
-                engine.metrics.notification("failed");
-                tracing::warn!(%host, name = %ev.name, "webhook notification failed: {e}");
-            }
-        }
+        send(&engine, &cfg, &body, &ev.name).await;
     }
 }
 
@@ -405,6 +479,40 @@ mod tests {
         let t = message(&ev, &verdict(Mode::Monitor), None, 3);
         assert!(t.contains("would block (monitor mode, served)"), "{t}");
         assert!(t.contains("3 earlier notifications held back"), "{t}");
+    }
+
+    #[test]
+    fn policy_change_message() {
+        let mut ch = PolicyChange {
+            id: 3,
+            ts: "t".into(),
+            remote: Some("10.0.0.5".into()),
+            client: Some("Mozilla/5.0".into()),
+            auth: "token".into(),
+            changes: vec![crate::policy_log::FieldChange {
+                field: "mode".into(),
+                before: json!("enforce"),
+                after: json!("monitor"),
+            }],
+        };
+        let t = policy_message(&ch, Some("http://c:7878/policy"));
+        assert_eq!(
+            t,
+            "Customs policy loosened (from 10.0.0.5, client Mozilla/5.0, with the admin token)\n\
+             - mode: enforce -> monitor\nhttp://c:7878/policy"
+        );
+        ch.changes[0].before = json!("monitor");
+        ch.changes[0].after = json!("enforce");
+        ch.auth = "none".into();
+        ch.client = None;
+        let t = policy_message(&ch, None);
+        assert_eq!(
+            t,
+            "Customs policy changed (from 10.0.0.5, without a token)\n- mode: monitor -> enforce"
+        );
+        let j = policy_payload(Format::Json, &t, &ch);
+        assert_eq!(j["loosened"], json!(false));
+        assert_eq!(j["policy_change"]["changes"][0]["after"], json!("enforce"));
     }
 
     #[test]

@@ -128,7 +128,9 @@ customs audit -r --format sarif -o customs.sarif      # see docs/github-action.m
 **Alerts.** `customs serve --notify-url <webhook>` posts each block (or each warn, with
 `--notify-on warn`) to Slack, Discord or any JSON receiver, with the rule or model reason
 and a link to the verdict page. An agent retrying the same blocked install produces one
-message an hour, and bursts are rate-limited.
+message an hour, and bursts are rate-limited. Policy changes made through the dashboard
+or API are logged with their source and announced on the same webhook, flagged when they
+loosen protection.
 
 **Release cooldown.** Compromised releases are usually found and pulled within days, so
 versions younger than `min_age_days` (3 by default) are blocked. The proxy also holds them

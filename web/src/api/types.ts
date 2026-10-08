@@ -197,3 +197,23 @@ export interface EventQuery {
   kind?: EventKind;
   q?: string;
 }
+
+/** One field of a policy change, named by its dotted path (`mode`, `upstream.npm`). */
+export interface PolicyFieldChange {
+  field: string;
+  before: unknown;
+  after: unknown;
+}
+
+/** A policy change made through PUT /api/policy, from GET /api/policy/changes. */
+export interface PolicyChange {
+  id: number;
+  ts: string;
+  /** Address of the connection the change came in on. */
+  remote: string | null;
+  /** First token of the User-Agent. */
+  client: string | null;
+  /** `token` when the admin token authorized it, `none` when the server needs none. */
+  auth: 'token' | 'none';
+  changes: PolicyFieldChange[];
+}

@@ -20,6 +20,8 @@ import {
   type RawEvent,
   type RawVerdict,
 } from './fixtures';
+import type { PolicyChange } from '../api/types';
+import { diffPolicies } from '../lib/policyLog';
 
 export interface MockResponse {
   status: number;
@@ -45,6 +47,8 @@ export class MockServer {
   policy: Record<string, unknown> = structuredClone(INITIAL_POLICY);
   /** When set, PUT /api/policy needs `Authorization: Bearer <adminToken>`, as with CUSTOMS_ADMIN_TOKEN. */
   adminToken: string | null = null;
+  /** Newest last, as GET /api/policy/changes reports them (newest first). */
+  policyChanges: PolicyChange[] = [];
   private nextId: number;
   private listeners = new Set<Listener>();
   private rnd = mulberry32(99);
@@ -53,6 +57,28 @@ export class MockServer {
     this.events = buildHistory(now);
     this.nextId = this.events.length + 1;
     for (const v of ALL_VERDICTS) this.verdicts.set(v.id, v);
+    const day = 86_400_000;
+    this.policyChanges = [
+      {
+        id: 1,
+        ts: new Date(now - 6 * day).toISOString(),
+        remote: '10.0.4.12',
+        client: 'Mozilla/5.0',
+        auth: 'token',
+        changes: [{ field: 'deny', before: [], after: ['npm:event-stream@3.3.6'] }],
+      },
+      {
+        id: 2,
+        ts: new Date(now - 2 * day).toISOString(),
+        remote: '10.0.4.12',
+        client: 'Mozilla/5.0',
+        auth: 'token',
+        changes: [
+          { field: 'allow', before: ['pypi:requests'], after: ['pypi:requests', 'npm:react'] },
+          { field: 'min_age_days', before: 7, after: 3 },
+        ],
+      },
+    ];
   }
 
   subscribe(fn: Listener): () => void {
@@ -93,13 +119,17 @@ export class MockServer {
     }
     if (method === 'GET' && path === '/api/stats') return json(200, this.stats());
     if (method === 'GET' && path === '/api/policy') return json(200, this.policy);
+    if (method === 'GET' && path === '/api/policy/changes') {
+      const limit = Math.min(500, Math.max(1, Number(url.searchParams.get('limit') ?? 50) || 50));
+      return json(200, { changes: this.policyChanges.slice(-limit).reverse() });
+    }
     if (method === 'PUT' && path === '/api/policy') {
       if (this.adminToken !== null) {
         const auth = headers.get('Authorization');
         if (!auth) return json(401, { error: 'changing the policy needs the admin token (Authorization: Bearer <token>)', code: 'admin_token_required' });
         if (auth !== `Bearer ${this.adminToken}`) return json(401, { error: 'the admin token is not valid', code: 'admin_token_invalid' });
       }
-      return this.putPolicy(body);
+      return this.putPolicy(body, headers.has('Authorization') ? 'token' : 'none');
     }
     if (method === 'GET' && path === '/api/model') return json(200, MODEL_INFO);
     if (method === 'POST' && path === '/api/check') return this.check(body);
@@ -181,7 +211,7 @@ export class MockServer {
     };
   }
 
-  private putPolicy(body: unknown): MockResponse {
+  private putPolicy(body: unknown, auth: 'token' | 'none' = 'none'): MockResponse {
     if (!isRec(body)) return json(400, { error: 'body must be a JSON object' });
     const errors: { field: string; message: string }[] = [];
     if (body.mode !== 'enforce' && body.mode !== 'monitor') errors.push({ field: 'mode', message: 'mode must be "enforce" or "monitor"' });
@@ -231,7 +261,13 @@ export class MockServer {
       }
     }
     if (errors.length > 0) return json(422, { error: 'invalid policy', errors });
-    this.policy = { ...this.policy, ...body };
+    const next = { ...this.policy, ...body };
+    const changes = diffPolicies(this.policy, next);
+    if (changes.length > 0) {
+      const id = (this.policyChanges.at(-1)?.id ?? 0) + 1;
+      this.policyChanges.push({ id, ts: new Date().toISOString(), remote: '127.0.0.1', client: 'Mozilla/5.0', auth, changes });
+    }
+    this.policy = next;
     return json(200, this.policy);
   }
 

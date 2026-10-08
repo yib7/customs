@@ -22,6 +22,7 @@ use crate::config::{Policy, RuleSeverity};
 use crate::history::{release_history, DependencyInfo, ReleaseHistory, MAX_ADDED_LOOKUPS};
 use crate::metrics::Metrics;
 use crate::policy::{effective_thresholds, evaluate, PolicyContext};
+use crate::policy_log::PolicyChange;
 use crate::registry::{FetchError, FileMeta, Registry, VersionMeta};
 use crate::resolve::{exact_version, resolve_version};
 use crate::store::{ArtifactRow, NewEvent, ScanKey, Store};
@@ -192,6 +193,9 @@ pub struct Engine {
     scanner: ScanFn,
     limits: Limits,
     events: broadcast::Sender<Event>,
+    policy_changes: broadcast::Sender<PolicyChange>,
+    /// Serializes policy changes, so each diff is taken against the policy it replaces.
+    policy_write: Mutex<()>,
     inflight: Mutex<HashMap<String, Flight>>,
     tmp_counter: AtomicU64,
     /// Bytes downloaded since the cache size was last checked.
@@ -224,6 +228,7 @@ impl Engine {
         std::fs::create_dir_all(cache_dir.join("tmp"))?;
         let store = Store::open(&cfg.data_dir.join("customs.db"))?;
         let (events, _) = broadcast::channel(1024);
+        let (policy_changes, _) = broadcast::channel(64);
         Ok(Arc::new(Self {
             policy: RwLock::new(Arc::new(cfg.policy)),
             policy_path: cfg.policy_path,
@@ -235,6 +240,8 @@ impl Engine {
             scanner: cfg.scanner,
             limits: cfg.limits,
             events,
+            policy_changes,
+            policy_write: Mutex::new(()),
             inflight: Mutex::new(HashMap::new()),
             tmp_counter: AtomicU64::new(0),
             // Starting above the trigger makes the first download check the size.
@@ -265,6 +272,29 @@ impl Engine {
         std::fs::rename(&tmp, &self.policy_path)?;
         *self.policy.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(p);
         Ok(())
+    }
+
+    /// Persist and activate a policy that came in through the API, and record what changed
+    /// (`None` when nothing did). `change` carries who made it; its `changes` are filled in.
+    pub fn change_policy(
+        &self,
+        p: Policy,
+        mut change: PolicyChange,
+    ) -> anyhow::Result<Option<PolicyChange>> {
+        let _guard = self.policy_write.lock().unwrap_or_else(|e| e.into_inner());
+        change.changes = crate::policy_log::diff(&self.policy(), &p);
+        self.set_policy(p)?;
+        if change.changes.is_empty() {
+            return Ok(None);
+        }
+        let change = self.store.insert_policy_change(change)?;
+        self.metrics.policy_change("applied");
+        let _ = self.policy_changes.send(change.clone());
+        Ok(Some(change))
+    }
+
+    pub fn subscribe_policy_changes(&self) -> broadcast::Receiver<PolicyChange> {
+        self.policy_changes.subscribe()
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<Event> {

@@ -3,6 +3,7 @@ import {
   parseEventList,
   parseModelInfo,
   parsePolicy,
+  parsePolicyChanges,
   parseStats,
   parseVerdict,
 } from './parse';
@@ -12,6 +13,7 @@ import type {
   EventQuery,
   ModelInfo,
   Policy,
+  PolicyChange,
   Stats,
   Verdict,
 } from './types';
@@ -153,6 +155,10 @@ export const api = {
       (v) => ({ policy: parsePolicy(v), raw: isRecord(v) ? (isRecord(v.policy) ? v.policy : v) : {} }),
       { signal },
     );
+  },
+  /** Policy changes made through the API, newest first. */
+  policyChanges(limit = 20, signal?: AbortSignal): Promise<PolicyChange[]> {
+    return request(`/api/policy/changes?limit=${limit}`, parsePolicyChanges, { signal });
   },
   model(signal?: AbortSignal): Promise<ModelInfo> {
     return request('/api/model', parseModelInfo, { signal });

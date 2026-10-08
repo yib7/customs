@@ -43,6 +43,14 @@ pub enum PolicyAuth {
 }
 
 impl PolicyAuth {
+    /// How an accepted change was authorized, for the policy change log.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            PolicyAuth::Token(_) => "token",
+            PolicyAuth::Open | PolicyAuth::Disabled => "none",
+        }
+    }
+
     /// `None` when `headers` may change the policy, else the refusal.
     pub fn refuse(
         &self,

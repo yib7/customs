@@ -18,6 +18,7 @@ pub mod mcp;
 pub mod metrics;
 pub mod notify;
 pub mod policy;
+pub mod policy_log;
 pub mod proxy;
 pub mod registry;
 pub mod resolve;

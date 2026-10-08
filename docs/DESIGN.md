@@ -756,6 +756,15 @@ API (JSON). CORS allows only `http://localhost:5173` (the Vite dev server).
   in monitor mode or allow-list a package. `--allow-anonymous-policy-changes` lifts that
   for a container whose published port is itself bound to loopback. Reads and checks
   need no token.
+- `GET /api/policy/changes?limit=50`: the policy changes accepted through `PUT`, newest
+  first: `{ "changes": [ { "id", "ts", "remote", "client", "auth", "changes": [ { "field",
+  "before", "after" } ] } ] }`. `remote` is the connection's address (a proxy in front
+  of Customs shows up as itself), `client` the first token of the User-Agent, and `auth`
+  `token` or `none`. Fields are dotted paths (`upstream.npm`) sorted by name; a `PUT`
+  that changes nothing is not recorded. The dashboard's policy page lists the latest ten,
+  the webhook announces each one (section 7.1), and
+  `customs_policy_changes_total{result="applied|refused"}` counts them along with the
+  `PUT`s turned away for a missing or wrong token.
 - `GET /api/model`: the contents of `metrics.json` (under `metrics`, or merged when the file
   already has a `metrics` key) plus `model_version`, `feature_schema_version`, `untrained`,
   `thresholds` (effective), `model_thresholds`, `manifest`, `models_dir`, and `components`
@@ -763,6 +772,7 @@ API (JSON). CORS allows only `http://localhost:5173` (the Vite dev server).
 - `GET /metrics`: Prometheus text format (`customs_http_requests_total{route,status}`,
   `customs_verdicts_total{decision,ecosystem}`, `customs_events_total{kind}`,
   `customs_cache_total{result}`, `customs_singleflight_joins_total`,
+  `customs_policy_changes_total{result}`,
   `customs_scan_duration_seconds`, `customs_upstream_fetch_duration_seconds{kind}`).
   `GET /healthz`: `{ "status": "ok", "version", "model_version", "mode" }`.
 - `GET /` and static assets: the dashboard from `--ui-dir` (default `web/dist`), with
@@ -825,6 +835,16 @@ counts the ones held back. Delivery has a 10 s timeout and up to two retries (af
 4 s) on network errors, 429 and 5xx; other 4xx answers are not retried. The webhook URL's
 path is its credential, so logs name only its host. Outcomes are counted in
 `customs_notifications_total{outcome="sent|failed|repeat|rate_limited|dropped"}`.
+
+Each policy change accepted through `PUT /api/policy` is announced too, whatever
+`--notify-on` says and outside the rate limit, since switching to monitor mode or
+allow-listing a package turns protection off for everyone using the server. The text is
+"Customs policy changed" with the address, client and whether the admin token was used,
+then one line per field (`mode: enforce -> monitor`, `allow: added npm:left-pad`), and the
+policy page link. It says "loosened" instead when a change can let through what the old
+policy stopped: monitor mode, a lower rule severity, a higher threshold, a shorter age
+limit, a switch turned off, an allow-list entry added or a deny-list entry removed, or a
+new upstream. The JSON body is `{ "text", "policy_change", "loosened" }`.
 
 ## 8. Policy (`customs.toml`)
 

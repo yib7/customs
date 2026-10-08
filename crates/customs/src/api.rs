@@ -15,8 +15,13 @@ use serde_json::{json, Value};
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use tokio_stream::wrappers::BroadcastStream;
 
+use std::net::SocketAddr;
+
+use axum::extract::ConnectInfo;
+
 use crate::config::Policy;
 use crate::engine::EngineError;
+use crate::policy_log::{describe, PolicyChange};
 use crate::server::AppState;
 use crate::store::EventFilter;
 use crate::util::{parse_ecosystem, registry_name};
@@ -29,6 +34,7 @@ pub fn router() -> Router<AppState> {
         .route("/verdicts/{id}", get(verdict))
         .route("/stats", get(stats))
         .route("/policy", get(get_policy).put(put_policy))
+        .route("/policy/changes", get(policy_changes))
         .route("/model", get(model))
         .fallback(|| async { api_error(StatusCode::NOT_FOUND, "no such API route") })
 }
@@ -196,10 +202,19 @@ async fn get_policy(State(state): State<AppState>) -> Response {
 async fn put_policy(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
+    extensions: axum::http::Extensions,
     body: String,
 ) -> Response {
+    let remote = extensions
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|c| c.0.ip().to_string());
     if let Some((status, code, msg)) = state.policy_auth.refuse(&headers) {
-        tracing::warn!(code, "policy change refused");
+        state.engine.metrics.policy_change("refused");
+        tracing::warn!(
+            code,
+            remote = remote.as_deref().unwrap_or("-"),
+            "policy change refused"
+        );
         let mut resp = (status, Json(json!({ "error": msg, "code": code }))).into_response();
         if status == StatusCode::UNAUTHORIZED {
             resp.headers_mut().insert(
@@ -222,14 +237,51 @@ async fn put_policy(
                 .into_response()
         }
     };
-    if let Err(e) = state.engine.set_policy(policy) {
-        return api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("saving policy: {e}"),
-        );
+    let who = PolicyChange {
+        id: 0,
+        ts: String::new(),
+        remote,
+        client: crate::proxy::client_from_headers(&headers),
+        auth: state.policy_auth.kind().into(),
+        changes: Vec::new(),
+    };
+    match state.engine.change_policy(policy, who) {
+        Err(e) => {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("saving policy: {e}"),
+            )
+        }
+        Ok(Some(ch)) => {
+            let fields: Vec<String> = ch.changes.iter().map(describe).collect();
+            tracing::info!(
+                path = %state.engine.policy_path().display(),
+                remote = ch.remote.as_deref().unwrap_or("-"),
+                auth = %ch.auth,
+                changes = %fields.join("; "),
+                "policy updated"
+            );
+        }
+        Ok(None) => {}
     }
-    tracing::info!(path = %state.engine.policy_path().display(), "policy updated");
     Json(&*state.engine.policy()).into_response()
+}
+
+#[derive(Deserialize)]
+struct ChangesQuery {
+    limit: Option<u32>,
+}
+
+/// `GET /api/policy/changes`: policy changes made through the API, newest first.
+async fn policy_changes(State(state): State<AppState>, Query(q): Query<ChangesQuery>) -> Response {
+    match state
+        .engine
+        .store
+        .policy_changes(q.limit.unwrap_or(50).clamp(1, 500))
+    {
+        Ok(changes) => Json(json!({ "changes": changes })).into_response(),
+        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
 }
 
 /// `GET /api/model`: `models/metrics.json` merged with the manifest and the effective
