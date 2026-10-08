@@ -55,6 +55,7 @@ pub fn router(state: AppState, ui_dir: Option<&Path>) -> Router {
         .route("/pypi/simple/{project}", get(pypi::simple_project))
         .route("/pypi/simple/{project}/", get(pypi::simple_project))
         .route("/pypi/files/{*path}", get(pypi::file))
+        .route("/pypi/offsite/{file}", get(pypi::offsite))
         .route("/npm/{*rest}", any(npm::npm_any))
         .nest("/api", crate::api::router().layer(cors))
         .route("/metrics", get(metrics))

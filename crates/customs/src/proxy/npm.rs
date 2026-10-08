@@ -9,7 +9,9 @@ use axum::response::{IntoResponse, Response};
 use customs_scan::Ecosystem;
 use serde_json::Value;
 
-use super::{artifact_response, client_from_headers, error_response, proxy_base};
+use super::{
+    artifact_response, client_from_headers, error_response, proxy_base, safe_upstream_path,
+};
 use crate::engine::ArtifactRequest;
 use crate::registry::npm_escape;
 use crate::server::AppState;
@@ -51,10 +53,13 @@ fn valid_name(name: &str) -> bool {
 pub fn parse_npm_path(rest: &str) -> Option<NpmPath> {
     let rest = rest.trim_start_matches('/');
     if rest.starts_with("-/") {
-        return Some(NpmPath::Special(rest.to_string()));
+        return safe_upstream_path(rest).then(|| NpmPath::Special(rest.to_string()));
     }
     // Decoding twice is harmless here and covers clients that double-escape `%252f`.
     let rest = rest.replace("%2f", "/").replace("%2F", "/");
+    if !safe_upstream_path(rest.trim_end_matches('/')) {
+        return None;
+    }
     if let Some((name, file)) = rest.split_once("/-/") {
         if !valid_name(name) || file.contains('/') || !file.ends_with(".tgz") {
             return None;
@@ -333,6 +338,14 @@ mod tests {
         assert_eq!(parse_npm_path("a/b/c"), None);
         assert_eq!(parse_npm_path("x/-/../../y.tgz"), None);
         assert_eq!(parse_npm_path("x/-/x-1.0.0.zip"), None);
+        // Already percent-decoded once by the router: whatever is still escaped, or would
+        // become a query, fragment or separator upstream, is refused.
+        assert_eq!(parse_npm_path("-/%2e%2e/evil/-/evil-1.0.0.tgz"), None);
+        assert_eq!(parse_npm_path("-/v1/../../evil"), None);
+        assert_eq!(parse_npm_path("x/-/x-1.0.0.tgz#/y-1.0.0.tgz"), None);
+        assert_eq!(parse_npm_path("x/-/..\\x-1.0.0.tgz"), None);
+        assert_eq!(parse_npm_path("x/-/x-1.0.0.tgz?a=.tgz"), None);
+        assert_eq!(parse_npm_path("lodash%252e%252e"), None);
     }
 
     #[test]

@@ -32,6 +32,20 @@ pub fn proxy_base(headers: &HeaderMap) -> String {
     format!("{proto}://{host}")
 }
 
+/// Whether a client-supplied (already percent-decoded) path is safe to append to an
+/// upstream base URL. URL parsing would otherwise turn `?` and `#` into a query or
+/// fragment, a backslash into a separator, and a leftover `%2e%2e` (double-encoded by the
+/// client) into a parent segment, so the URL fetched could differ from the one the verdict
+/// names.
+pub fn safe_upstream_path(p: &str) -> bool {
+    !p.is_empty()
+        && !p
+            .chars()
+            .any(|c| c.is_control() || c.is_whitespace() || "\\?#%".contains(c))
+        && p.split('/')
+            .all(|seg| !seg.is_empty() && seg != "." && seg != "..")
+}
+
 /// First token of the User-Agent (`pip/24.0`, `npm/10.9.4`), enough to tell clients apart.
 pub fn client_from_headers(headers: &HeaderMap) -> Option<String> {
     headers
@@ -195,6 +209,29 @@ mod tests {
             HeaderValue::from_static("customs.example"),
         );
         assert_eq!(proxy_base(&h), "https://customs.example");
+    }
+
+    #[test]
+    fn upstream_paths() {
+        assert!(safe_upstream_path("packages/aa/bb/requests-2.32.3.tar.gz"));
+        assert!(safe_upstream_path("-/npm/v1/security/advisories/bulk"));
+        assert!(safe_upstream_path("pkg-1.0+local.tar.gz"));
+        for bad in [
+            "",
+            "a//b",
+            "a/./b",
+            "a/../b",
+            "..",
+            "a/",
+            "evil-1.0.tar.gz#/requests-2.31.0.tar.gz",
+            "evil.whl?x=.metadata",
+            "a\\..\\b",
+            "a/%2e%2e/b",
+            "a b",
+            "a\nb",
+        ] {
+            assert!(!safe_upstream_path(bad), "{bad:?}");
+        }
     }
 
     #[test]

@@ -658,6 +658,32 @@ async fn new_versions_hit_min_age() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn upstream_urls_cannot_be_redirected_by_escaped_paths() {
+    let h = Harness::start(|_| {}).await;
+    // The name Customs would scan and the URL it would fetch must agree: a fragment,
+    // query, backslash or leftover escape could make them differ.
+    for path in [
+        "/pypi/files/packages/ab/cd/evil-1.0.tar.gz%23/goodpkg-1.0.0.tar.gz",
+        "/pypi/files/packages/ab/cd/evil-1.0-py3-none-any.whl%23.metadata",
+        "/pypi/files/packages/ab/cd/evil-1.0.tar.gz%3F/goodpkg-1.0.0.tar.gz",
+        "/pypi/files/packages/%252e%252e/cd/goodpkg-1.0.0.tar.gz",
+        "/pypi/files/packages/ab%5C..%5Ccd/goodpkg-1.0.0.tar.gz",
+        "/pypi/simple/good%23pkg/",
+    ] {
+        assert_eq!(h.get(path).await.status(), 400, "{path}");
+    }
+    for path in [
+        "/npm/-/%252e%252e/evil",
+        "/npm/evil/-/evil-1.0.0.tgz%23/plainlib-0.1.0.tgz",
+        "/npm/plainlib/-/..%5Cplainlib-0.1.0.tgz",
+    ] {
+        assert_eq!(h.get(path).await.status(), 404, "{path}");
+    }
+    assert_eq!(h.mock.hits("packages/ab/cd/goodpkg-1.0.0.tar.gz"), 0);
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn npm_packument_rewrite_and_tarballs() {
     let h = Harness::start(|_| {}).await;
     for path in ["/npm/@scope%2flib", "/npm/@scope/lib", "/npm/@scope%2Flib"] {

@@ -11,7 +11,10 @@ use regex::Regex;
 use serde_json::Value;
 use url::Url;
 
-use super::{artifact_response, client_from_headers, error_response, proxy_base};
+use super::{
+    artifact_response, client_from_headers, error_response, proxy_base, safe_upstream_path,
+};
+use crate::config::Mode;
 use crate::engine::ArtifactRequest;
 use crate::server::AppState;
 use crate::util::{normalize_name, parse_pypi_filename};
@@ -26,13 +29,21 @@ pub struct Rewriter<'a> {
     pub simple_base: &'a str,
     pub files_base: &'a str,
     pub proxy_base: &'a str,
+    /// Point links to hosts we do not proxy at a route that refuses them (enforce mode),
+    /// rather than leaving them for the client to fetch unscanned (monitor mode).
+    pub refuse_offsite: bool,
 }
 
 impl Rewriter<'_> {
     /// Map an upstream link to its proxy equivalent. Relative links resolve against the
-    /// page URL. Links to hosts we do not proxy are left alone.
+    /// page URL. Links elsewhere go to the refusal route, keeping the file name so the
+    /// client still sees which file it was offered, or are left alone in monitor mode.
     pub fn rewrite_url(&self, href: &str, page_url: &Url) -> Option<String> {
-        let abs = page_url.join(href).ok()?;
+        let Ok(abs) = page_url.join(href) else {
+            return self
+                .refuse_offsite
+                .then(|| format!("{}/pypi/offsite/unparsable", self.proxy_base));
+        };
         let s = abs.as_str();
         if let Some(rest) = s
             .strip_prefix(self.files_base)
@@ -46,20 +57,41 @@ impl Rewriter<'_> {
         {
             return Some(format!("{}/pypi/simple/{}", self.proxy_base, rest));
         }
-        None
+        if !self.refuse_offsite {
+            return None;
+        }
+        let file: String = abs
+            .path_segments()
+            .and_then(|mut p| p.next_back())
+            .unwrap_or("")
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || "-_.+!".contains(*c))
+            .collect();
+        let file = if file.is_empty() || file.starts_with('.') {
+            "unnamed".to_string()
+        } else {
+            file
+        };
+        Some(format!("{}/pypi/offsite/{file}", self.proxy_base))
     }
 
     pub fn rewrite_html(&self, body: &str, page_url: &Url) -> String {
         static HREF: OnceLock<Regex> = OnceLock::new();
+        // Quoted with either quote, or unquoted up to whitespace or the end of the tag.
         let re = HREF.get_or_init(|| {
-            Regex::new(r#"(?i)((?-u:\b)href\s*=\s*)(["'])([^"']*)(["'])"#).unwrap()
+            Regex::new(r#"(?i)((?-u:\b)href\s*=\s*)(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))"#).unwrap()
         });
         re.replace_all(body, |c: &regex::Captures<'_>| {
-            let href = &c[3];
+            let (q, href) = match (c.get(2), c.get(3), c.get(4)) {
+                (Some(m), _, _) => ("\"", m.as_str()),
+                (_, Some(m), _) => ("'", m.as_str()),
+                (_, _, Some(m)) => ("\"", m.as_str()),
+                _ => return c[0].to_string(),
+            };
             // Hrefs in HTML may carry entity-encoded ampersands; decode only for resolution.
             let decoded = href.replace("&amp;", "&");
             match self.rewrite_url(&decoded, page_url) {
-                Some(new) => format!("{}{}{}{}", &c[1], &c[2], new.replace('&', "&amp;"), &c[4]),
+                Some(new) => format!("{}{q}{}{q}", &c[1], new.replace('&', "&amp;")),
                 None => c[0].to_string(),
             }
         })
@@ -137,6 +169,7 @@ async fn fetch_and_rewrite(
         simple_base: &up.pypi_simple,
         files_base: &up.pypi_files,
         proxy_base: &base,
+        refuse_offsite: policy.mode == Mode::Enforce,
     };
     let ct = page
         .content_type
@@ -171,10 +204,28 @@ pub async fn simple_project(
     headers: HeaderMap,
 ) -> Response {
     let name = normalize_name(Ecosystem::Pypi, &project);
-    if name.is_empty() || name.contains('/') {
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
+    {
         return (StatusCode::BAD_REQUEST, "invalid project name\n").into_response();
     }
     fetch_and_rewrite(&state, &headers, &format!("{name}/"), Some(&name)).await
+}
+
+/// `GET /pypi/offsite/{file}`: where enforce mode points index links to hosts Customs
+/// does not proxy, so the install fails with a reason instead of skipping the scan.
+pub async fn offsite(Path(file): Path<String>) -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        format!(
+            "Customs blocked {file}: the package index links it from a host other than the \
+             configured file host (upstream.pypi_files), so it cannot be scanned.\n"
+        ),
+    )
+        .into_response()
 }
 
 /// `GET /pypi/files/{path}`
@@ -183,7 +234,7 @@ pub async fn file(
     Path(path): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    if path.split('/').any(|seg| seg == ".." || seg.is_empty()) {
+    if !safe_upstream_path(&path) {
         return (StatusCode::BAD_REQUEST, "invalid path\n").into_response();
     }
     let policy = state.engine.policy();
@@ -240,6 +291,7 @@ mod tests {
             simple_base: "https://pypi.org/simple",
             files_base: "https://files.pythonhosted.org",
             proxy_base: base,
+            refuse_offsite: true,
         }
     }
 
@@ -270,8 +322,44 @@ mod tests {
         ));
         // Attributes other than href are untouched.
         assert!(out.contains(r#"data-requires-python="&gt;=3.8""#));
-        assert!(out.contains(r#"href="https://example.com/elsewhere.tar.gz""#));
+        // Other hosts go to the refusal route, keeping the file name.
+        assert!(out.contains(r#"href="http://127.0.0.1:7878/pypi/offsite/elsewhere.tar.gz""#));
         assert_eq!(out.matches("files.pythonhosted.org").count(), 0);
+        assert_eq!(out.matches("example.com").count(), 0);
+        let monitor = Rewriter {
+            refuse_offsite: false,
+            ..rw("http://127.0.0.1:7878")
+        };
+        assert!(monitor
+            .rewrite_html(PAGE, &page)
+            .contains(r#"href="https://example.com/elsewhere.tar.gz""#));
+    }
+
+    #[test]
+    fn rewrites_unquoted_and_base_hrefs() {
+        let page = Url::parse("https://pypi.org/simple/x/").unwrap();
+        let html =
+            "<base href=https://evil.example/><a href=https://evil.example/x-1.0.tar.gz>x</a>\
+                    <a HREF = https://files.pythonhosted.org/packages/a/x-1.1.tar.gz#sha256=1>x</a>\
+                    <a href=\"https://evil.example/it's-1.0.tar.gz\">y</a>";
+        let out = rw("http://h:1").rewrite_html(html, &page);
+        assert_eq!(out.matches("evil.example").count(), 0, "{out}");
+        assert!(
+            out.contains(r#"<base href="http://h:1/pypi/offsite/unnamed">"#),
+            "{out}"
+        );
+        assert!(
+            out.contains(r#"href="http://h:1/pypi/offsite/x-1.0.tar.gz">"#),
+            "{out}"
+        );
+        assert!(
+            out.contains(r#"HREF = "http://h:1/pypi/files/packages/a/x-1.1.tar.gz#sha256=1">"#),
+            "{out}"
+        );
+        assert!(
+            out.contains(r#"href="http://h:1/pypi/offsite/its-1.0.tar.gz">"#),
+            "{out}"
+        );
     }
 
     #[test]
@@ -303,7 +391,10 @@ mod tests {
             v["files"][0]["url"],
             "http://localhost:7878/pypi/files/packages/63/70/2bf7/requests-2.32.3.tar.gz"
         );
-        assert_eq!(v["files"][1]["url"], "https://mirror.example/x.whl");
+        assert_eq!(
+            v["files"][1]["url"],
+            "http://localhost:7878/pypi/offsite/x.whl"
+        );
         assert_eq!(v["files"][0]["hashes"]["sha256"], "55365417");
     }
 }

@@ -653,8 +653,12 @@ Default bind `127.0.0.1:7878`.
 Registry proxy:
 - `GET /pypi/simple/` and `GET /pypi/simple/{project}/`: proxied PEP 503 HTML (and PEP 691
   JSON when requested by Accept), with every file URL rewritten to `/pypi/files/{path}`
-  (absolute, built from the request `Host`). A 404 upstream is recorded as a
-  `nonexistent_package` event (slopsquat signal).
+  (absolute, built from the request `Host`). Links are found whether the `href` is
+  double-quoted, single-quoted or unquoted. In enforce mode a link to any other host
+  (including a `<base href>`) is rewritten to `/pypi/offsite/{file}`, which returns 403:
+  a mirror whose index lists files on a host other than `upstream.pypi_files` cannot hand
+  the client an unscanned download. Monitor mode leaves such links alone. A 404 upstream
+  is recorded as a `nonexistent_package` event (slopsquat signal).
 - `GET /pypi/files/{path}`: fetches `https://files.pythonhosted.org/{path}`, scans, decides,
   streams the archive or returns 403 with a plain-text explanation. The HTTP reason phrase
   is `Blocked by Customs: <rule or reason>`, which pip prints. PEP 658 `*.metadata` files
@@ -666,6 +670,13 @@ Registry proxy:
   `{"error": "<explanation>"}` (npm prints `error`).
 - `/npm/-/...` (audit and other registry endpoints) passes through unchanged.
 - Artifact responses carry `x-customs-decision` and `x-customs-verdict` (verdict id).
+- Every path that ends up in an upstream URL is checked after the router has
+  percent-decoded it once: a `?`, `#`, `\`, `%`, whitespace or control character, or an
+  empty, `.` or `..` segment, is refused (400 for PyPI, 404 for npm). Otherwise the URL
+  fetched could differ from the file name the verdict records, for example
+  `evil.tar.gz%23/requests-2.31.0.tar.gz` would download `evil.tar.gz` while the verdict
+  and the event log named `requests`. PyPI project names are limited to letters, digits,
+  `-`, `_` and `.`.
 
 API (JSON). CORS allows only `http://localhost:5173` (the Vite dev server).
 - `POST /api/check` `{ "ecosystem": "pypi", "name": "foo", "version": null, "client": "cli" }`:
