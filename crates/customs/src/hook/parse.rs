@@ -277,6 +277,92 @@ fn downloads_in(body: &str) -> Vec<String> {
         .collect()
 }
 
+/// The file a downloader command saves to: curl `-o FILE` (also `-sSLo FILE`,
+/// `--output FILE`, `--output=FILE`) or `-O` (the URL's last path segment), wget `-O FILE`
+/// or by default the URL's last segment, PowerShell `-OutFile FILE`. `None` when it writes
+/// to standard output.
+fn saved_file(c: &[String], url: &str) -> Option<String> {
+    let tool = basename(&c[0]).to_ascii_lowercase();
+    let tool = tool.trim_end_matches(".exe");
+    let remote_name = || {
+        url.split(['?', '#'])
+            .next()
+            .and_then(|u| u.rsplit('/').next())
+            .filter(|n| !n.is_empty() && !n.contains(':'))
+            .map(str::to_string)
+    };
+    let args = &c[1..];
+    let mut out: Option<String> = None;
+    let mut remote = false;
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        let next = args.get(i + 1).cloned();
+        if let Some(v) = a
+            .strip_prefix("--output=")
+            .or_else(|| a.strip_prefix("--output-document="))
+        {
+            out = Some(v.to_string());
+        } else if matches!(a, "--output" | "--output-document")
+            || a.eq_ignore_ascii_case("-outfile")
+        {
+            out = next;
+            i += 1;
+        } else if a == "--remote-name" {
+            remote = true;
+        } else if tool == "curl" || tool == "wget" {
+            if let Some(flags) = a
+                .strip_prefix('-')
+                .filter(|f| !f.is_empty() && !f.starts_with('-'))
+            {
+                let o = if tool == "wget" { 'O' } else { 'o' };
+                if let Some(pos) = flags.find(o) {
+                    let rest = &flags[pos + 1..];
+                    if rest.is_empty() {
+                        out = next;
+                        i += 1;
+                    } else {
+                        out = Some(rest.to_string());
+                    }
+                } else if tool == "curl" && flags.contains('O') {
+                    remote = true;
+                }
+            }
+        }
+        i += 1;
+    }
+    match out {
+        Some(f) if f == "-" => None,
+        Some(f) => Some(f),
+        None if remote || tool == "wget" => remote_name(),
+        None => None,
+    }
+}
+
+/// The file `c` runs and what runs it: a shell, interpreter or `source` given a file, or a
+/// path run directly (`exec`).
+fn executed_file(c: &[String]) -> Option<(String, String)> {
+    let first = c.first()?;
+    let name = basename(first);
+    let lower = name.to_ascii_lowercase();
+    let version = lower.trim_end_matches(|ch: char| ch.is_ascii_digit() || ch == '.');
+    if SHELLS.contains(&lower.as_str())
+        || INTERPRETERS.contains(&lower.as_str())
+        || INTERPRETERS.contains(&version)
+        || matches!(name, "source" | ".")
+    {
+        let file = c[1..].iter().find(|a| !a.starts_with('-'))?;
+        return Some((file.clone(), name.to_string()));
+    }
+    first
+        .contains('/')
+        .then(|| (first.clone(), "exec".to_string()))
+}
+
+fn plain_path(p: &str) -> &str {
+    p.trim_start_matches("./")
+}
+
 /// Find scripts that `cmd` downloads and runs in one step, as `(url, runner, tool)`.
 fn remote_scripts(cmd: &str, out: &mut Vec<(String, String, String)>, depth: usize) {
     if depth > 3 {
@@ -330,6 +416,39 @@ fn remote_scripts(cmd: &str, out: &mut Vec<(String, String, String)>, depth: usi
             } else if j >= 2 && w[j - 1] == "-c" && SHELLS.contains(&name) {
                 // A pipeline inside `bash -c '...'`.
                 remote_scripts(arg, out, depth + 1);
+            }
+        }
+    }
+    // `curl -o x.sh URL && sh x.sh`: a file a downloader saved, run later in the line.
+    let mut saved: Vec<(String, String, String)> = Vec::new();
+    for (i, words) in p.commands.iter().enumerate() {
+        let c = unwrap_runner(words);
+        let Some(first) = c.first() else { continue };
+        if is_downloader(first) {
+            let url = download_url(c);
+            let redirected = p
+                .redirects
+                .iter()
+                .filter(|(k, _)| *k == i)
+                .map(|(_, f)| f.clone())
+                .next_back();
+            if let Some(file) = saved_file(c, &url).or(redirected) {
+                saved.push((
+                    plain_path(&file).to_string(),
+                    url,
+                    basename(first).to_string(),
+                ));
+            }
+            continue;
+        }
+        if let Some((file, runner)) = executed_file(c) {
+            if let Some((_, url, tool)) = saved.iter().rev().find(|(f, ..)| f == plain_path(&file))
+            {
+                out.push((
+                    url.clone(),
+                    runner.clone(),
+                    format!("{tool}, then {runner}"),
+                ));
             }
         }
     }
@@ -1897,6 +2016,54 @@ mod tests {
             scripts("iwr -useb https://x.example/i.ps1 | Invoke-Expression"),
             script("https://x.example/i.ps1", "Invoke-Expression")
         );
+    }
+
+    #[test]
+    fn remote_scripts_saved_then_run() {
+        assert_eq!(
+            scripts("curl -LsSf https://astral.sh/uv/install.sh -o install.sh && sh install.sh"),
+            script("https://astral.sh/uv/install.sh", "sh")
+        );
+        assert_eq!(
+            scripts("curl -fsSLO https://x.example/dl/get.sh?v=2; bash ./get.sh --yes"),
+            script("https://x.example/dl/get.sh?v=2", "bash")
+        );
+        assert_eq!(
+            scripts("wget https://bootstrap.pypa.io/get-pip.py && python3 get-pip.py"),
+            script("https://bootstrap.pypa.io/get-pip.py", "python3")
+        );
+        assert_eq!(
+            scripts("wget -qO /tmp/n.sh https://x.example/n.sh; sudo bash /tmp/n.sh"),
+            script("https://x.example/n.sh", "bash")
+        );
+        assert_eq!(
+            scripts(
+                "curl -s https://x.example/i.sh > /tmp/i.sh && chmod +x /tmp/i.sh && /tmp/i.sh"
+            ),
+            script("https://x.example/i.sh", "exec")
+        );
+        assert_eq!(
+            scripts("curl --output=s.sh https://x.example/s.sh && source s.sh"),
+            script("https://x.example/s.sh", "source")
+        );
+        assert_eq!(
+            tools("curl -o i.sh https://x.example/i.sh && sh i.sh"),
+            vec!["curl, then sh"]
+        );
+    }
+
+    #[test]
+    fn downloads_saved_and_not_run() {
+        for cmd in [
+            "curl -o data.json https://api.example.com/x && python3 process.py",
+            "wget https://x.example/a.tar.gz && tar xzf a.tar.gz",
+            "curl -o install.sh https://x.example/i.sh && cat install.sh",
+            "sh install.sh",
+            "curl -o a.sh https://x.example/a.sh && sh b.sh",
+            "wget -O - https://x.example/a.sh > /dev/null && sh other.sh",
+        ] {
+            assert!(scripts(cmd).is_empty(), "{cmd}: {:?}", scripts(cmd));
+        }
     }
 
     #[test]

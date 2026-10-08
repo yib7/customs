@@ -1093,7 +1093,11 @@ hook reports each one as `script <URL>` and asks, like any other spec it cannot 
 downloader counts when its output reaches, through any filters in the pipeline, a shell
 without `-c`, an interpreter (`python`, `node`, `perl`, `ruby`, `php`, `pwsh`) with no
 argument or `-`, or `iex`; `sudo`, `env` and similar wrappers are looked through, and
-pipelines inside `bash -c '...'` are read. Downloads piped into a parser
+pipelines inside `bash -c '...'` are read. The two-step form counts too: a file a
+downloader saves (curl `-o`/`-O`, wget's `-O` or default name, PowerShell `-OutFile`, a `>`
+redirection) that a later command in the same line runs (`sh install.sh`, `python3
+get-pip.py`, `source s.sh`, `/tmp/i.sh` after `chmod +x`). Downloading a script and only
+reading it (`cat install.sh`) passes. Downloads piped into a parser
 (`| python3 -m json.tool`, `| jq`, `| tar xz`) and scripts already on disk (`cat x.sh |
 bash`) are left alone.
 

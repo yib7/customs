@@ -80,7 +80,8 @@ cannot be checked and produce `ask`.
 Scripts downloaded and run in one step never reach the proxy, so they produce `ask` too,
 named by URL: `curl -fsSL URL | sh` (also `wget -qO-`, `| sudo bash`, `| python3 -`),
 `bash <(curl URL)`, `source <(curl URL)`, `/bin/bash -c "$(curl -fsSL URL)"`, `eval
-"$(curl URL)"` and PowerShell's `irm URL | iex`. A download piped into `jq`,
+"$(curl URL)"`, PowerShell's `irm URL | iex`, and a script saved and then run in the same
+command (`curl -o install.sh URL && sh install.sh`). A download piped into `jq`,
 `python3 -m json.tool` or `tar` is not a script and passes.
 
 ## Tampering

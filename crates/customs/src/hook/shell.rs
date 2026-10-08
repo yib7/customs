@@ -24,6 +24,8 @@ pub struct Pipelines {
     pub piped: Vec<bool>,
     /// `(i, body)` for each process substitution `<( body )` among command `i`'s words.
     pub process_subs: Vec<(usize, String)>,
+    /// `(i, file)` for each output redirection (`> file`, `>> file`, `&> file`) of command `i`.
+    pub redirects: Vec<(usize, String)>,
 }
 
 /// Split a command line into top-level commands, keeping pipes and process substitutions
@@ -35,6 +37,7 @@ pub fn pipelines(input: &str) -> Pipelines {
         commands: lx.commands,
         piped: lx.piped,
         process_subs: lx.process_subs,
+        redirects: lx.redirects,
     }
 }
 
@@ -46,6 +49,9 @@ struct Lexer {
     process_subs: Vec<(usize, String)>,
     /// The command being ended is joined to the next by a pipe.
     pipe_next: bool,
+    redirects: Vec<(usize, String)>,
+    /// The pending redirection target is an output file.
+    redirect_out: bool,
     nested: Vec<Vec<String>>,
     current: Vec<String>,
     word: String,
@@ -63,6 +69,8 @@ impl Lexer {
             piped: Vec::new(),
             process_subs: Vec::new(),
             pipe_next: false,
+            redirects: Vec::new(),
+            redirect_out: false,
             nested: Vec::new(),
             current: Vec::new(),
             word: String::new(),
@@ -80,6 +88,9 @@ impl Lexer {
             let w = std::mem::take(&mut self.word);
             if self.skip_next {
                 self.skip_next = false;
+                if self.redirect_out {
+                    self.redirects.push((self.commands.len(), w));
+                }
             } else {
                 self.current.push(w);
             }
@@ -231,6 +242,7 @@ impl Lexer {
             }
             return;
         }
+        self.redirect_out = first == Some('>');
         self.skip_next = true;
     }
 
