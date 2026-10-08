@@ -1197,8 +1197,9 @@ writes `customs.toml` (a redirection, `sed -i`, `tee`, `cp`, `mv`, `rm`, a scrip
 interpreter), stopping the server (`pkill` or `killall` naming customs, `kill` on a line
 that mentions it, `systemctl`, `service`, `launchctl`, `docker` or `podman` stopping it),
 writes to `.claude/settings*.json`, and pointing installers away from the proxy: an
-assignment, `export`, `unset` or `env -u` of a variable `customs env` sets, `npm|pnpm|yarn|
-bun config set|delete registry`, `pip config set|unset *index*`, or a registry or index
+assignment (before the command or behind `env`, `sudo` and similar wrappers), `export`,
+`unset` or `env -u` of a variable `customs env` sets or of `YARN_REGISTRY`,
+`PIP_FIND_LINKS` or `UV_FIND_LINKS`, `npm|pnpm|yarn|bun config set|delete registry`, `pip config set|unset *index*`, or a registry or index
 line written into `.npmrc`, `pip.conf`, `pip.ini`, `.yarnrc(.yml)`, `bunfig.toml` or
 `uv.toml`. A value that points at the Customs server (its authority, or the same port on
 a loopback name) is not flagged. The Edit, Write, MultiEdit and NotebookEdit tools get the

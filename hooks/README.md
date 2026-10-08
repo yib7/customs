@@ -96,7 +96,8 @@ with the reason, so you confirm them:
 - editing `.claude/settings*.json`, where this hook is registered, from the shell or with
   the Edit and Write tools;
 - pointing an installer away from the proxy: setting or unsetting `PIP_INDEX_URL`,
-  `npm_config_registry` and the other variables `customs env` sets, `npm|pnpm|yarn|bun
+  `npm_config_registry`, `PIP_FIND_LINKS` and the other variables `customs env` sets (also
+  behind `env` or `sudo`), `npm|pnpm|yarn|bun
   config set registry`, `pip config set global.index-url`, or writing a registry or index
   line into `.npmrc`, `pip.conf`, `.yarnrc.yml`, `bunfig.toml` or `uv.toml`. Values that
   point at the Customs server are fine.
