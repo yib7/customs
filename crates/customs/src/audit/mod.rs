@@ -7,6 +7,7 @@
 //! at a time, and the results are printed as text, JSON, or SARIF 2.1.0 for GitHub code
 //! scanning.
 
+mod bun;
 mod package_lock;
 mod pipfile;
 mod pnpm;
@@ -141,6 +142,7 @@ pub enum LockKind {
     PackageLock,
     PnpmLock,
     YarnLock,
+    BunLock,
 }
 
 impl LockKind {
@@ -154,6 +156,7 @@ impl LockKind {
             "package-lock.json" | "npm-shrinkwrap.json" => LockKind::PackageLock,
             "pnpm-lock.yaml" => LockKind::PnpmLock,
             "yarn.lock" => LockKind::YarnLock,
+            "bun.lock" => LockKind::BunLock,
             n if n.ends_with(".txt") => LockKind::Requirements,
             _ => return None,
         })
@@ -170,6 +173,7 @@ impl LockKind {
                 | "npm-shrinkwrap.json"
                 | "pnpm-lock.yaml"
                 | "yarn.lock"
+                | "bun.lock"
         ) || (name.starts_with("requirements") && name.ends_with(".txt"))
     }
 }
@@ -182,9 +186,15 @@ pub fn find_lockfiles(paths: &[PathBuf], recursive: bool) -> Result<Vec<PathBuf>
     let mut found = Vec::new();
     for p in paths {
         if p.is_file() {
+            if p.file_name().is_some_and(|n| n == "bun.lockb") {
+                return Err(format!(
+                    "{}: Bun's binary lockfile is not readable; run `bun install --save-text-lockfile` to write bun.lock",
+                    p.display()
+                ));
+            }
             if LockKind::detect(p).is_none() {
                 return Err(format!(
-                    "{}: not a lockfile Customs can read (requirements*.txt, poetry.lock, uv.lock, Pipfile.lock, package-lock.json, npm-shrinkwrap.json, pnpm-lock.yaml, yarn.lock)",
+                    "{}: not a lockfile Customs can read (requirements*.txt, poetry.lock, uv.lock, Pipfile.lock, package-lock.json, npm-shrinkwrap.json, pnpm-lock.yaml, yarn.lock, bun.lock)",
                     p.display()
                 ));
             }
@@ -254,6 +264,7 @@ pub fn parse_lockfile(path: &Path) -> Result<Parsed, String> {
         LockKind::PackageLock => package_lock::parse(text, path, &mut out),
         LockKind::PnpmLock => pnpm::parse(text, path, &mut out),
         LockKind::YarnLock => yarn::parse(text, path, &mut out),
+        LockKind::BunLock => bun::parse(text, path, &mut out),
         LockKind::Requirements => unreachable!(),
     }
     .map_err(|e| format!("{}: {e}", path.display()))?;
@@ -309,7 +320,7 @@ impl LineIndex {
     }
 }
 
-/// Line of every object key whose value is an object, by key path (`["packages",
+/// Line of every object key whose value is an object or array, by key path (`["packages",
 /// "node_modules/a"]`). serde_json does not keep positions, so the JSON lockfile parsers
 /// look lines up here. Run it only on text serde_json accepted, which bounds the nesting.
 fn json_key_lines(text: &str) -> HashMap<Vec<String>, usize> {
@@ -391,7 +402,7 @@ impl KeyLines<'_> {
                     self.i += 1;
                     self.ws();
                     self.path.push(key);
-                    if self.peek()? == b'{' {
+                    if matches!(self.peek()?, b'{' | b'[') {
                         self.out.insert(self.path.clone(), line);
                     }
                     self.value()?;

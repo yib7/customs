@@ -105,9 +105,10 @@ untrusted data and cut to one bounded line, so a malicious package cannot use it
 source to prompt-inject the agent reading the verdict. See [`hooks/README.md`](hooks/README.md).
 
 **Lockfiles in CI.** `customs audit` checks every pin in `requirements.txt`, `poetry.lock`,
-`uv.lock`, `Pipfile.lock`, `package-lock.json`, `pnpm-lock.yaml` and `yarn.lock`, and can
-write SARIF 2.1.0 for GitHub code scanning. It also blocks npm lockfile injection: an entry
-whose `resolved` URL serves a different package than the name the diff shows. The composite action in [`action.yml`](action.yml)
+`uv.lock`, `Pipfile.lock`, `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock` and `bun.lock`,
+and can write SARIF 2.1.0 for GitHub code scanning. It also blocks lockfile injection for
+npm, Yarn, pnpm and Bun: an entry whose tarball URL serves a different package than the
+name the diff shows. The composite action in [`action.yml`](action.yml)
 turns blocked dependencies into alerts on the lockfile line in the pull request:
 
 ```sh

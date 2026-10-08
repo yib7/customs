@@ -26,6 +26,7 @@ on:
       - "**/npm-shrinkwrap.json"
       - "**/pnpm-lock.yaml"
       - "**/yarn.lock"
+      - "**/bun.lock"
       - "customs.toml"
   # Code scanning compares pull requests against the default branch, so audit it too.
   push:
@@ -39,6 +40,7 @@ on:
       - "**/npm-shrinkwrap.json"
       - "**/pnpm-lock.yaml"
       - "**/yarn.lock"
+      - "**/bun.lock"
       - "customs.toml"
 
 permissions:

@@ -905,6 +905,7 @@ a pull request before anything is installed. PATHS are lockfiles or directories
 | `package-lock.json`, `npm-shrinkwrap.json` | v2/v3 `packages` (node_modules paths, nested and scoped, `name` for aliases); v1 `dependencies` tree |
 | `pnpm-lock.yaml` | `packages:` keys (v5 `/a/1.0.0`, v6 `/a@1.0.0(peer@1)`, v9 `a@1.0.0`), read line by line |
 | `yarn.lock` | classic and berry entry headers with `version` (berry `resolution` names the installed package) |
+| `bun.lock` | `packages` entries: `name@version` first (the real name for aliases), then the tarball URL, empty for the default registry; trailing commas allowed. `bun.lockb` is binary and refused with a hint to write `bun.lock` |
 
 Each pin keeps its file and 1-based line. Pins are deduplicated on (ecosystem, normalized
 name, version), keeping the first location. Entries that cannot be checked are listed as
@@ -914,11 +915,13 @@ loopback host (a Customs proxy). The project's own workspace packages (`editable
 `virtual`, `workspace:`, `link:`, `portal:`, npm `link: true`) and berry `patch:` entries
 (the unpatched entry is listed too) are skipped silently.
 
-npm, Yarn classic and pnpm install from the URL the lockfile records (`resolved`, pnpm
-`resolution.tarball`), and none of them compares the tarball with the entry's name. A
-lockfile edit in a pull request can therefore point `node_modules/lodash` at
+npm, Yarn classic, pnpm and Bun install from the URL the lockfile records (`resolved`, pnpm
+`resolution.tarball`, the second element of a `bun.lock` entry), and none of them
+compares the tarball with the entry's name. A lockfile edit in a pull request can
+therefore point `node_modules/lodash` at
 `https://registry.npmjs.org/evil-pkg/-/evil-pkg-1.0.0.tgz` with a matching `integrity`:
-the diff shows a trusted name, and `npm ci` installs the other package. The audit reads the
+the diff shows a trusted name, and `npm ci` installs the other package. Bun 1.4 with
+`--frozen-lockfile` does the same and prints the trusted name as installed. The audit reads the
 package and version back out of every registry tarball URL (`<name>/-/<base>-<version>.tgz`,
 scoped and percent-encoded names, any path prefix such as the proxy's `/npm/`) and reports a
 `mismatch` when they differ from the entry or the URL is not a tarball path. A mismatch
