@@ -169,6 +169,34 @@ async fn guard_api(req: Request, next: Next) -> Response {
     next.run(req).await
 }
 
+/// On a loopback listener every legitimate client names the server by a loopback name or
+/// an IP address, so any other `Host` came from a browser page whose own host name was
+/// rebound to 127.0.0.1. Without this, such a page could read the event log (what this
+/// machine installs) and the policy. Requests without a `Host` (HTTP/2 carries the
+/// authority in the URI) are judged by the URI's authority.
+async fn guard_loopback_host(req: Request, next: Next) -> Response {
+    let host = req
+        .headers()
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+        .or_else(|| req.uri().authority().map(|a| a.to_string()));
+    if let Some(h) = host {
+        if !host_allowed(&h, allowed_hosts()) {
+            tracing::warn!(host = %h, "request for a foreign host name refused");
+            return (
+                StatusCode::FORBIDDEN,
+                format!(
+                    "customs: this server listens on loopback and answers only to localhost or an \
+                     IP address (got Host {h:?}); add the name to CUSTOMS_ALLOWED_HOSTS to allow it\n"
+                ),
+            )
+                .into_response();
+        }
+    }
+    next.run(req).await
+}
+
 /// Count requests by route template and status.
 async fn track(State(state): State<AppState>, req: Request, next: Next) -> Response {
     let route = req
@@ -218,7 +246,10 @@ pub async fn serve_on(
         engine,
         shutdown: rx,
     };
-    let app = router(state, ui_dir.as_deref());
+    let mut app = router(state, ui_dir.as_deref());
+    if listener.local_addr()?.ip().is_loopback() {
+        app = app.layer(middleware::from_fn(guard_loopback_host));
+    }
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),

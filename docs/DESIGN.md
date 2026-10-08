@@ -736,7 +736,11 @@ API (JSON). CORS allows only `http://localhost:5173` (the Vite dev server).
   set it for a team server reached by name). A page that resolves its own host name to
   127.0.0.1 is same-origin to the browser, so CORS alone would not stop it. Any
   state-changing API request carrying a browser `Origin` other than the dashboard's own
-  (or the Vite dev server) is refused with 403 as well; non-browser clients send none. `PUT` takes the full policy (omitted keys
+  (or the Vite dev server) is refused with 403 as well; non-browser clients send none.
+  When the server listens on a loopback address, the same `Host` check applies to every
+  request, reads and package downloads included, since only a rebound page would name a
+  loopback listener by another host name; without it such a page could read the event log
+  and learn what this machine installs. `PUT` takes the full policy (omitted keys
   take their defaults), validates, persists to the policy file, and returns it; invalid
   input returns 400 `{ "error", "errors": [ { "field", "message" } ] }`.
 - `GET /api/model`: the contents of `metrics.json` (under `metrics`, or merged when the file

@@ -622,9 +622,11 @@ async fn raw_reason_phrase_names_the_rule() {
         .await
         .unwrap();
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    s.write_all(format!("GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").as_bytes())
-        .await
-        .unwrap();
+    s.write_all(
+        format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").as_bytes(),
+    )
+    .await
+    .unwrap();
     let mut buf = Vec::new();
     s.read_to_end(&mut buf).await.unwrap();
     let text = String::from_utf8_lossy(&buf);
@@ -1144,6 +1146,26 @@ async fn policy_api_validates_and_persists() {
     // The bad updates did not change the active policy.
     let now: Value = h.get("/api/policy").await.json().await.unwrap();
     assert_eq!(now["block_threshold"], 0.8);
+
+    // On a loopback listener a rebound host name cannot even read.
+    for path in ["/api/events", "/api/policy", "/pypi/simple/goodpkg/"] {
+        let r = h
+            .http
+            .get(format!("{}{path}", h.base))
+            .header("host", "rebind.attacker.example:7878")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 403, "{path}");
+    }
+    let r = h
+        .http
+        .get(format!("{}/healthz", h.base))
+        .header("host", "localhost:7878")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
 
     // A page on another origin, or one reached through DNS rebinding (its own host name
     // resolving to 127.0.0.1), cannot switch enforcement off.
