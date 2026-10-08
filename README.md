@@ -91,7 +91,9 @@ customs scan ./some-package-1.0.tgz        # offline verdict for a local archive
 into `~/.claude/settings.json`. Before the agent runs any shell command, the hook finds
 package installs in it (`pip install`, `uv add`, `npm i`, `npx`, requirement files,
 chained commands) and denies the command when a package is blocked, with the reason, so
-the agent stops and asks you. See [`hooks/README.md`](hooks/README.md).
+the agent stops and asks you. Project installs (`npm ci`, `npm install`, `uv sync`,
+`poetry install` and the rest) are checked against the project's lockfile, plus any
+dependency added to the manifest but not locked yet. See [`hooks/README.md`](hooks/README.md).
 
 `scripts/demo.sh` runs the whole tour against the live registries.
 

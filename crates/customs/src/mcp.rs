@@ -22,7 +22,7 @@ use crate::cli::{scan_file, split_package_arg};
 use crate::client::{is_loopback, CheckError, Checker, LocalOptions};
 use crate::engine::Limits;
 use crate::hook::parse::{parse_command, Target};
-use crate::hook::{check_targets, verdict_summary, TargetResult};
+use crate::hook::{check_targets, expand_projects, verdict_summary, TargetResult};
 use crate::util::{ecosystem_str, parse_ecosystem};
 use crate::verdict::Verdict;
 
@@ -429,13 +429,18 @@ impl McpServer {
             }
         }
         let targets: Vec<Target> = installs.iter().flat_map(|i| i.targets.clone()).collect();
-        if targets.is_empty() {
+        let expanded = expand_projects(targets);
+        if expanded.targets.is_empty() && expanded.mismatches.is_empty() {
             return Ok(ToolOutput::ok(
                 "No package installs found in this command; Customs has nothing to check.".into(),
                 json!({ "decision": "allow", "installs": tools, "packages": [] }),
             ));
         }
-        let checker = if targets.iter().any(|t| matches!(t, Target::Package { .. })) {
+        let checker = if expanded
+            .targets
+            .iter()
+            .any(|t| matches!(t, Target::Package { .. }))
+        {
             match self.checker().await {
                 Ok(c) => Some(c),
                 Err(e) => return Ok(ToolOutput::error(format!("Customs failed to start: {e:#}"))),
@@ -443,8 +448,22 @@ impl McpServer {
         } else {
             None
         };
-        let results = check_targets(&targets, checker, CLIENT).await;
-        Ok(command_report(&tools, &targets, &results, checker))
+        let mut results = check_targets(&expanded.targets, checker, CLIENT).await;
+        // Warnings about packages a project's lockfile already pins do not count.
+        let mut targets = expanded.targets.clone();
+        let mut counted: Vec<bool> = results
+            .iter()
+            .enumerate()
+            .map(|(i, r)| !expanded.locked_warning(i, r))
+            .collect();
+        for (t, r) in expanded.mismatches {
+            targets.push(t);
+            results.push(r);
+            counted.push(true);
+        }
+        Ok(command_report(
+            &tools, &targets, &results, &counted, checker,
+        ))
     }
 
     async fn explain(&self, a: ExplainArgs) -> Result<ToolOutput, RpcError> {
@@ -779,18 +798,24 @@ fn cell(s: &str) -> String {
     s.replace('|', "\\|").replace('\n', " ")
 }
 
+/// Above this many packages, a command report lists only the ones that are not allowed.
+const MAX_ALLOWED_ROWS: usize = 40;
+
 /// Per-package table and overall decision for `check_install_command`.
 fn command_report(
     tools: &[&str],
     targets: &[Target],
     results: &[TargetResult],
+    counted: &[bool],
     checker: Option<&Checker>,
 ) -> ToolOutput {
     let mut overall = Decision::Allow;
     let mut failed = 0usize;
     let mut rows = Vec::new();
+    let many = targets.len() > MAX_ALLOWED_ROWS;
+    let mut hidden = 0usize;
     let mut table = String::from("| Package | Decision | Why | Verdict id |\n|---|---|---|---|\n");
-    for (t, r) in targets.iter().zip(results) {
+    for (i, (t, r)) in targets.iter().zip(results).enumerate() {
         let (eco, spec) = match t {
             Target::Package {
                 ecosystem, name, ..
@@ -798,6 +823,7 @@ fn command_report(
             Target::Unverifiable {
                 ecosystem, spec, ..
             } => (*ecosystem, spec.clone()),
+            Target::Project { manager, dir } => (manager.ecosystem(), dir.display().to_string()),
         };
         let (label, decision, status, why, verdict) = match r {
             TargetResult::Verdict { verdict, .. } => (
@@ -826,6 +852,13 @@ fn command_report(
                 format!("could not be checked: {message}"),
                 None,
             ),
+            TargetResult::Mismatch { label, message } => (
+                label.clone(),
+                Some(Decision::Block),
+                "mismatch",
+                message.clone(),
+                None,
+            ),
             TargetResult::Failed { label, message } => {
                 failed += 1;
                 (
@@ -837,8 +870,14 @@ fn command_report(
                 )
             }
         };
-        if let Some(d) = decision {
+        let counts = counted.get(i).copied().unwrap_or(true);
+        if let Some(d) = decision.filter(|_| counts) {
             overall = overall.max(d);
+        }
+        // A project install can fetch hundreds of packages; list only what needs a look.
+        if many && (decision == Some(Decision::Allow) || !counts) {
+            hidden += 1;
+            continue;
         }
         let id = verdict.and_then(|v| v.id);
         table.push_str(&format!(
@@ -868,6 +907,12 @@ fn command_report(
         if n == 1 { "" } else { "s" },
         tools.join(", ")
     );
+    if hidden > 0 {
+        text.push_str(&format!(
+            "{hidden} allowed package{} not listed.\n",
+            if hidden == 1 { " is" } else { "s are" }
+        ));
+    }
     if failed > 0 {
         text.push_str(&format!(
             "{failed} package{} could not be checked because Customs failed; treat {} as unverified.\n",
@@ -890,6 +935,7 @@ fn command_report(
         "decision": overall.as_str(),
         "installs": tools,
         "packages": rows,
+        "allowed_not_listed": hidden,
         "failed": failed,
     });
     ToolOutput {

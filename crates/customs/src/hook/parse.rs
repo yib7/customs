@@ -29,6 +29,88 @@ pub enum Target {
         spec: String,
         reason: String,
     },
+    /// Every package of the project in `dir`: what `npm install`, `npm ci` or `uv sync`
+    /// fetch from its lockfile and manifest. See [`super::project`].
+    Project { manager: Manager, dir: PathBuf },
+}
+
+/// A package manager that installs whole projects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Manager {
+    Npm,
+    Pnpm,
+    Yarn,
+    Bun,
+    Uv,
+    Poetry,
+    Pipenv,
+}
+
+impl Manager {
+    pub fn ecosystem(self) -> Ecosystem {
+        match self {
+            Manager::Npm | Manager::Pnpm | Manager::Yarn | Manager::Bun => Ecosystem::Npm,
+            Manager::Uv | Manager::Poetry | Manager::Pipenv => Ecosystem::Pypi,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Manager::Npm => "npm",
+            Manager::Pnpm => "pnpm",
+            Manager::Yarn => "yarn",
+            Manager::Bun => "bun",
+            Manager::Uv => "uv",
+            Manager::Poetry => "poetry",
+            Manager::Pipenv => "pipenv",
+        }
+    }
+}
+
+fn project(manager: Manager, cwd: &Path, dir: Option<String>) -> Target {
+    Target::Project {
+        manager,
+        dir: dir.map_or_else(|| cwd.to_path_buf(), |d| cwd.join(d)),
+    }
+}
+
+/// The value of the first option in `names` (`--cwd dir` or `--cwd=dir`).
+fn opt_value(args: &[String], names: &[&str]) -> Option<String> {
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == "--" {
+            break;
+        }
+        if names.contains(&a.as_str()) {
+            return it.next().cloned();
+        }
+        if let Some((k, v)) = a.split_once('=') {
+            if names.contains(&k) {
+                return Some(v.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Whether `args` hold anything besides options and their values.
+fn has_positional(args: &[String], with_value: &[&str]) -> bool {
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        if a == "--" {
+            return i + 1 < args.len();
+        }
+        if !a.starts_with('-') {
+            return true;
+        }
+        i += if with_value.contains(&a) || a == "--registry" {
+            2
+        } else {
+            1
+        };
+    }
+    false
 }
 
 /// An install command found in the input.
@@ -197,17 +279,8 @@ fn parse_simple(words: &[String], cwd: &Path, out: &mut Vec<Install>, depth: usi
         match prog.as_str() {
             "uv" => uv(args, cwd, out),
             "uvx" => tool_run(args, cwd, out, "uvx"),
-            "poetry" => subcommand_install(
-                args,
-                &["add"],
-                &["-C", "--directory", "-P", "--project"],
-                |rest| {
-                    out.push(Install {
-                        tool: "poetry add".into(),
-                        targets: pypi_args(rest, cwd),
-                    })
-                },
-            ),
+            "poetry" => poetry(args, cwd, out),
+            "pipenv" => pipenv(args, cwd, out),
             "pdm" => subcommand_install(args, &["add"], &["-p", "--project"], |rest| {
                 out.push(Install {
                     tool: "pdm add".into(),
@@ -215,11 +288,11 @@ fn parse_simple(words: &[String], cwd: &Path, out: &mut Vec<Install>, depth: usi
                 })
             }),
             "pipx" => pipx(args, cwd, out),
-            "npm" => npm(args, out),
-            "pnpm" => pnpm(args, out),
+            "npm" => npm(args, cwd, out),
+            "pnpm" => pnpm(args, cwd, out),
             "pnpx" => npx_like(args, out, "pnpx"),
-            "yarn" => yarn(args, out),
-            "bun" => bun(args, out),
+            "yarn" => yarn(args, cwd, out),
+            "bun" => bun(args, cwd, out),
             "bunx" => npx_like(args, out, "bunx"),
             "npx" => npx_like(args, out, "npx"),
             _ => {}
@@ -241,6 +314,71 @@ fn subcommand_install(
             f(rest);
         }
     }
+}
+
+const POETRY_GLOBAL_VALUE: &[&str] = &["-C", "--directory", "-P", "--project"];
+
+fn poetry(args: &[String], cwd: &Path, out: &mut Vec<Install>) {
+    let rest = skip_opts(args, POETRY_GLOBAL_VALUE);
+    let Some((sub, rest)) = rest.split_first() else {
+        return;
+    };
+    match sub.as_str() {
+        "add" => out.push(Install {
+            tool: "poetry add".into(),
+            targets: pypi_args(rest, cwd),
+        }),
+        "install" | "sync" => out.push(Install {
+            tool: format!("poetry {sub}"),
+            targets: vec![project(
+                Manager::Poetry,
+                cwd,
+                opt_value(args, &["-C", "--directory", "-P", "--project"]),
+            )],
+        }),
+        _ => {}
+    }
+}
+
+/// Options of `pipenv install` that take a value.
+const PIPENV_VALUE: &[&str] = &["--python", "--categories", "--extra-pip-args"];
+
+fn pipenv(args: &[String], cwd: &Path, out: &mut Vec<Install>) {
+    let rest = skip_opts(args, &["--python"]);
+    let Some((sub, rest)) = rest.split_first() else {
+        return;
+    };
+    match sub.as_str() {
+        "install" if has_positional(rest, PIPENV_VALUE) || opt_value(rest, &["-r"]).is_some() => {
+            let rest: Vec<String> = strip_opts(rest, PIPENV_VALUE);
+            out.push(Install {
+                tool: "pipenv install".into(),
+                targets: pypi_args(&rest, cwd),
+            })
+        }
+        "install" | "sync" => out.push(Install {
+            tool: format!("pipenv {sub}"),
+            targets: vec![project(Manager::Pipenv, cwd, None)],
+        }),
+        _ => {}
+    }
+}
+
+/// `args` without the options in `with_value` and their values.
+fn strip_opts(args: &[String], with_value: &[&str]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        let key = a.split_once('=').map_or(a, |(k, _)| k);
+        if with_value.contains(&key) {
+            i += if a.contains('=') { 1 } else { 2 };
+            continue;
+        }
+        out.push(args[i].clone());
+        i += 1;
+    }
+    out
 }
 
 const PIP_GLOBAL_VALUE: &[&str] = &[
@@ -298,12 +436,32 @@ fn uv(args: &[String], cwd: &Path, out: &mut Vec<Install>) {
                         tool: "uv pip install".into(),
                         targets: pypi_args(rest, cwd),
                     });
+                } else if cmd == "sync" {
+                    // Positionals are requirements files.
+                    let mut files = Vec::new();
+                    for a in strip_opts(rest, PYPI_VALUE) {
+                        if !a.starts_with('-') {
+                            files.extend(["-r".to_string(), a]);
+                        }
+                    }
+                    out.push(Install {
+                        tool: "uv pip sync".into(),
+                        targets: pypi_args(&files, cwd),
+                    });
                 }
             }
         }
         "add" => out.push(Install {
             tool: "uv add".into(),
             targets: pypi_args(rest, cwd),
+        }),
+        "sync" => out.push(Install {
+            tool: "uv sync".into(),
+            targets: vec![project(
+                Manager::Uv,
+                cwd,
+                opt_value(args, &["--directory", "--project"]),
+            )],
         }),
         "tool" => {
             if let Some((cmd, rest)) = rest.split_first() {
@@ -927,7 +1085,20 @@ fn npm_subcommand(args: &[String]) -> Option<(&str, &[String])> {
     None
 }
 
-fn npm(args: &[String], out: &mut Vec<Install>) {
+/// npm's clean-install commands, which install exactly what the lockfile pins.
+const NPM_CI: &[&str] = &[
+    "ci",
+    "clean-install",
+    "ic",
+    "install-clean",
+    "isntall-clean",
+    "install-ci-test",
+    "cit",
+    "clean-install-test",
+    "sit",
+];
+
+fn npm(args: &[String], cwd: &Path, out: &mut Vec<Install>) {
     let Some((sub, rest)) = npm_subcommand(args) else {
         return;
     };
@@ -937,27 +1108,40 @@ fn npm(args: &[String], out: &mut Vec<Install>) {
         .take_while(|a| a.as_str() != sub)
         .cloned()
         .collect();
-    if NPM_INSTALL.contains(&sub) {
+    let ci = NPM_CI.contains(&sub);
+    if NPM_INSTALL.contains(&sub) || ci {
         let mut targets = npm_args(&pre);
         targets.extend(npm_args(rest));
-        if !targets.is_empty() {
-            out.push(Install {
-                tool: "npm install".into(),
-                targets,
-            });
+        if ci || !has_positional(rest, NPM_VALUE) {
+            targets.push(project(
+                Manager::Npm,
+                cwd,
+                opt_value(args, &["--prefix", "-C"]),
+            ));
         }
+        out.push(Install {
+            tool: if ci { "npm ci" } else { "npm install" }.into(),
+            targets,
+        });
     } else if sub == "exec" || sub == "x" {
         npx_like(rest, out, "npm exec");
     }
 }
 
-fn pnpm(args: &[String], out: &mut Vec<Install>) {
+fn pnpm(args: &[String], cwd: &Path, out: &mut Vec<Install>) {
     let Some((sub, rest)) = npm_subcommand(args) else {
         return;
     };
     match sub {
         "add" | "install" | "i" => {
-            let targets = npm_args(rest);
+            let mut targets = npm_args(rest);
+            if sub != "add" && !has_positional(rest, NPM_VALUE) {
+                targets.push(project(
+                    Manager::Pnpm,
+                    cwd,
+                    opt_value(args, &["-C", "--dir"]),
+                ));
+            }
             if !targets.is_empty() {
                 out.push(Install {
                     tool: format!("pnpm {sub}"),
@@ -970,8 +1154,17 @@ fn pnpm(args: &[String], out: &mut Vec<Install>) {
     }
 }
 
-fn yarn(args: &[String], out: &mut Vec<Install>) {
+fn yarn(args: &[String], cwd: &Path, out: &mut Vec<Install>) {
+    // Bare `yarn` (options only) is `yarn install`.
     let Some((sub, rest)) = npm_subcommand(args) else {
+        let info = ["-v", "--version", "-h", "--help"];
+        if args.iter().any(|a| info.contains(&a.as_str())) {
+            return;
+        }
+        out.push(Install {
+            tool: "yarn install".into(),
+            targets: vec![project(Manager::Yarn, cwd, opt_value(args, &["--cwd"]))],
+        });
         return;
     };
     let (sub, rest) = if sub == "global" {
@@ -993,17 +1186,24 @@ fn yarn(args: &[String], out: &mut Vec<Install>) {
             }
         }
         "dlx" => npx_like(rest, out, "yarn dlx"),
+        "install" => out.push(Install {
+            tool: "yarn install".into(),
+            targets: vec![project(Manager::Yarn, cwd, opt_value(args, &["--cwd"]))],
+        }),
         _ => {}
     }
 }
 
-fn bun(args: &[String], out: &mut Vec<Install>) {
+fn bun(args: &[String], cwd: &Path, out: &mut Vec<Install>) {
     let Some((sub, rest)) = npm_subcommand(args) else {
         return;
     };
     match sub {
         "add" | "a" | "install" | "i" => {
-            let targets = npm_args(rest);
+            let mut targets = npm_args(rest);
+            if matches!(sub, "install" | "i") && !has_positional(rest, NPM_VALUE) {
+                targets.push(project(Manager::Bun, cwd, opt_value(args, &["--cwd"])));
+            }
             if !targets.is_empty() {
                 out.push(Install {
                     tool: format!("bun {sub}"),
@@ -1184,6 +1384,13 @@ mod tests {
             .into_iter()
             .map(|i| i.tool)
             .collect()
+    }
+
+    fn proj(manager: Manager, dir: &str) -> Target {
+        Target::Project {
+            manager,
+            dir: PathBuf::from(dir),
+        }
     }
 
     fn is_unverifiable(t: &Target) -> bool {
@@ -1398,7 +1605,11 @@ mod tests {
     fn compound_commands() {
         assert_eq!(
             targets("cd /app && source .venv/bin/activate && pip install -q a; npm ci && npm i -D b | cat"),
-            vec![py("a", None), js("b", None)]
+            vec![
+                py("a", None),
+                proj(Manager::Npm, "/nonexistent"),
+                js("b", None)
+            ]
         );
         assert_eq!(targets("echo pip install x"), vec![]);
         assert_eq!(targets("git commit -m 'pip install x'"), vec![]);
@@ -1451,7 +1662,7 @@ mod tests {
             vec![py("pandas", None), py("numpy", None)]
         );
         assert!(targets("uv run python x.py").is_empty());
-        assert!(targets("uv sync").is_empty());
+        assert_eq!(targets("uv sync"), vec![proj(Manager::Uv, "/nonexistent")]);
         assert_eq!(
             targets("poetry add requests@^2.28"),
             vec![py("requests", Some("^2.28"))]
@@ -1520,21 +1731,91 @@ mod tests {
             vec![js("real-pkg", Some("1.0.0"))]
         );
         assert_eq!(targets("npm install Left-Pad"), vec![js("left-pad", None)]);
-        assert!(targets("npm install").is_empty());
-        assert!(targets("npm ci").is_empty());
+        assert_eq!(
+            targets("npm install"),
+            vec![proj(Manager::Npm, "/nonexistent")]
+        );
+        assert_eq!(targets("npm ci"), vec![proj(Manager::Npm, "/nonexistent")]);
         assert!(targets("npm run build").is_empty());
         assert!(targets("npm test").is_empty());
         assert_eq!(targets("pnpm add -D vitest"), vec![js("vitest", None)]);
         assert_eq!(targets("pnpm --filter web add zod"), vec![js("zod", None)]);
-        assert!(targets("pnpm install").is_empty());
+        assert_eq!(
+            targets("pnpm install"),
+            vec![proj(Manager::Pnpm, "/nonexistent")]
+        );
         assert_eq!(
             targets("yarn add react react-dom"),
             vec![js("react", None), js("react-dom", None)]
         );
         assert_eq!(targets("yarn global add serve"), vec![js("serve", None)]);
-        assert!(targets("yarn").is_empty());
+        assert_eq!(targets("yarn"), vec![proj(Manager::Yarn, "/nonexistent")]);
         assert_eq!(targets("bun add elysia"), vec![js("elysia", None)]);
         assert_eq!(targets("bun i -d prettier"), vec![js("prettier", None)]);
+    }
+
+    #[test]
+    fn project_installs() {
+        let at = |cmd: &str| parse_command(cmd, Path::new("/w")).remove(0).targets;
+        assert_eq!(
+            at("npm ci --prefix web"),
+            vec![proj(Manager::Npm, "/w/web")]
+        );
+        assert_eq!(
+            at("npm --prefix=web install --omit dev"),
+            vec![proj(Manager::Npm, "/w/web")]
+        );
+        assert_eq!(at("npm clean-install"), vec![proj(Manager::Npm, "/w")]);
+        assert!(matches!(
+            at("npm install --registry https://r.example/").as_slice(),
+            [Target::Unverifiable { .. }, Target::Project { .. }]
+        ));
+        assert_eq!(
+            at("pnpm -C app i --frozen-lockfile"),
+            vec![proj(Manager::Pnpm, "/w/app")]
+        );
+        assert_eq!(at("yarn --cwd app"), vec![proj(Manager::Yarn, "/w/app")]);
+        assert!(parse_command("yarn --version", Path::new("/w")).is_empty());
+        assert_eq!(
+            at("yarn install --immutable"),
+            vec![proj(Manager::Yarn, "/w")]
+        );
+        assert_eq!(
+            at("bun install --frozen-lockfile"),
+            vec![proj(Manager::Bun, "/w")]
+        );
+        assert_eq!(at("bun i --cwd=app"), vec![proj(Manager::Bun, "/w/app")]);
+        assert_eq!(
+            at("uv --directory svc sync --frozen"),
+            vec![proj(Manager::Uv, "/w/svc")]
+        );
+        assert_eq!(
+            at("uv sync --project=svc"),
+            vec![proj(Manager::Uv, "/w/svc")]
+        );
+        assert_eq!(
+            at("poetry -C svc install"),
+            vec![proj(Manager::Poetry, "/w/svc")]
+        );
+        assert_eq!(at("poetry sync"), vec![proj(Manager::Poetry, "/w")]);
+        assert_eq!(
+            at("pipenv install --dev"),
+            vec![proj(Manager::Pipenv, "/w")]
+        );
+        assert_eq!(at("pipenv sync"), vec![proj(Manager::Pipenv, "/w")]);
+        assert_eq!(
+            at("pipenv install --python 3.12 requests==2.31.0"),
+            vec![py("requests", Some("2.31.0"))]
+        );
+        // `uv pip sync` reads requirements files.
+        assert!(matches!(
+            at("uv pip sync --python 3.12 missing.txt").as_slice(),
+            [Target::Unverifiable { spec, .. }] if spec.contains("missing.txt")
+        ));
+        // Adding packages is not a project install.
+        assert_eq!(at("pnpm add zod"), vec![js("zod", None)]);
+        assert_eq!(at("bun add zod"), vec![js("zod", None)]);
+        assert!(parse_command("npm run build", Path::new("/w")).is_empty());
     }
 
     #[test]

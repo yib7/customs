@@ -46,6 +46,16 @@ Run `/hooks` in Claude Code to confirm it is registered.
 `pdm add`, `pipx install|run|inject`, `npm install|i|add` (and npm's aliases),
 `npm exec`, `pnpm add`, `pnpm dlx`, `yarn add`, `yarn dlx`, `bun add`, `bunx`, and `npx`.
 
+Project installs too: `npm install` and `npm ci` with no package, `pnpm install`, `yarn`,
+`bun install`, `uv sync`, `poetry install`, `pipenv install` and `pipenv sync`. The hook
+reads the project's lockfile, checks every pinned package, and denies the command when one
+is blocked or when a lockfile entry's tarball URL serves a different package than it
+names. Dependencies in `package.json`, `pyproject.toml` or `Pipfile` that the lockfile does
+not pin yet (one the agent just added) are checked as well. Warnings about packages the
+lockfile already pins do not stop the command; on a real 300-package lockfile, about 1% of
+legitimate packages are over the warn threshold. A large project with nothing cached yet
+is checked for up to 40 seconds; anything left is reported for review.
+
 The command is split like a shell would: `&&`, `||`, `;`, pipes, subshells, quotes,
 escapes, line continuations, comments, redirections, `$(...)` and backticks, and wrappers
 such as `sudo`, `env FOO=1`, `timeout 60`, `nohup`, `bash -c '...'`, and `eval`. Option

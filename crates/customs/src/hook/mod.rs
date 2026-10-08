@@ -9,9 +9,11 @@
 //! and use JSON.
 
 pub mod parse;
+pub mod project;
 pub mod shell;
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use customs_model::Decision;
 use futures::stream::{self, StreamExt};
@@ -82,6 +84,11 @@ pub enum TargetResult {
         label: String,
         message: String,
     },
+    /// A lockfile entry that installs a different package than it names.
+    Mismatch {
+        label: String,
+        message: String,
+    },
 }
 
 pub fn target_label(t: &Target) -> String {
@@ -97,7 +104,55 @@ pub fn target_label(t: &Target) -> String {
         Target::Unverifiable {
             ecosystem, spec, ..
         } => format!("{}:{spec}", ecosystem_str(*ecosystem)),
+        Target::Project { manager, dir } => {
+            format!("{} project in {}", manager.as_str(), dir.display())
+        }
     }
+}
+
+/// Targets with every [`Target::Project`] expanded.
+#[derive(Debug, Default)]
+pub struct Expanded {
+    pub targets: Vec<Target>,
+    /// Per target: pinned by a project's lockfile, so a warning does not count.
+    pub locked: Vec<bool>,
+    /// Lockfile entries that install another package than they name, each with a
+    /// placeholder target.
+    pub mismatches: Vec<(Target, TargetResult)>,
+}
+
+impl Expanded {
+    /// Whether the result for target `i` is a warning about a package a lockfile pins.
+    pub fn locked_warning(&self, i: usize, r: &TargetResult) -> bool {
+        self.locked.get(i).copied().unwrap_or(false)
+            && matches!(r, TargetResult::Verdict { verdict, .. } if verdict.decision == Decision::Warn)
+    }
+}
+
+/// Replace each [`Target::Project`] with what that install would fetch (see [`project`]).
+pub fn expand_projects(targets: Vec<Target>) -> Expanded {
+    let mut out = Expanded::default();
+    for t in targets {
+        let Target::Project { manager, dir } = t else {
+            out.targets.push(t);
+            out.locked.push(false);
+            continue;
+        };
+        let e = project::expand(manager, &dir);
+        for (label, message) in e.mismatches {
+            let placeholder = Target::Unverifiable {
+                ecosystem: manager.ecosystem(),
+                spec: label.clone(),
+                reason: message.clone(),
+            };
+            out.mismatches
+                .push((placeholder, TargetResult::Mismatch { label, message }));
+        }
+        out.locked
+            .extend((0..e.targets.len()).map(|i| i < e.locked));
+        out.targets.extend(e.targets);
+    }
+    out
 }
 
 /// Why a verdict came out the way it did, in one line.
@@ -168,6 +223,9 @@ pub fn decide(results: &[TargetResult], fail_closed: bool) -> Option<HookDecisio
                     blocked.push(format!("{label}: Customs check failed: {message}"));
                 }
             }
+            TargetResult::Mismatch { label, message } => {
+                blocked.push(format!("{label}: {message}"))
+            }
         }
     }
     if !blocked.is_empty() {
@@ -228,7 +286,9 @@ pub async fn evaluate(input: &str, opts: &HookOptions) -> anyhow::Result<Option<
         .unwrap_or_else(|| PathBuf::from("."));
     let installs = parse_command(command, &cwd);
     let targets: Vec<Target> = installs.into_iter().flat_map(|i| i.targets).collect();
-    if targets.is_empty() {
+    let expanded = expand_projects(targets);
+    let targets = &expanded.targets;
+    if targets.is_empty() && expanded.mismatches.is_empty() {
         return Ok(None);
     }
     let needs_checker = targets.iter().any(|t| matches!(t, Target::Package { .. }));
@@ -237,7 +297,20 @@ pub async fn evaluate(input: &str, opts: &HookOptions) -> anyhow::Result<Option<
     } else {
         None
     };
-    let results = check_targets(&targets, checker.as_ref(), "claude-code-hook").await;
+    let results = check_targets_within(
+        targets,
+        checker.as_ref(),
+        "claude-code-hook",
+        Some(HOOK_BUDGET),
+    )
+    .await;
+    let mut results: Vec<TargetResult> = results
+        .into_iter()
+        .enumerate()
+        .filter(|(i, r)| !expanded.locked_warning(*i, r))
+        .map(|(_, r)| r)
+        .collect();
+    results.extend(expanded.mismatches.iter().map(|(_, r)| r.clone()));
     for r in &results {
         if let TargetResult::Failed { label, message } = r {
             eprintln!("customs hook: checking {label} failed: {message}");
@@ -246,6 +319,11 @@ pub async fn evaluate(input: &str, opts: &HookOptions) -> anyhow::Result<Option<
     Ok(decide(&results, opts.fail_closed))
 }
 
+/// How long the hook spends checking before it stops; Claude Code's hook timeout in
+/// `hooks/claude-code-settings.json` is 60 seconds. Only a large project install whose
+/// verdicts are not cached yet comes near it.
+const HOOK_BUDGET: Duration = Duration::from_secs(40);
+
 /// Check every target, a few at a time. `checker` may be `None` only when no target is a
 /// registry package. Results keep the order of `targets`.
 pub async fn check_targets(
@@ -253,11 +331,26 @@ pub async fn check_targets(
     checker: Option<&Checker>,
     client: &str,
 ) -> Vec<TargetResult> {
-    stream::iter(targets.iter().cloned())
+    check_targets_within(targets, checker, client, None).await
+}
+
+/// [`check_targets`], stopping after `budget`: whatever is left is reported as one
+/// unverified result, so results no longer line up with `targets` then.
+pub async fn check_targets_within(
+    targets: &[Target],
+    checker: Option<&Checker>,
+    client: &str,
+    budget: Option<Duration>,
+) -> Vec<TargetResult> {
+    let checks = stream::iter(targets.iter().cloned())
         .map(|t| async move {
             let label = target_label(&t);
             match t {
                 Target::Unverifiable { reason, .. } => TargetResult::Unverifiable { label, reason },
+                Target::Project { .. } => TargetResult::Failed {
+                    label,
+                    message: "project install was not expanded".into(),
+                },
                 Target::Package {
                     ecosystem,
                     name,
@@ -285,9 +378,25 @@ pub async fn check_targets(
                 }
             }
         })
-        .buffered(8)
+        .buffered(8);
+    let Some(budget) = budget else {
+        return checks.collect().await;
+    };
+    let mut results: Vec<TargetResult> = checks
+        .take_until(tokio::time::sleep(budget))
         .collect()
-        .await
+        .await;
+    let left = targets.len() - results.len();
+    if left > 0 {
+        results.push(TargetResult::Unverifiable {
+            label: format!("{left} more package{}", if left == 1 { "" } else { "s" }),
+            reason: format!(
+                "not checked within {}s; run `customs audit` on the project's lockfile",
+                budget.as_secs()
+            ),
+        });
+    }
+    results
 }
 
 /// Entry point: read stdin, print the decision. Always exits 0 (see module docs).

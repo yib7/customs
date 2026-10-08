@@ -1269,6 +1269,132 @@ async fn claude_code_hook_end_to_end() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn hook_checks_project_installs() {
+    let h = Harness::start(|_| {}).await;
+    let lock = |entries: &str| {
+        format!(r#"{{"lockfileVersion": 3, "packages": {{"": {{"name": "app"}}{entries}}}}}"#)
+    };
+    let entry = |path: &str, name: &str, version: &str| {
+        format!(
+            r#", "node_modules/{path}": {{"version": "{version}", "resolved": "https://registry.npmjs.org/{name}/-/{name}-{version}.tgz"}}"#
+        )
+    };
+    let scoped = r#", "node_modules/@scope/lib": {"version": "1.2.3", "resolved": "https://registry.npmjs.org/@scope/lib/-/lib-1.2.3.tgz"}"#;
+    let projects = [
+        // The lockfile pins a malicious package.
+        (
+            r#"{"dependencies": {"@scope/lib": "^1", "evil-js": "^6"}}"#.to_string(),
+            lock(&format!("{scoped}{}", entry("evil-js", "evil-js", "6.6.6"))),
+        ),
+        // A dependency added to package.json but not locked yet is checked too.
+        (
+            r#"{"dependencies": {"@scope/lib": "^1", "plainlib": "^0.1.0"}}"#.to_string(),
+            lock(scoped),
+        ),
+        (
+            r#"{"dependencies": {"@scope/lib": "^1", "evil-js": "^6"}}"#.to_string(),
+            lock(scoped),
+        ),
+        // A trusted name whose tarball URL serves another package.
+        (
+            r#"{"dependencies": {"plainlib": "^0.1.0"}}"#.to_string(),
+            lock(&entry("plainlib", "evil-js", "6.6.6")),
+        ),
+    ];
+    let dirs: Vec<tempfile::TempDir> = projects
+        .iter()
+        .map(|(manifest, lockfile)| {
+            let d = tempfile::tempdir().unwrap();
+            std::fs::write(d.path().join("package.json"), manifest).unwrap();
+            std::fs::write(d.path().join("package-lock.json"), lockfile).unwrap();
+            d
+        })
+        .collect();
+    let base = h.base.clone();
+    let paths: Vec<std::path::PathBuf> = dirs.iter().map(|d| d.path().to_path_buf()).collect();
+    let results = tokio::task::spawn_blocking(move || {
+        vec![
+            run_hook(&base, "npm ci", &paths[0], &[]),
+            run_hook(&base, "npm install", &paths[1], &[]),
+            run_hook(&base, "cd x; npm i --no-audit", &paths[2], &[]),
+            run_hook(&base, "npm ci", &paths[3], &[]),
+            run_hook(&base, "npm run build", &paths[0], &[]),
+        ]
+    })
+    .await
+    .unwrap();
+    let reason = |out: &str| -> (String, String) {
+        let d: Value = serde_json::from_str(out.trim()).unwrap();
+        let o = &d["hookSpecificOutput"];
+        (
+            o["permissionDecision"].as_str().unwrap().to_string(),
+            o["permissionDecisionReason"].as_str().unwrap().to_string(),
+        )
+    };
+    let (d, r) = reason(&results[0].0);
+    assert_eq!(d, "deny");
+    assert!(r.contains("npm:evil-js 6.6.6"), "{r}");
+    assert_eq!(results[1].0.trim(), "", "{:?}", results[1]);
+    let (d, r) = reason(&results[2].0);
+    assert_eq!(d, "deny", "{r}");
+    assert!(r.contains("npm:evil-js"), "{r}");
+    let (d, r) = reason(&results[3].0);
+    assert_eq!(d, "deny");
+    assert!(
+        r.contains("npm:plainlib 6.6.6") && r.contains("lockfile installs evil-js@6.6.6"),
+        "{r}"
+    );
+    assert_eq!(results[4].0, "");
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn project_installs_count_only_blocks_for_locked_packages() {
+    // freshpkg warns (min_age_days at warn severity).
+    let h = Harness::start(|p| {
+        p.min_age_severity = customs::config::AgeSeverity::Warn;
+        p.block_install_scripts_from_new = false;
+    })
+    .await;
+    let locked = r#"{"lockfileVersion": 3, "packages": {"": {"name": "app"},
+  "node_modules/freshpkg": {"version": "1.0.0", "resolved": "https://registry.npmjs.org/freshpkg/-/freshpkg-1.0.0.tgz"}}}"#;
+    let empty = r#"{"lockfileVersion": 3, "packages": {"": {"name": "app"}}}"#;
+    let dirs: Vec<tempfile::TempDir> = [locked, empty]
+        .iter()
+        .map(|lock| {
+            let d = tempfile::tempdir().unwrap();
+            std::fs::write(
+                d.path().join("package.json"),
+                r#"{"dependencies": {"freshpkg": "1.0.0"}}"#,
+            )
+            .unwrap();
+            std::fs::write(d.path().join("package-lock.json"), lock).unwrap();
+            d
+        })
+        .collect();
+    let base = h.base.clone();
+    let paths: Vec<std::path::PathBuf> = dirs.iter().map(|d| d.path().to_path_buf()).collect();
+    let results = tokio::task::spawn_blocking(move || {
+        vec![
+            run_hook(&base, "npm ci", &paths[0], &[]),
+            run_hook(&base, "npm install", &paths[1], &[]),
+            run_hook(&base, "npm install freshpkg", &paths[0], &[]),
+        ]
+    })
+    .await
+    .unwrap();
+    assert_eq!(results[0].0.trim(), "", "{:?}", results[0]);
+    for (out, _, _) in &results[1..] {
+        let d: Value = serde_json::from_str(out.trim()).unwrap();
+        assert_eq!(
+            d["hookSpecificOutput"]["permissionDecision"], "ask",
+            "{out}"
+        );
+    }
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn hook_failure_modes() {
     let dir = tempfile::tempdir().unwrap();
     // A config whose upstreams refuse connections: the server is unreachable, the

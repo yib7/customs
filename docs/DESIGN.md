@@ -755,6 +755,32 @@ Specs that cannot be checked (git, URL, local path, custom index) produce `ask`;
 local paths are skipped. When Customs itself fails, the hook fails open (no decision,
 message on stderr) unless run with `--fail-closed`, which denies. Setup: `hooks/README.md`.
 
+**Project installs.** `npm install` or `npm ci` with no package (also `--prefix`), `pnpm
+install` (`-C`), bare `yarn` or `yarn install` (`--cwd`), `bun install` (`--cwd`), `uv sync`
+(`--directory`, `--project`), `poetry install|sync` (`-C`) and `pipenv install|sync`
+install a whole project (`crates/customs/src/hook/project.rs`). The hook reads that
+manager's lockfile in the project directory with the `customs audit` parsers (section 11):
+`npm-shrinkwrap.json` or `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `bun.lock`,
+`uv.lock`, `poetry.lock`, `Pipfile.lock`. Every pin is checked, and an entry whose tarball
+URL serves another package is a block. Direct dependencies in the manifest that the
+lockfile does not pin yet are checked too, as the ranges they name: `package.json`
+`dependencies`, `devDependencies` and `optionalDependencies` (skipping `workspace:`,
+`file:`, `link:` and `portal:`), `pyproject.toml` `[project].dependencies` (plus
+`[dependency-groups].dev` for uv and the Poetry dependency tables for Poetry), and
+Pipfile `[packages]`. This is the case where an agent adds a dependency to `package.json`
+and then runs `npm install`. Without a lockfile, the manifest's git and URL dependencies
+produce `ask` like any other unverifiable spec.
+
+For packages a lockfile already pins, only a block counts. On this repository's
+`web/package-lock.json`, 4 of about 300 legitimate packages are over the warn threshold,
+so counting warnings would stop nearly every `npm ci` for review. The block threshold's
+false-positive rate is 0.09%, and new manifest dependencies keep the warn check. Checks run
+8 at a time; a 300-package lockfile took 13.5 s with nothing cached and 0.12 s cached. The
+hook stops checking after 40 s (Claude Code's hook timeout is 60 s) and reports the
+packages it did not reach as one `ask` line that points to `customs audit`.
+`check_install_command` over MCP (section 9.1) expands project installs the same way and,
+above 40 packages, lists only the ones that are not allowed.
+
 ### 9.1 MCP server
 
 `customs mcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server for any
