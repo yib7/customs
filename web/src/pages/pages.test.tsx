@@ -138,6 +138,27 @@ describe('Check page', () => {
   });
 });
 
+describe('Verdict page', () => {
+  it('compares the release with the one before it on request', async () => {
+    const user = userEvent.setup();
+    renderApp('/verdicts/v_2b8e5f17');
+    const card = await screen.findByRole('region', { name: 'Changes since an earlier release' });
+    expect(within(card).queryByTestId('release-diff')).toBeNull();
+    await user.click(within(card).getByRole('button', { name: 'Compare' }));
+    const diff = await within(card).findByTestId('release-diff');
+    expect(diff).toHaveTextContent('0.0.2');
+    expect(diff).toHaveTextContent('publisher: maintainer -> new-account');
+    expect(diff).toHaveTextContent('+ dotenv-lite ^0.1.0');
+    expect(within(diff).getByRole('list', { name: 'Modified files' })).toHaveTextContent('index.js (+7 -1 lines)');
+    expect(within(diff).getByRole('list', { name: 'Evidence' })).toHaveTextContent('telemetry.envloader.dev');
+
+    await user.type(within(card).getByRole('textbox', { name: 'Earlier version' }), '0.0.3');
+    await user.click(within(card).getByRole('button', { name: 'Compare' }));
+    expect(await within(card).findByRole('alert')).toHaveTextContent('name two different versions');
+    expect(within(card).queryByTestId('release-diff')).toBeNull();
+  });
+});
+
 describe('Overview page', () => {
   it('renders tiles and adds live events to the feed', async () => {
     const mock = renderApp('/');

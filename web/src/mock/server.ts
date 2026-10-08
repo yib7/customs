@@ -131,6 +131,7 @@ export class MockServer {
       }
       return this.putPolicy(body, headers.has('Authorization') ? 'token' : 'none');
     }
+    if (method === 'GET' && path === '/api/diff') return this.diff(url.searchParams);
     if (method === 'GET' && path === '/api/model') return json(200, MODEL_INFO);
     if (method === 'POST' && path === '/api/check') return this.check(body);
     if (method === 'GET' && path === '/healthz') return { status: 200, body: 'ok', contentType: 'text/plain' };
@@ -269,6 +270,40 @@ export class MockServer {
     }
     this.policy = next;
     return json(200, this.policy);
+  }
+
+  /** GET /api/diff for the fixture verdicts: the release before `x.y.z` is `x.y.(z-1)`. */
+  private diff(q: URLSearchParams): MockResponse {
+    const eco = q.get('ecosystem');
+    const name = q.get('name') ?? '';
+    const known = ALL_VERDICTS.find((v) => v.ecosystem === eco && v.name === name);
+    if (!known || !known.version) return json(404, { error: `'${name}' does not exist on ${eco === 'pypi' ? 'PyPI' : 'npm'}` });
+    const to = q.get('to') || known.version;
+    const parts = to.split('.').map(Number);
+    const patch = parts[2] ?? NaN;
+    const from = q.get('from') || (parts.length === 3 && Number.isInteger(patch) && patch > 0 ? `${parts[0]}.${parts[1]}.${patch - 1}` : null);
+    if (!from) return json(422, { error: `${name} ${to} has no earlier release to compare with; pass --from` });
+    if (from === to) return json(422, { error: `both sides are ${name} ${to}; name two different versions` });
+    const evidence = known.evidence ?? [];
+    const day = 86_400_000;
+    return json(200, {
+      ecosystem: known.ecosystem,
+      name,
+      from: { version: from, published: new Date(Date.now() - 40 * day).toISOString(), filename: null },
+      to: { version: to, published: new Date(Date.now() - day).toISOString(), filename: known.artifact },
+      metadata: evidence.length > 0 ? [{ field: 'publisher', before: 'maintainer', after: 'new-account' }] : [],
+      dependencies: evidence.length > 0 ? [{ name: 'dotenv-lite', before: null, after: '^0.1.0' }] : [],
+      files: {
+        added: [],
+        modified: [{ path: 'index.js', size: 2048, lines_added: evidence.length * 3 + 1, lines_removed: 1 }],
+        removed: [],
+        unchanged: 12,
+      },
+      files_note: null,
+      new_evidence: evidence,
+      new_install_surface: [],
+      verdict: known,
+    });
   }
 
   private check(body: unknown): MockResponse {

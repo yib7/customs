@@ -217,3 +217,53 @@ export interface PolicyChange {
   auth: 'token' | 'none';
   changes: PolicyFieldChange[];
 }
+
+/** One side of a release comparison (GET /api/diff). */
+export interface ReleaseSide {
+  version: string;
+  published: string | null;
+  filename: string | null;
+}
+
+/** A registry fact that differs between two releases; null means absent on that side. */
+export interface MetaChange {
+  /** `publisher`, `provenance`, or `install script <name>`. */
+  field: string;
+  before: string | null;
+  after: string | null;
+}
+
+export interface DependencyChange {
+  name: string;
+  before: string | null;
+  after: string | null;
+}
+
+export interface FileChange {
+  path: string;
+  size: number;
+  lines_added: number | null;
+  lines_removed: number | null;
+}
+
+export interface FileDiff {
+  added: FileChange[];
+  modified: FileChange[];
+  removed: FileChange[];
+  unchanged: number;
+}
+
+/** What release `to` changes relative to `from` (DESIGN.md section 7, GET /api/diff). */
+export interface ReleaseDiff {
+  ecosystem: Ecosystem;
+  name: string;
+  from: ReleaseSide;
+  to: ReleaseSide;
+  metadata: MetaChange[];
+  dependencies: DependencyChange[];
+  files: FileDiff | null;
+  files_note: string | null;
+  new_evidence: Evidence[];
+  new_install_surface: string[];
+  verdict: Verdict | null;
+}

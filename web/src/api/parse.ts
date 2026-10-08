@@ -5,6 +5,12 @@
 import type {
   CustomsEvent,
   DayCount,
+  DependencyChange,
+  FileChange,
+  FileDiff,
+  MetaChange,
+  ReleaseDiff,
+  ReleaseSide,
   Decision,
   DecisionCounts,
   Ecosystem,
@@ -471,4 +477,72 @@ export function parsePolicyChanges(v: unknown): PolicyChange[] {
     });
   }
   return out;
+}
+
+function parseReleaseSide(v: unknown): ReleaseSide | null {
+  if (!isRecord(v)) return null;
+  const version = asString(v.version);
+  if (!version) return null;
+  return { version, published: parseTimestamp(v.published), filename: asString(v.filename) };
+}
+
+function parseChange(v: unknown, key: 'field' | 'name'): { key: string; before: string | null; after: string | null } | null {
+  if (!isRecord(v)) return null;
+  const k = asString(v[key]);
+  if (!k) return null;
+  return { key: k, before: asString(v.before), after: asString(v.after) };
+}
+
+function parseFileChange(v: unknown): FileChange | null {
+  if (!isRecord(v)) return null;
+  const path = asString(v.path);
+  if (!path) return null;
+  return {
+    path,
+    size: Math.max(0, asNumber(v.size) ?? 0),
+    lines_added: asNumber(v.lines_added),
+    lines_removed: asNumber(v.lines_removed),
+  };
+}
+
+function parseFileDiff(v: unknown): FileDiff | null {
+  if (!isRecord(v)) return null;
+  const list = (x: unknown) => compact(asArray(x).map(parseFileChange));
+  return {
+    added: list(v.added),
+    modified: list(v.modified),
+    removed: list(v.removed),
+    unchanged: Math.max(0, asNumber(v.unchanged) ?? 0),
+  };
+}
+
+export function parseReleaseDiff(v: unknown): ReleaseDiff {
+  if (!isRecord(v)) throw new ParseError('release diff is not an object');
+  const name = asString(v.name);
+  const from = parseReleaseSide(v.from);
+  const to = parseReleaseSide(v.to);
+  if (!name || !from || !to) throw new ParseError('release diff has no package or versions');
+  let verdict: Verdict | null;
+  try {
+    verdict = isRecord(v.verdict) ? parseVerdict(v.verdict) : null;
+  } catch {
+    verdict = null;
+  }
+  return {
+    ecosystem: parseEcosystem(v.ecosystem),
+    name,
+    from,
+    to,
+    metadata: compact(asArray(v.metadata).map((c) => parseChange(c, 'field'))).map(
+      ({ key, before, after }): MetaChange => ({ field: key, before, after }),
+    ),
+    dependencies: compact(asArray(v.dependencies).map((c) => parseChange(c, 'name'))).map(
+      ({ key, before, after }): DependencyChange => ({ name: key, before, after }),
+    ),
+    files: parseFileDiff(v.files),
+    files_note: asString(v.files_note),
+    new_evidence: compact(asArray(v.new_evidence).map(parseEvidence)),
+    new_install_surface: asStringArray(v.new_install_surface),
+    verdict,
+  };
 }

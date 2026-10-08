@@ -4,6 +4,7 @@ import {
   parseModelInfo,
   parsePolicy,
   parsePolicyChanges,
+  parseReleaseDiff,
   parseStats,
   parseVerdict,
 } from './parse';
@@ -14,6 +15,7 @@ import type {
   ModelInfo,
   Policy,
   PolicyChange,
+  ReleaseDiff,
   Stats,
   Verdict,
 } from './types';
@@ -159,6 +161,13 @@ export const api = {
   /** Policy changes made through the API, newest first. */
   policyChanges(limit = 20, signal?: AbortSignal): Promise<PolicyChange[]> {
     return request(`/api/policy/changes?limit=${limit}`, parsePolicyChanges, { signal });
+  },
+  /** What release `to` (default: newest) changes since `from` (default: the one before). */
+  diff(q: { ecosystem: string; name: string; from?: string; to?: string }, signal?: AbortSignal): Promise<ReleaseDiff> {
+    const params = new URLSearchParams({ ecosystem: q.ecosystem, name: q.name, client: 'dashboard' });
+    if (q.from) params.set('from', q.from);
+    if (q.to) params.set('to', q.to);
+    return request(`/api/diff?${params.toString()}`, parseReleaseDiff, { signal });
   },
   model(signal?: AbortSignal): Promise<ModelInfo> {
     return request('/api/model', parseModelInfo, { signal });

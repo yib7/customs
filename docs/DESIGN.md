@@ -777,7 +777,8 @@ API (JSON). CORS allows only `http://localhost:5173` (the Vite dev server).
   that can list some old ones as new. An archive above the check limit is not
   downloaded and one above the scan limit is not compared; `files_note` says why. Errors:
   404 for an unknown package, 422 for a version that does not resolve, no earlier
-  release, or `from` equal to `to`.
+  release, or `from` equal to `to`. The dashboard's verdict page runs the comparison on
+  request, since it downloads and scans the earlier release.
 - `GET /api/policy/changes?limit=50`: the policy changes accepted through `PUT`, newest
   first: `{ "changes": [ { "id", "ts", "remote", "client", "auth", "changes": [ { "field",
   "before", "after" } ] } ] }`. `remote` is the connection's address (a proxy in front

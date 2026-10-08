@@ -1,6 +1,7 @@
 import { Link, useNavigate, useParams } from 'react-router';
 import { ApiError, api } from '../api/client';
 import { IconArrowLeft } from '../components/Icons';
+import { ReleaseDiffCard } from '../components/ReleaseDiffCard';
 import { VerdictView } from '../components/VerdictView';
 import { btn } from '../components/styles';
 import { EmptyState, ErrorBox, Loading } from '../components/ui';
@@ -45,6 +46,7 @@ export function VerdictPage() {
         )
       ) : null}
       {v ? <VerdictView verdict={v} thresholds={thresholds} /> : null}
+      {v ? <ReleaseDiffCard key={v.id ?? v.name} verdict={v} /> : null}
     </>
   );
 }

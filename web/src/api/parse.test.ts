@@ -6,6 +6,7 @@ import {
   parseEventList,
   parseModelInfo,
   parsePolicy,
+  parseReleaseDiff,
   parseStats,
   parseTimestamp,
   parseVerdict,
@@ -271,5 +272,37 @@ describe('errorFromBody', () => {
     expect(errorFromBody(500, 'boom').message).toBe('boom');
     expect(errorFromBody(503, null, 'Service Unavailable').message).toBe('Request failed (503 Service Unavailable)');
     expect(errorFromBody(404, { error: 'gone', code: 'nonexistent_package' }).code).toBe('nonexistent_package');
+  });
+});
+
+describe('parseReleaseDiff', () => {
+  it('reads GET /api/diff and drops malformed rows', () => {
+    const d = parseReleaseDiff({
+      ecosystem: 'npm',
+      name: 'pkg',
+      from: { version: '1.0.0', published: '2024-01-01T00:00:00Z', filename: null },
+      to: { version: '1.0.1', published: null, filename: 'pkg-1.0.1.tgz' },
+      metadata: [{ field: 'install script postinstall', before: null, after: 'node setup.js' }, { before: 'x' }],
+      dependencies: [{ name: 'lure', before: null, after: '^0.0.1' }],
+      files: { added: [{ path: 'setup.js', size: 40, lines_added: 2 }, { size: 1 }], modified: [], removed: [], unchanged: 3 },
+      new_evidence: [{ indicator: 'network', file: 'setup.js', line: 1, snippet: 'fetch(u)' }],
+      new_install_surface: ['setup.js'],
+      verdict: { name: 'pkg', decision: 'block' },
+    });
+    expect(d.metadata).toEqual([{ field: 'install script postinstall', before: null, after: 'node setup.js' }]);
+    expect(d.dependencies[0]).toEqual({ name: 'lure', before: null, after: '^0.0.1' });
+    expect(d.files?.added).toEqual([{ path: 'setup.js', size: 40, lines_added: 2, lines_removed: null }]);
+    expect(d.files?.unchanged).toBe(3);
+    expect(d.files_note).toBeNull();
+    expect(d.verdict?.decision).toBe('block');
+    expect(d.from.published).not.toBeNull();
+  });
+
+  it('needs a package and both versions', () => {
+    expect(() => parseReleaseDiff({ name: 'pkg', from: { version: '1' } })).toThrow(ParseError);
+    const d = parseReleaseDiff({ name: 'pkg', from: { version: '1' }, to: { version: '2' }, files: null, files_note: 'too big' });
+    expect(d.files).toBeNull();
+    expect(d.files_note).toBe('too big');
+    expect(d.verdict).toBeNull();
   });
 });
