@@ -316,6 +316,12 @@ def render(scheme: str = SCHEME) -> str:
                     f"| {t} | {flag} | {pct(b['recall_block'])} | {pct(r['recall_block'])} | "
                     f"{pct(b['recall_warn'])} | {pct(r['recall_warn'])} |"
                 )
+            elif base_rob:
+                # A transform added after the baseline run has no before column.
+                add(
+                    f"| {t} | {flag} | n/a | {pct(r['recall_block'])} | "
+                    f"n/a | {pct(r['recall_warn'])} |"
+                )
             else:
                 add(f"| {t} | {flag} | {pct(r['recall_block'])} | {pct(r['recall_warn'])} |")
         add("")

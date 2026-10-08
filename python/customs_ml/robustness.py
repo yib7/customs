@@ -22,6 +22,8 @@ and the rewritten archive is re-scanned and re-scored with the exported models:
                       javascript-obfuscator produces.
 ``base64_wrap``       replace each install-time script with a stub that base64-decodes and
                       executes the original (the most common real-world wrapper).
+``zlib_wrap``         the same stub over zlib-compressed bytes:
+                      ``exec(zlib.decompress(base64.b64decode(...)))``.
 ``trojan_padding``    bury the payload inside a large benign codebase by adding the source of
                       a real popular package, mimicking a compromised library.
 ``indirection``       move install-time Python code into a helper module that setup.py
@@ -36,6 +38,7 @@ from __future__ import annotations
 import base64
 import json
 import re
+import zlib
 from collections.abc import Callable
 from pathlib import Path
 
@@ -211,6 +214,23 @@ def base64_wrap(files: Files, eco: str) -> Files:
     return out
 
 
+def zlib_wrap(files: Files, eco: str) -> Files:
+    out = dict(files)
+    if eco == "pypi":
+        targets = [p for p in files if p == "setup.py" or p.endswith("/__init__.py")]
+        for p in targets:
+            b64 = base64.b64encode(zlib.compress(files[p])).decode()
+            stub = f"exec(zlib.decompress(base64.b64decode('{b64}')))\n"
+            out[p] = ("import base64, zlib\n" + stub).encode()
+    else:
+        for p in [p for p in files if p.endswith(".js")]:
+            b64 = base64.b64encode(zlib.compress(files[p])).decode()
+            out[p] = (
+                f"eval(require('zlib').inflateSync(Buffer.from('{b64}', 'base64')).toString());\n"
+            ).encode()
+    return out
+
+
 def make_trojan_padding(donor: Files) -> Callable[[Files, str], Files]:
     def pad(files: Files, eco: str) -> Files:
         out = {f"vendor/{p}": d for p, d in donor.items() if _is_code(p)}
@@ -341,6 +361,7 @@ def run(n: int = 600, scheme: str = SCHEME, seed: int = 0, only: list[str] | Non
         "array_join": array_join,
         "string_table": string_table,
         "base64_wrap": base64_wrap,
+        "zlib_wrap": zlib_wrap,
         "trojan_padding": make_trojan_padding(donor),
         "indirection": indirection,
         "metadata_mimicry": make_metadata_mimicry(_readme(donor)),

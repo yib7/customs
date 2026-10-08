@@ -21,6 +21,8 @@ REWRITES = [
     r.reverse_strings,
     r.array_join,
     r.string_table,
+    r.base64_wrap,
+    r.zlib_wrap,
 ]
 
 
