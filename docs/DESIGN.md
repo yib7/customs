@@ -269,7 +269,7 @@ How indicators are counted (`customs-scan`, schema 1):
   archives: URL counts rose in 41 malicious archives and 1 benign one, the rest is string
   entropy, and no indicator appeared where there was none. After retraining on joined
   features the joined-pieces rewrite is blocked at 59.9% against 62.0% for the clean
-  samples, a 2.1-point gap from 7.7.
+  samples, a 2.1-point gap from 7.8.
   A string table (every literal moved into one array and read back by index, as
   javascript-obfuscator lays it out) is read in place: a name assigned once to a list of
   plain literals, never touched through `.` (so the `push`/`shift` rotation the obfuscator

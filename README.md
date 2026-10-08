@@ -136,31 +136,38 @@ name prefix each), 15 are blocked in full. The rest warn.
 
 | Test set (time split, malware found from 2026-02-13) | Value (95% CI) |
 |---|---|
-| ROC AUC | 0.971 (0.965 to 0.977) |
-| Flagged at the warn threshold (target FPR 1%) | 80.9% (77.9 to 83.8), realized FPR 0.92% |
-| Blocked at the block threshold (target FPR 0.1%) | 68.0% (64.1 to 71.7), realized FPR 0.09% |
-| Never-seen campaigns (no near-duplicate in training), ROC AUC | 0.971 |
+| ROC AUC | 0.971 (0.963 to 0.977) |
+| Flagged at the warn threshold (target FPR 1%) | 80.0% (76.9 to 83.0), realized FPR 0.83% |
+| Blocked at the block threshold (target FPR 0.1%) | 69.5% (65.4 to 73.3), realized FPR 0.17% |
+| Never-seen campaigns (no near-duplicate in training), ROC AUC | 0.969 |
 | Benign false positives at block, popular packages | 0 of 2,064 (top and mid tiers) |
 
 ![Verdict for a real PyPI stealer, blocked with the code evidence](docs/screenshots/verdict-light.png)
 
-**Red team.** Held-out malware rewritten with cheap evasions, then re-scanned. The first
-model leaned on metadata (an ablation without it drops ROC AUC from 0.976 to 0.941), so
-training was augmented with disguised malware. Detection at the warn threshold:
+**Red team.** Held-out malware rewritten with evasions, then re-scanned. The first model
+leaned on metadata (an ablation without it drops ROC AUC from 0.976 to 0.941), so training
+was augmented with disguised malware; the string rewrites were never trained on, and each
+one that cost detection led to a scanner pass that reads the string the way the runtime
+would. Detection at the block threshold, against 68.6% for the clean samples:
 
-| Evasion | Used in augmentation | Before | After |
+| Evasion | Used in augmentation | Before the scanner fix | Now |
 |---|---|---:|---:|
-| none (clean) | | 80.0% | 78.9% |
-| starjacking (README, repo link and description copied from a real project) | yes | 57.9% | **75.2%** |
-| fake README and repository metadata | yes | 63.2% | **77.8%** |
-| payload buried inside a real library's source | yes | 68.0% | **80.2%** |
-| string literals split into concatenations | no | 78.0% | 79.5% |
-| install script moved behind an import | no | 79.9% | 78.9% |
-| payload wrapped in base64 + exec | no | 91.6% | 93.5% |
+| starjacking (README, repo link and description copied from a real project) | yes | n/a | 57.5% |
+| fake README and repository metadata | yes | n/a | 63.2% |
+| payload buried inside a real library's source | yes | n/a | 66.9% |
+| literals split into `+` concatenations | no | 4-point gap | 68.0% |
+| literals written as `\xNN` escapes | no | 6.5-point gap | 68.1% |
+| literals stored reversed (`'...'[::-1]`) | no | 6.7-point gap | 67.0% |
+| literals split into joined lists (`''.join([...])`) | no | 7.8-point gap | 66.5% |
+| literals moved into one string table (`_s[3]`) | no | 2.8-point gap | 68.0% |
+| literals built from character codes | no | n/a | 68.4% |
+| install script moved behind an import | no | n/a | 68.6% |
+| payload wrapped in base64 + exec | no | n/a | 86.1% |
+| payload wrapped in zlib + base64 + exec | no | n/a | 86.9% |
 
-Splitting string literals (`'child_' + 'process'`) used to cost 4 points at block; the
-scanner now folds literals joined by `+` before any rule or the CNN sees them, and the
-split rewrite is blocked at 66.1% against 67.1% for the clean samples.
+The wrapped payloads score higher than clean ones because the scanner decodes the literal
+handed to `exec` or `eval` (plain, base64, or zlib inside base64, within a per-file budget)
+and reads it as code, while the encoded blob itself still counts as obfuscation.
 
 **A second source.** The test sets above hold one collector's malware.
 [MalRegistry](https://github.com/lxyeternal/pypi_malregistry) (ASE 2023) was gathered by
@@ -170,7 +177,7 @@ campaign into a dev half and a held-out half that is never looked at or trained 
 | Held-out MalRegistry campaigns (2,174 archives, 660 clusters) | Before | After |
 |---|---:|---:|
 | Caught at a 0.5% false-positive rate (code only, no name model) | 37.4% | **48.7%** |
-| Warned or blocked, one sample per campaign | 59.2% | **84.4%** |
+| Warned or blocked, one sample per campaign | 59.2% | **83.9%** |
 
 *Before* is the model trained on one collector; *after* adds the dev half to training (the
 first row is a controlled retrain; the second is the shipped model). The gain grows with
@@ -178,14 +185,12 @@ the share of dev campaigns added (43.0% at a quarter, 46.1% at half). A round of
 fixes driven by dev-half error analysis, by contrast, helped the dev half and barely moved
 the held-out one, which is why the held-out half exists.
 
-Weighting each campaign equally, the shipped models catch 68.4% / 81.7% / 83.9% of held-out
+Weighting each campaign equally, the shipped models catch 63.9% / 81.0% / 83.8% of held-out
 campaigns at 0.1% / 0.5% / 1% false positives. Per-archive numbers are fragile here: one
-campaign is 901 near-identical archives (41% of the held-out half), so per-archive recall
-moves by 41 points whenever a retrain carries that one score across a threshold. At 0.5%
-it read 76.0% for the previous model and 50.0% for this one, while the campaign-weighted
-number moved from 80.3% to 81.7%. The scanner change behind this retrain leaves that
-campaign's features and token stream unchanged, so the swing is retrain noise: its code
-risk fell from 0.91 to 0.70 because the new CNN scores it near zero.
+campaign is 901 near-identical archives (41% of the held-out half) with a code risk near
+0.94, so per-archive recall moves by 41 points whenever a retrain carries that one score
+across a threshold. At 0.5% it read 50.0% for the previous model and 91.1% for this one,
+while the campaign-weighted number moved from 80.5% to 81.0%.
 
 **Known weak spots** (from the report): compromised releases of popular libraries (a
 payload inside thousands of lines of legitimate code, ROC AUC 0.903, 42% blocked) and very
