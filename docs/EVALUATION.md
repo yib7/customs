@@ -306,6 +306,27 @@ Window: 2026-10-07T07:56:21Z to 2026-10-08T01:05:27Z (UTC, models 2026.10.07).
 
 The window is hours long, and malicious uploads usually stay up for days, so the removal columns are a floor. What the window does measure is the alert load on real traffic: 7 of 8,422 fresh releases (0.1%) were warned or blocked, the rate a user installing brand-new releases would see.
 
+## Popular packages at their latest release
+
+The benign test set is a sample frozen before training. `customs_ml/popular_check.py` asks what a user meets on the first day: the 300 most-downloaded packages of each ecosystem (the name model's popularity lists), at whatever version the registry served on 2026-10-08, sent through a running `customs serve` with the default policy (models 2026.10.08). Every one is benign in practice, so each flag is a false positive or a rule doing what it was set to do.
+
+| | PyPI | npm |
+|---|---:|---:|
+| Checked (no errors) | 300 | 300 |
+| Model warns | 1 | 1 |
+| Model blocks | 0 | 0 |
+| `min_age_days` blocks (published under 3 days ago) | 37 | 18 |
+| History rules warn (provenance, publisher, revival) | 8 | 12 |
+
+The model's two warns:
+
+* requests 2.34.2 (sdist, risk 0.89): the test suite has URLs on private IP addresses (`all_ip_url`), and `setup.py` runs `os.system` for its `publish` command, which puts process and network indicators on the install surface. requests 2.32.3 scores 0.99, over the block threshold.
+* postcss 8.5.29 (risk 0.98): a Chinese-language message on the install surface sets `inst_nonascii_ratio`, next to environment access.
+
+Both are known weak spots of the classifier rather than of these packages, and a fix belongs in training data (benign packages with test fixtures on private addresses and non-English messages), not in a per-package exception. A warn serves the package and records the verdict; only a block stops an install.
+
+The `min_age_days` blocks are the cooldown the default policy sets on any release under three days old, and clear on their own. The history rules warn on releases inside their 90-day window after a quiet year (`dormant_revival`), a new publishing account (`publisher_changed`), or a release without the attestation its predecessor had (`provenance_dropped`); none of the 20 is malicious. The same run blocked fast-levenshtein 3.0.0, a 2020 release that added a dependency another author had published two hours earlier. `young_dependency_added` now applies within the history window like the other circumstantial rules, and that release is allowed.
+
 ## Retrain variance
 
 The tree model and the CNN retrained with 5 seeds (7, 11, 23, 42, 101) on identical data, each stacked and thresholded the same way as the shipped model. A change between two training runs smaller than these ranges is not evidence that anything improved or regressed.

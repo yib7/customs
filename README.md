@@ -293,6 +293,10 @@ methodology, is in [`docs/EVALUATION.md`](docs/EVALUATION.md).
   `scripts/installer_e2e.py`, run in CI, drives real pip, uv, npm, pnpm, yarn and bun
   through the proxy against a fake registry: dependency resolution, the release cooldown,
   and blocks by the startup-hook and install-script rules.
+* **Popular packages checked.** The 300 most-downloaded packages of each ecosystem, at
+  their latest release, through `customs serve`: the model warns on two (requests and
+  postcss, details in [evaluation](docs/EVALUATION.md#popular-packages-at-their-latest-release))
+  and blocks none.
 * **Seed noise measured.** Five retrains that differ only in random seed give ROC AUC
   0.968 to 0.969 but block recall 61% to 70%, because the block threshold rests on two or
   three validation packages. Model changes are judged against that spread. One scanner
