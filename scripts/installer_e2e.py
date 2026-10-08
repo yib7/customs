@@ -176,7 +176,7 @@ def wheel(
     requires: tuple[str, ...] | list[str] = (),
     extra: dict[str, str] | None = None,
 ):
-    """A pure-Python wheel: (file name, bytes)."""
+    """A pure-Python wheel: (file name, bytes, METADATA bytes)."""
     dist = name.replace("-", "_")
     info = f"{dist}-{version}.dist-info"
     files = {
@@ -208,7 +208,7 @@ def wheel(
             z.writestr(path, data)
         record.append(f"{info}/RECORD,,")
         z.writestr(f"{info}/RECORD", "\n".join(record) + "\n")
-    return f"{dist}-{version}-py3-none-any.whl", buf.getvalue()
+    return f"{dist}-{version}-py3-none-any.whl", buf.getvalue(), files[f"{info}/METADATA"].encode()
 
 
 def npm_tarball(manifest: dict, files: dict[str, str]) -> bytes:
@@ -251,17 +251,21 @@ EVIL_SETUP = "require('child_process').exec('echo customs-e2e-fixture');\n"
 class Registry:
     def __init__(self):
         self.base = ""
+        self.paths: list[str] = []
         self.wheels: dict[str, list[dict]] = {}
         self.files: dict[str, bytes] = {}
         for name, ver, t, req, extra in PYPI:
-            fname, data = wheel(name, ver, req, extra)
+            fname, data, meta = wheel(name, ver, req, extra)
             self.files[fname] = data
+            # PEP 658: resolvers read the metadata file before choosing a version.
+            self.files[fname + ".metadata"] = meta
             self.wheels.setdefault(name, []).append(
                 {
                     "version": ver,
                     "filename": fname,
                     "time": t,
                     "sha256": hashlib.sha256(data).hexdigest(),
+                    "meta_sha256": hashlib.sha256(meta).hexdigest(),
                     "size": len(data),
                 }
             )
@@ -325,6 +329,7 @@ class Registry:
 
             def do_GET(self):
                 p = self.path.split("?")[0]
+                reg.paths.append(p)
                 parts = [x for x in p.split("/") if x]
                 if parts[:1] == ["simple"] and len(parts) == 2:
                     return self.simple(parts[1])
@@ -355,6 +360,7 @@ class Registry:
                                     "filename": r["filename"],
                                     "url": url(r),
                                     "hashes": {"sha256": r["sha256"]},
+                                    "core-metadata": {"sha256": r["meta_sha256"]},
                                     "upload-time": r["time"],
                                     "size": r["size"],
                                 }
@@ -364,7 +370,9 @@ class Registry:
                         "application/vnd.pypi.simple.v1+json",
                     )
                 links = "\n".join(
-                    f'<a href="{url(r)}#sha256={r["sha256"]}">{r["filename"]}</a><br/>'
+                    f'<a href="{url(r)}#sha256={r["sha256"]}" data-requires-python="&gt;=3.8" '
+                    f'data-dist-info-metadata="sha256={r["meta_sha256"]}" '
+                    f'data-core-metadata="sha256={r["meta_sha256"]}">{r["filename"]}</a><br/>'
                     for r in rows
                 )
                 self.send(
@@ -481,6 +489,8 @@ def main() -> int:
                 print("customs serve did not start")
                 return 1
             scenarios(url, work, required)
+            metadata = [p for p in reg.paths if p.endswith(".whl.metadata")]
+            expect(bool(metadata), "resolvers read PEP 658 metadata files through the proxy")
         finally:
             server.terminate()
             try:
