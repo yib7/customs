@@ -45,7 +45,7 @@ pub enum Command {
     Audit(AuditArgs),
     /// Scan a local archive offline and print the verdict.
     Scan(ScanArgs),
-    /// Print shell exports that route pip, uv, pipenv, PDM, npm, pnpm, Yarn and Bun through the proxy.
+    /// Print shell exports that route pip, uv, pipenv, PDM, npm, pnpm, Yarn, Bun and Deno through the proxy.
     Env(EnvArgs),
     /// Model Context Protocol server on stdio, so agents can check packages before installing.
     Mcp(McpArgs),
@@ -499,10 +499,11 @@ pub fn pretty(v: &Verdict, url: Option<&str>, via: &str) -> String {
     s
 }
 
-/// Shell exports that send pip, uv, pipenv, PDM, npm, pnpm, Yarn and Bun through the
-/// proxy. Bun, pnpm and Yarn 1 read `npm_config_registry`; Yarn 2+ reads only its own
-/// variables and refuses plain-HTTP registries other than localhost unless whitelisted.
-/// Pipenv takes its index from the Pipfile and ignores `PIP_INDEX_URL` unless
+/// Shell exports that send pip, uv, pipenv, PDM, npm, pnpm, Yarn, Bun and Deno through the
+/// proxy. Bun, pnpm and Yarn 1 read `npm_config_registry`; Deno reads only the upper-case
+/// `NPM_CONFIG_REGISTRY`, and Linux environment names are case-sensitive. Yarn 2+ reads
+/// only its own variables and refuses plain-HTTP registries other than localhost unless
+/// whitelisted. Pipenv takes its index from the Pipfile and ignores `PIP_INDEX_URL` unless
 /// `PIPENV_PYPI_MIRROR` replaces pypi.org.
 pub fn env_exports(server: &str, shell: ShellArg) -> String {
     let base = server.trim_end_matches('/');
@@ -515,6 +516,7 @@ pub fn env_exports(server: &str, shell: ShellArg) -> String {
         ("PIPENV_PYPI_MIRROR", simple.clone()),
         ("PDM_PYPI_URL", simple),
         ("npm_config_registry", npm.clone()),
+        ("NPM_CONFIG_REGISTRY", npm.clone()),
         ("YARN_NPM_REGISTRY_SERVER", npm),
     ];
     if let Ok(u) = url::Url::parse(base) {
@@ -569,6 +571,7 @@ mod tests {
         let e = env_exports("http://127.0.0.1:7878/", ShellArg::Sh);
         assert!(e.contains("export PIP_INDEX_URL=\"http://127.0.0.1:7878/pypi/simple\""));
         assert!(e.contains("export npm_config_registry=\"http://127.0.0.1:7878/npm/\""));
+        assert!(e.contains("export NPM_CONFIG_REGISTRY=\"http://127.0.0.1:7878/npm/\""));
         assert!(e.contains("UV_INDEX_URL"));
         assert!(e.contains("export PIPENV_PYPI_MIRROR=\"http://127.0.0.1:7878/pypi/simple\""));
         assert!(e.contains("export YARN_NPM_REGISTRY_SERVER=\"http://127.0.0.1:7878/npm/\""));

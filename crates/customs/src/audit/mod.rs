@@ -8,6 +8,7 @@
 //! scanning.
 
 mod bun;
+mod deno;
 mod package_lock;
 mod pipfile;
 mod pnpm;
@@ -143,6 +144,7 @@ pub enum LockKind {
     PnpmLock,
     YarnLock,
     BunLock,
+    DenoLock,
 }
 
 impl LockKind {
@@ -157,6 +159,7 @@ impl LockKind {
             "pnpm-lock.yaml" => LockKind::PnpmLock,
             "yarn.lock" => LockKind::YarnLock,
             "bun.lock" => LockKind::BunLock,
+            "deno.lock" => LockKind::DenoLock,
             n if n.ends_with(".txt") => LockKind::Requirements,
             _ => return None,
         })
@@ -174,6 +177,7 @@ impl LockKind {
                 | "pnpm-lock.yaml"
                 | "yarn.lock"
                 | "bun.lock"
+                | "deno.lock"
         ) || (name.starts_with("requirements") && name.ends_with(".txt"))
     }
 }
@@ -194,7 +198,7 @@ pub fn find_lockfiles(paths: &[PathBuf], recursive: bool) -> Result<Vec<PathBuf>
             }
             if LockKind::detect(p).is_none() {
                 return Err(format!(
-                    "{}: not a lockfile Customs can read (requirements*.txt, poetry.lock, uv.lock, Pipfile.lock, package-lock.json, npm-shrinkwrap.json, pnpm-lock.yaml, yarn.lock, bun.lock)",
+                    "{}: not a lockfile Customs can read (requirements*.txt, poetry.lock, uv.lock, Pipfile.lock, package-lock.json, npm-shrinkwrap.json, pnpm-lock.yaml, yarn.lock, bun.lock, deno.lock)",
                     p.display()
                 ));
             }
@@ -265,6 +269,7 @@ pub fn parse_lockfile(path: &Path) -> Result<Parsed, String> {
         LockKind::PnpmLock => pnpm::parse(text, path, &mut out),
         LockKind::YarnLock => yarn::parse(text, path, &mut out),
         LockKind::BunLock => bun::parse(text, path, &mut out),
+        LockKind::DenoLock => deno::parse(text, path, &mut out),
         LockKind::Requirements => unreachable!(),
     }
     .map_err(|e| format!("{}: {e}", path.display()))?;

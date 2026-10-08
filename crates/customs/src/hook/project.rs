@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use super::parse::{parse_npm_spec, parse_pypi_spec, Manager, Target};
+use super::parse::{deno_spec, parse_npm_spec, parse_pypi_spec, Manager, Target};
 use crate::audit;
 use crate::util::ecosystem_str;
 
@@ -41,6 +41,7 @@ impl Manager {
             Manager::Poetry => &["poetry.lock"],
             Manager::Pipenv => &["Pipfile.lock"],
             Manager::Pip => &[],
+            Manager::Deno => &["deno.lock"],
         }
     }
 }
@@ -109,7 +110,84 @@ fn manifest_targets(manager: Manager, dir: &Path, extras: &[String]) -> Vec<Targ
             pyproject(&dir.join("pyproject.toml"), manager, extras)
         }
         Manager::Pipenv => pipfile(&dir.join("Pipfile")),
+        Manager::Deno => {
+            let mut t = deno_json(dir);
+            t.extend(package_json(&dir.join("package.json")));
+            t
+        }
     }
+}
+
+/// The `npm:`, `jsr:` and URL entries of the import map in `deno.json` or `deno.jsonc`.
+fn deno_json(dir: &Path) -> Vec<Target> {
+    let Some(doc) = ["deno.json", "deno.jsonc"].iter().find_map(|n| {
+        let text = std::fs::read_to_string(dir.join(n)).ok()?;
+        serde_json::from_str::<Value>(&strip_jsonc(&text)).ok()
+    }) else {
+        return vec![];
+    };
+    let Some(imports) = doc.get("imports").and_then(Value::as_object) else {
+        return vec![];
+    };
+    imports
+        .values()
+        .filter_map(Value::as_str)
+        .filter_map(|v| deno_spec(v, false))
+        .collect()
+}
+
+/// JSON with comments and trailing commas (`deno.jsonc`) as plain JSON.
+fn strip_jsonc(text: &str) -> String {
+    let no_comments = strip_outside_strings(text.as_bytes(), |b, i| match b[i] {
+        b'/' if b.get(i + 1) == Some(&b'/') => b[i..]
+            .iter()
+            .position(|&c| c == b'\n')
+            .map_or(b.len(), |n| i + n),
+        b'/' if b.get(i + 1) == Some(&b'*') => b[i + 2..]
+            .windows(2)
+            .position(|w| w == b"*/")
+            .map_or(b.len(), |n| i + 2 + n + 2),
+        _ => i,
+    });
+    let out = strip_outside_strings(&no_comments, |b, i| {
+        let closes = b[i + 1..]
+            .iter()
+            .find(|c| !c.is_ascii_whitespace())
+            .is_some_and(|c| matches!(c, b'}' | b']'));
+        if b[i] == b',' && closes {
+            i + 1
+        } else {
+            i
+        }
+    });
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// `b` without the spans `skip(b, i)` reports (it returns where the span ends, or `i`
+/// for none), never looking inside JSON strings.
+fn strip_outside_strings(b: &[u8], skip: impl Fn(&[u8], usize) -> usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'"' {
+            let start = i;
+            i += 1;
+            while i < b.len() && b[i] != b'"' {
+                i += if b[i] == b'\\' { 2 } else { 1 };
+            }
+            i = (i + 1).min(b.len());
+            out.extend_from_slice(&b[start..i]);
+            continue;
+        }
+        let end = skip(b, i);
+        if end > i {
+            i = end;
+            continue;
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    out
 }
 
 /// The project's own folders and links, never fetched from anywhere.
@@ -406,6 +484,54 @@ dev = ["ruff"]
             names(&expand(Manager::Pip, d.path(), &["dev".into()])),
             vec!["requests >=2", "pytest 8.2.0"]
         );
+    }
+
+    #[test]
+    fn deno_lockfile_plus_import_map() {
+        let d = tempfile::tempdir().unwrap();
+        write(
+            d.path(),
+            "deno.jsonc",
+            r#"{
+  // Import map: npm and JSR packages, a remote module, a local folder.
+  "imports": {
+    "chalk": "npm:chalk@5", /* pinned below */
+    "preact/": "npm:preact@10.22.0/",
+    "@std/path": "jsr:@std/path@^1",
+    "oak": "https://deno.land/x/oak@v12.6.1/mod.ts",
+    "~/": "./src/",
+  },
+}"#,
+        );
+        assert_eq!(
+            names(&expand(Manager::Deno, d.path(), &[])),
+            vec![
+                "? jsr:@std/path@^1",
+                "chalk 5",
+                "? https://deno.land/x/oak@v12.6.1/mod.ts",
+                "preact 10.22.0"
+            ]
+        );
+        write(
+            d.path(),
+            "package.json",
+            r#"{"dependencies": {"zod": "^3"}}"#,
+        );
+        write(
+            d.path(),
+            "deno.lock",
+            r#"{"version": "5", "npm": {
+  "chalk@5.3.0": {"integrity": "sha512-x"},
+  "ms@2.1.2": {"integrity": "sha512-y", "tarball": "https://registry.yarnpkg.com/is-number/-/is-number-7.0.0.tgz"}
+}}"#,
+        );
+        let e = expand(Manager::Deno, d.path(), &[]);
+        assert_eq!(
+            names(&e),
+            vec!["chalk 5.3.0", "is-number 7.0.0", "preact 10.22.0", "zod ^3"]
+        );
+        assert_eq!(e.mismatches.len(), 1);
+        assert_eq!(e.locked, 2);
     }
 
     #[test]

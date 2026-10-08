@@ -80,7 +80,7 @@ flowchart LR
 ```sh
 cargo install --path crates/customs        # or: docker compose -f deploy/docker-compose.yml up
 customs serve                              # proxy, API and dashboard on http://127.0.0.1:7878
-eval "$(customs env)"                      # route pip, uv, pipenv, PDM, npm, pnpm, Yarn and Bun through it
+eval "$(customs env)"                      # route pip, uv, pipenv, PDM, npm, pnpm, Yarn, Bun and Deno through it
 
 customs check pypi reqeusts                # BLOCK: does not exist, 1 edit from 'requests'
 customs check npm left-pad                 # ALLOW
@@ -108,9 +108,9 @@ untrusted data and cut to one bounded line, so a malicious package cannot use it
 source to prompt-inject the agent reading the verdict. See [`hooks/README.md`](hooks/README.md).
 
 **Lockfiles in CI.** `customs audit` checks every pin in `requirements.txt`, `poetry.lock`,
-`uv.lock`, `Pipfile.lock`, `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock` and `bun.lock`,
+`uv.lock`, `Pipfile.lock`, `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `bun.lock` and `deno.lock`,
 and can write SARIF 2.1.0 for GitHub code scanning. It also blocks lockfile injection for
-npm, Yarn, pnpm and Bun: an entry whose tarball URL serves a different package than the
+npm, Yarn, pnpm, Bun and Deno: an entry whose tarball URL serves a different package than the
 name the diff shows. The composite action in [`action.yml`](action.yml)
 turns blocked dependencies into alerts on the lockfile line in the pull request:
 

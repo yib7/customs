@@ -48,13 +48,16 @@ Run `/hooks` in Claude Code to confirm it is registered.
 Scaffolding commands run a package too: `npm create vite` and `npm init vite` run
 `create-vite`, and so do `pnpm create`, `yarn create` and `bun create` (`@scope/app` is
 `@scope/create-app`); `bun create` from a GitHub repository comes back for review.
+Deno: `deno add` and `deno install` with `npm:` packages, `deno install -g`, `deno run`,
+`deno x` and `dx` with an npm package, and `deno create npm:<x>`. JSR packages and remote
+`https:` modules cannot be checked and come back for review.
 
 Project installs too: `npm install` and `npm ci` with no package, `pnpm install`, `yarn`,
-`bun install`, `uv sync`, `poetry install`, `pipenv install`, `pipenv sync`, and
+`bun install`, `deno install`, `deno ci`, `uv sync`, `poetry install`, `pipenv install`, `pipenv sync`, and
 `pip install -e .` (with extras such as `.[dev]`) for a directory with a `pyproject.toml`. The hook
 reads the project's lockfile, checks every pinned package, and denies the command when one
 is blocked or when a lockfile entry's tarball URL serves a different package than it
-names. Dependencies in `package.json`, `pyproject.toml` or `Pipfile` that the lockfile does
+names. Dependencies in `package.json`, `deno.json`, `pyproject.toml` or `Pipfile` that the lockfile does
 not pin yet (one the agent just added) are checked as well. Warnings about packages the
 lockfile already pins do not stop the command; on a real 300-package lockfile, about 1% of
 legitimate packages are over the warn threshold. A large project with nothing cached yet

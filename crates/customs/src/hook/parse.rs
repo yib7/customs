@@ -51,12 +51,15 @@ pub enum Manager {
     Pipenv,
     /// `pip install .` and `-e .`: no lockfile, the dependencies `pyproject.toml` declares.
     Pip,
+    Deno,
 }
 
 impl Manager {
     pub fn ecosystem(self) -> Ecosystem {
         match self {
-            Manager::Npm | Manager::Pnpm | Manager::Yarn | Manager::Bun => Ecosystem::Npm,
+            Manager::Npm | Manager::Pnpm | Manager::Yarn | Manager::Bun | Manager::Deno => {
+                Ecosystem::Npm
+            }
             Manager::Uv | Manager::Poetry | Manager::Pipenv | Manager::Pip => Ecosystem::Pypi,
         }
     }
@@ -71,6 +74,7 @@ impl Manager {
             Manager::Poetry => "poetry",
             Manager::Pipenv => "pipenv",
             Manager::Pip => "pip",
+            Manager::Deno => "deno",
         }
     }
 }
@@ -325,6 +329,8 @@ fn parse_simple(words: &[String], cwd: &Path, out: &mut Vec<Install>, depth: usi
             "bun" => bun(args, cwd, out),
             "bunx" => npx_like(args, out, "bunx"),
             "npx" => npx_like(args, out, "npx"),
+            "deno" => deno(args, cwd, out),
+            "dx" => deno_x(args, out, "dx"),
             _ => {}
         }
     }
@@ -1305,6 +1311,188 @@ fn create_package(init: &str) -> String {
     }
 }
 
+/// Deno options that take a separate value (`--config deno.json`); every other option with
+/// a value is written `--name=value`.
+const DENO_VALUE: &[&str] = &[
+    "-c",
+    "--config",
+    "-L",
+    "--log-level",
+    "--import-map",
+    "--node-modules-linker",
+    "--cert",
+    "--min-dep-age",
+    "--location",
+    "--seed",
+    "--preload",
+    "--require",
+    "--conditions",
+    "--inspect-publish-uid",
+    "--ext",
+    "-n",
+    "--name",
+    "--root",
+    "--os",
+    "--arch",
+    "-p",
+    "--package",
+];
+
+/// Positional arguments of a Deno subcommand, up to `--`.
+fn deno_positionals(args: &[String]) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        if a == "--" {
+            break;
+        }
+        if !a.starts_with('-') {
+            out.push(a);
+        } else if DENO_VALUE.contains(&a) {
+            i += 1;
+        }
+        i += 1;
+    }
+    out
+}
+
+/// What Deno fetches for a module or package specifier. `npm:` packages are checked;
+/// JSR packages and remote URLs are not; a local file is the user's own code. With
+/// `bare_is_npm`, a name without a prefix is an npm package, as for `deno add` and `deno x`.
+pub(super) fn deno_spec(s: &str, bare_is_npm: bool) -> Option<Target> {
+    let unverifiable = |reason: &str| {
+        Some(Target::Unverifiable {
+            ecosystem: Ecosystem::Npm,
+            spec: s.to_string(),
+            reason: reason.into(),
+        })
+    };
+    if let Some(rest) = s.strip_prefix("npm:") {
+        return Some(parse_npm_spec(without_subpath(rest)));
+    }
+    let lower = s.to_ascii_lowercase();
+    if lower.starts_with("jsr:") {
+        return unverifiable("JSR packages are not checked");
+    }
+    if lower.starts_with("https:") || lower.starts_with("http:") {
+        return unverifiable("a remote module, which Customs cannot check");
+    }
+    if !bare_is_npm || s.contains(':') {
+        return None;
+    }
+    match parse_npm_spec(s) {
+        // `./main.ts`, `/abs/path`: local code.
+        Target::Unverifiable { reason, .. } if reason.contains("local path") => None,
+        t => Some(t),
+    }
+}
+
+/// `preact@10/hooks` imports a file of `preact@10`.
+fn without_subpath(spec: &str) -> &str {
+    let from = if spec.starts_with('@') {
+        spec.find('/').map_or(spec.len(), |i| i + 1)
+    } else {
+        0
+    };
+    match spec[from..].find('/') {
+        Some(i) => &spec[..from + i],
+        None => spec,
+    }
+}
+
+fn deno(args: &[String], cwd: &Path, out: &mut Vec<Install>) {
+    let mut i = 0;
+    while i < args.len() && args[i].starts_with('-') {
+        i += if DENO_VALUE.contains(&args[i].as_str()) {
+            2
+        } else {
+            1
+        };
+    }
+    let Some(sub) = args.get(i).map(String::as_str) else {
+        return;
+    };
+    let rest = &args[i + 1..];
+    let pos = deno_positionals(rest);
+    let flag = |names: &[&str]| {
+        rest.iter()
+            .take_while(|a| *a != "--")
+            .any(|a| names.contains(&a.as_str()))
+    };
+    let targets: Vec<Target> = match sub {
+        "add" => pos.iter().filter_map(|p| deno_spec(p, true)).collect(),
+        "install" | "i" if flag(&["-g", "--global"]) => pos
+            .first()
+            .and_then(|p| deno_spec(p, false))
+            .into_iter()
+            .collect(),
+        // `--entrypoint main.ts` caches what local files import.
+        "install" | "i" if flag(&["-e", "--entrypoint"]) => Vec::new(),
+        "install" | "i" if !pos.is_empty() => {
+            pos.iter().filter_map(|p| deno_spec(p, true)).collect()
+        }
+        "install" | "i" | "ci" => vec![project(Manager::Deno, cwd, None)],
+        // The script is the first positional; the rest are its arguments.
+        "run" | "serve" | "compile" => pos
+            .first()
+            .and_then(|p| deno_spec(p, false))
+            .into_iter()
+            .collect(),
+        "cache" => pos.iter().filter_map(|p| deno_spec(p, false)).collect(),
+        "x" => return deno_x(rest, out, "deno x"),
+        "create" => {
+            let Some(init) = pos.first() else {
+                return;
+            };
+            if let Some(i) = init.strip_prefix("npm:") {
+                vec![parse_npm_spec(&create_package(i))]
+            } else if flag(&["--npm"]) && !init.contains(':') {
+                vec![parse_npm_spec(&create_package(init))]
+            } else {
+                deno_spec(init, false).into_iter().collect()
+            }
+        }
+        _ => Vec::new(),
+    };
+    if !targets.is_empty() {
+        out.push(Install {
+            tool: format!("deno {sub}"),
+            targets,
+        });
+    }
+}
+
+/// `deno x` and `dx`, Deno's `npx`: `--package` names the package, otherwise the first
+/// positional does; a name without a prefix comes from npm.
+fn deno_x(args: &[String], out: &mut Vec<Install>, tool: &str) {
+    let mut targets: Vec<Target> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        if let Some(v) = a.strip_prefix("--package=") {
+            targets.extend(deno_spec(v, true));
+        } else if a == "-p" || a == "--package" {
+            targets.extend(args.get(i + 1).and_then(|v| deno_spec(v, true)));
+            i += 1;
+        }
+        i += 1;
+    }
+    if targets.is_empty() {
+        targets.extend(
+            deno_positionals(args)
+                .first()
+                .and_then(|p| deno_spec(p, true)),
+        );
+    }
+    if !targets.is_empty() {
+        out.push(Install {
+            tool: tool.into(),
+            targets,
+        });
+    }
+}
+
 /// `npx`, `npm exec`, `pnpm dlx`, `yarn dlx`, `bunx`: `--package` names packages and the
 /// first positional is a command; without `--package` the first positional is the package.
 fn npx_like(args: &[String], out: &mut Vec<Install>, tool: &str) {
@@ -1996,6 +2184,78 @@ mod tests {
             tools("npx a; uvx b; pip install c"),
             vec!["npx", "uvx", "pip install"]
         );
+    }
+
+    #[test]
+    fn deno_commands() {
+        assert_eq!(
+            targets("deno add npm:chalk@5 jsr:@std/path npm:@types/node@22 lodash"),
+            vec![
+                js("chalk", Some("5")),
+                Target::Unverifiable {
+                    ecosystem: Ecosystem::Npm,
+                    spec: "jsr:@std/path".into(),
+                    reason: "JSR packages are not checked".into()
+                },
+                js("@types/node", Some("22")),
+                js("lodash", None)
+            ]
+        );
+        assert_eq!(
+            targets("deno add --dev -c deno.json npm:vitest"),
+            vec![js("vitest", None)]
+        );
+        assert_eq!(targets("deno install npm:ms@2"), vec![js("ms", Some("2"))]);
+        assert_eq!(
+            targets("deno install -g -n serve -A npm:serve@14 --port 80"),
+            vec![js("serve", Some("14"))]
+        );
+        assert_eq!(targets("deno install -g ./cli.ts"), vec![]);
+        assert_eq!(targets("deno install --entrypoint main.ts"), vec![]);
+        let at = |cmd: &str| -> Vec<Target> {
+            parse_command(cmd, Path::new("/w"))
+                .into_iter()
+                .flat_map(|i| i.targets)
+                .collect()
+        };
+        assert_eq!(at("deno install"), vec![proj(Manager::Deno, "/w")]);
+        assert_eq!(
+            at("deno install --frozen --allow-scripts"),
+            vec![proj(Manager::Deno, "/w")]
+        );
+        assert_eq!(at("deno ci"), vec![proj(Manager::Deno, "/w")]);
+        // The script runs; what follows it is its own arguments.
+        assert_eq!(
+            targets("deno run -A npm:cowsay@1.6.0 npm:other"),
+            vec![js("cowsay", Some("1.6.0"))]
+        );
+        assert_eq!(
+            targets("deno run --config deno.json -A npm:@scope/tool@2/bin/cli.js"),
+            vec![js("@scope/tool", Some("2"))]
+        );
+        assert_eq!(targets("deno run -A main.ts npm:x"), vec![]);
+        assert_eq!(targets("deno run dev"), vec![]);
+        assert!(is_unverifiable(
+            &targets("deno run -A https://example.com/install.ts")[0]
+        ));
+        assert_eq!(targets("deno x cowsay hi"), vec![js("cowsay", None)]);
+        assert_eq!(
+            targets("deno x -y -p npm:typescript@5 tsc --init"),
+            vec![js("typescript", Some("5"))]
+        );
+        assert_eq!(targets("dx --yes prettier ."), vec![js("prettier", None)]);
+        assert_eq!(
+            targets("deno create npm:vite@6 app"),
+            vec![js("create-vite", Some("6"))]
+        );
+        assert_eq!(
+            targets("deno create --npm @scope/thing"),
+            vec![js("@scope/create-thing", None)]
+        );
+        assert!(is_unverifiable(&targets("deno create jsr:@fresh/init")[0]));
+        assert_eq!(targets("deno create vite"), vec![]);
+        assert_eq!(targets("deno fmt && deno test -A"), vec![]);
+        assert_eq!(tools("deno add npm:a; dx b"), ["deno add", "dx"]);
     }
 
     #[test]

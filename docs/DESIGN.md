@@ -1,7 +1,7 @@
 # Customs: design
 
 Customs is a package firewall for AI coding agents. It sits between a package manager
-(pip, uv, pipenv, PDM, npm, pnpm, Yarn, Bun) and the public registry, inspects every package
+(pip, uv, pipenv, PDM, npm, pnpm, Yarn, Bun, Deno) and the public registry, inspects every package
 archive before it reaches the machine, and blocks archives that a malware classifier trained
 on real malicious packages scores as dangerous. It also plugs into Claude Code as a
 PreToolUse hook, so an agent that tries to `pip install` a hallucinated or malicious package
@@ -625,7 +625,9 @@ Clients: `customs env` prints the variables that point installers at the proxy, 
 real installs through it. pip and pipx read `PIP_INDEX_URL`; uv `UV_DEFAULT_INDEX` (and the
 older `UV_INDEX_URL`); PDM `PDM_PYPI_URL`. Pipenv installs from the Pipfile's `[[source]]` and
 ignores `PIP_INDEX_URL`; `PIPENV_PYPI_MIRROR` replaces pypi.org there. npm, pnpm, Yarn 1 and
-Bun read `npm_config_registry`. Yarn 2 and later read only `YARN_NPM_REGISTRY_SERVER`, and
+Bun read `npm_config_registry`. Deno reads only `NPM_CONFIG_REGISTRY`, and environment names
+are case-sensitive on Linux and macOS: with the lower-case variable alone, `deno add` fetched
+straight from registry.npmjs.org, so both spellings are set. Yarn 2 and later read only `YARN_NPM_REGISTRY_SERVER`, and
 refuse a plain-HTTP registry on any host but `localhost` until it is listed in
 `YARN_UNSAFE_HTTP_WHITELIST`, which is set for an `http://` server. Poetry has no
 environment variable that replaces PyPI, so `poetry install` goes straight to pypi.org; the
@@ -755,7 +757,10 @@ command for package installs (`pip install`, `pip3 install`, `python -m pip inst
 `uv pip install`, `uv add`, `poetry add`, `pipx install`, `npm install|i|add`,
 `pnpm add|install`, `yarn add`, `bun add`, `npx <pkg>`, `uvx <pkg>`, and the scaffolding
 commands `npm init|create <x>`, `pnpm|yarn|bun create <x>`, which run `create-<x>`, or
-`@scope/create-<x>` for `@scope/<x>`), resolves each requirement, calls the
+`@scope/create-<x>` for `@scope/<x>`; and Deno: `deno add|install npm:<x>` (a name without
+a prefix is an npm package there), `deno install -g`, `deno run|serve|compile|cache
+npm:<x>`, `deno x|dx <x>` and `deno create npm:<x>`, which maps initializers the way npm
+does; `jsr:` packages and remote `https:` modules cannot be checked and produce `ask`), resolves each requirement, calls the
 running server's `/api/check` (or scans in-process when no server is running), and returns
 a PreToolUse decision: `deny` with an explanation when any package is blocked, `ask` when
 any is warned, nothing otherwise. Local paths, URLs, `-r requirements.txt` and editable
@@ -768,11 +773,12 @@ local paths are skipped. When Customs itself fails, the hook fails open (no deci
 message on stderr) unless run with `--fail-closed`, which denies. Setup: `hooks/README.md`.
 
 **Project installs.** `npm install` or `npm ci` with no package (also `--prefix`), `pnpm
-install` (`-C`), bare `yarn` or `yarn install` (`--cwd`), `bun install` (`--cwd`), `uv sync`
+install` (`-C`), bare `yarn` or `yarn install` (`--cwd`), `bun install` (`--cwd`), `deno
+install` with no package and `deno ci`, `uv sync`
 (`--directory`, `--project`), `poetry install|sync` (`-C`) and `pipenv install|sync`
 install a whole project (`crates/customs/src/hook/project.rs`). The hook reads that
 manager's lockfile in the project directory with the `customs audit` parsers (section 11):
-`npm-shrinkwrap.json` or `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `bun.lock`,
+`npm-shrinkwrap.json` or `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `bun.lock`, `deno.lock`,
 `uv.lock`, `poetry.lock`, `Pipfile.lock`. Every pin is checked, and an entry whose tarball
 URL serves another package is a block. Direct dependencies in the manifest that the
 lockfile does not pin yet are checked too, as the ranges they name: `package.json`
@@ -949,6 +955,7 @@ a pull request before anything is installed. PATHS are lockfiles or directories
 | `pnpm-lock.yaml` | `packages:` keys (v5 `/a/1.0.0`, v6 `/a@1.0.0(peer@1)`, v9 `a@1.0.0`), read line by line |
 | `yarn.lock` | classic and berry entry headers with `version` (berry `resolution` names the installed package) |
 | `bun.lock` | `packages` entries: `name@version` first (the real name for aliases), then the tarball URL, empty for the default registry; trailing commas allowed. `bun.lockb` is binary and refused with a hint to write `bun.lock` |
+| `deno.lock` | v4/v5 `npm` map (v3: `packages.npm`), keys `name@version` with `_peer@version` suffixes, `tarball` when the registry is not the default; `jsr` packages and `remote` modules listed as not checked |
 
 Each pin keeps its file and 1-based line. Pins are deduplicated on (ecosystem, normalized
 name, version), keeping the first location. Entries that cannot be checked are listed as
@@ -958,13 +965,17 @@ loopback host (a Customs proxy). The project's own workspace packages (`editable
 `virtual`, `workspace:`, `link:`, `portal:`, npm `link: true`) and berry `patch:` entries
 (the unpatched entry is listed too) are skipped silently.
 
-npm, Yarn classic, pnpm and Bun install from the URL the lockfile records (`resolved`, pnpm
-`resolution.tarball`, the second element of a `bun.lock` entry), and none of them
+npm, Yarn classic, pnpm, Bun and Deno install from the URL the lockfile records (`resolved`,
+pnpm `resolution.tarball`, the second element of a `bun.lock` entry, `deno.lock`'s
+`tarball`), and none of them
 compares the tarball with the entry's name. A lockfile edit in a pull request can
 therefore point `node_modules/lodash` at
 `https://registry.npmjs.org/evil-pkg/-/evil-pkg-1.0.0.tgz` with a matching `integrity`:
 the diff shows a trusted name, and `npm ci` installs the other package. Bun 1.4 with
-`--frozen-lockfile` does the same and prints the trusted name as installed. The audit reads the
+`--frozen-lockfile` does the same and prints the trusted name as installed, and so does
+`deno ci` in Deno 2.9: a `deno.lock` entry `ms@2.1.2` pointing at another host's
+`is-number` tarball installed `is-number` into `node_modules/ms`, without going through
+the proxy, and printed `+ npm:ms 2.1.2`. The audit reads the
 package and version back out of every registry tarball URL (`<name>/-/<base>-<version>.tgz`,
 scoped and percent-encoded names, any path prefix such as the proxy's `/npm/`) and reports a
 `mismatch` when they differ from the entry or the URL is not a tarball path. A mismatch
