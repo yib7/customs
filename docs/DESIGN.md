@@ -151,7 +151,16 @@ Implementation details (`customs-scan`, schema 1):
   75.9% to 82.5% for malicious ones; adding just the `bin` and `exports` files raised them
   from 23.2% to 27.9% and from 75.9% to 77.6%. A command-line tool's entry point spawns
   processes and reads the environment as its job, so in both versions benign packages
-  gained more than malicious ones and the install surface lost contrast.
+  gained more than malicious ones and the install surface lost contrast. Keeping the install
+  surface as it is and counting those files on a third surface (`ent_` counts: install
+  surface plus `module`, the `exports` targets, `bin` and their requires, two levels deep)
+  was tried as well, so the model could weigh the entry points itself. In a paired retrain
+  (same code network, only the tree model changed) it lost at the low false-positive end
+  that blocking uses: ROC AUC fell from 0.974 to 0.972, detection at exactly 0.1% FPR from
+  70.5% to 66.3%, held-out MalRegistry campaigns at 0.1% FPR from 66.9% to 61.4%, and
+  compromised libraries from ROC AUC 0.913 to 0.898. The share of missed malware with
+  indicators only off the surface did not shrink (57.7% to 58.7% missed), so the change
+  was not kept.
 - `all_` is every source file (including files inside nested archives, see 4.7) plus every
   install-surface unit, so `all_<x> >= inst_<x>` always holds and npm script commands count
   on both surfaces.
