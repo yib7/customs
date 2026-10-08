@@ -1,11 +1,5 @@
-import { existsSync } from 'node:fs';
 import { defineConfig, devices } from '@playwright/test';
 
-// Use the preinstalled Chromium when present (CI images and the dev container ship it
-// under /opt/pw-browsers). PLAYWRIGHT_BROWSERS_PATH, if set, wins.
-if (!process.env.PLAYWRIGHT_BROWSERS_PATH && existsSync('/opt/pw-browsers')) {
-  process.env.PLAYWRIGHT_BROWSERS_PATH = '/opt/pw-browsers';
-}
 const executablePath = process.env.CUSTOMS_CHROMIUM_PATH;
 
 const PORT = 4174;

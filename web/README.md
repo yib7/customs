@@ -30,7 +30,7 @@ npm run lint
 npm run typecheck
 ```
 
-Playwright uses the Chromium in `/opt/pw-browsers` when present. Set `CUSTOMS_CHROMIUM_PATH` to point at another Chromium binary. Running `npm run e2e` also refreshes the screenshots in `screenshots/` (every page, light and dark, at 1440px and 390px wide).
+Playwright uses its own Chromium (`npx playwright install chromium`). Set `CUSTOMS_CHROMIUM_PATH` to use another Chromium binary. Running `npm run e2e` also refreshes the screenshots in `screenshots/` (every page, light and dark, at 1440px and 390px wide).
 
 ## Mock API
 

@@ -160,14 +160,14 @@ fn claude_hook(inputs: &Inputs, out: &mut Vec<Finding>) {
                 Level::Warn,
                 &subject,
                 "the Customs hook is registered, but its matcher does not include Bash, so it checks no install".into(),
-                "set the matcher to Bash|Edit|Write|MultiEdit|NotebookEdit (hooks/claude-code-settings.json)",
+                "set the matcher to Bash|Edit|Write|MultiEdit|NotebookEdit (deploy/hooks/claude-code-settings.json)",
             ));
         } else if !(sees("Edit") && sees("Write")) {
             out.push(finding(
                 Level::Warn,
                 &subject,
                 "the Customs hook sees only shell commands: an Edit or Write call can remove it from these settings or repoint .npmrc without confirmation".into(),
-                "set the matcher to Bash|Edit|Write|MultiEdit|NotebookEdit (hooks/claude-code-settings.json)",
+                "set the matcher to Bash|Edit|Write|MultiEdit|NotebookEdit (deploy/hooks/claude-code-settings.json)",
             ));
         } else {
             out.push(finding(
@@ -241,7 +241,7 @@ fn codex_hooks(inputs: &Inputs, out: &mut Vec<Finding>) {
             let sees = |tool: &str, aliases: &[&str]| {
                 matchers.iter().any(|m| codex_matches(m, tool, aliases))
             };
-            let fix = "set the matcher to Bash|apply_patch (hooks/codex-hooks.json)";
+            let fix = "set the matcher to Bash|apply_patch (deploy/hooks/codex-hooks.json)";
             let subject = f.display().to_string();
             if !sees("Bash", &[]) {
                 out.push(finding(
@@ -359,7 +359,7 @@ fn other_agent_hooks(inputs: &Inputs, out: &mut Vec<Finding>) {
                     "the Customs hook runs only for commands matching {}, so other installs go unchecked",
                     matchers.join(" or ")
                 ),
-                "remove the matcher (hooks/cursor-hooks.json)",
+                "remove the matcher (deploy/hooks/cursor-hooks.json)",
             )
         };
         out.push(finding(level, &f.display().to_string(), detail, fix));
@@ -382,7 +382,7 @@ fn other_agent_hooks(inputs: &Inputs, out: &mut Vec<Finding>) {
             })
         };
         let fix =
-            "set the matcher to run_shell_command|write_file|replace (hooks/gemini-settings.json)";
+            "set the matcher to run_shell_command|write_file|replace (deploy/hooks/gemini-settings.json)";
         let subject = f.display().to_string();
         if !sees("run_shell_command") {
             out.push(finding(

@@ -656,7 +656,7 @@ fn tamper_decision(install: Option<HookDecision>, reasons: &[String]) -> HookDec
 }
 
 /// How long the hook spends checking before it stops; Claude Code's hook timeout in
-/// `hooks/claude-code-settings.json` is 60 seconds. Only a large project install whose
+/// `deploy/hooks/claude-code-settings.json` is 60 seconds. Only a large project install whose
 /// verdicts are not cached yet comes near it.
 const HOOK_BUDGET: Duration = Duration::from_secs(40);
 

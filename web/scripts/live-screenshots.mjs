@@ -4,15 +4,12 @@
 //   node scripts/live-screenshots.mjs [baseUrl] [outDir]
 //
 // Expects some traffic to exist already (scripts/demo.sh with KEEP=1 produces it).
-import { existsSync, mkdirSync } from 'node:fs';
+import { mkdirSync } from 'node:fs';
 import { chromium } from '@playwright/test';
 
 const base = process.argv[2] ?? 'http://127.0.0.1:7878';
 const out = process.argv[3] ?? '../docs/screenshots';
 mkdirSync(out, { recursive: true });
-if (!process.env.PLAYWRIGHT_BROWSERS_PATH && existsSync('/opt/pw-browsers')) {
-  process.env.PLAYWRIGHT_BROWSERS_PATH = '/opt/pw-browsers';
-}
 
 const events = await (await fetch(`${base}/api/events?limit=200`)).json();
 const blocked = events.find((e) => e.decision === 'block' && e.kind === 'install')

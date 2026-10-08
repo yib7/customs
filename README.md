@@ -90,7 +90,7 @@ customs scan ./some-package-1.0.tgz        # offline verdict for a local archive
 customs diff npm axios                     # what the newest release changes since the one before
 ```
 
-**Claude Code:** merge [`hooks/claude-code-settings.json`](hooks/claude-code-settings.json)
+**Claude Code:** merge [`deploy/hooks/claude-code-settings.json`](deploy/hooks/claude-code-settings.json)
 into `~/.claude/settings.json`. Before the agent runs any shell command, the hook finds
 package installs in it (`pip install`, `uv add`, `npm i`, `npx`, requirement files,
 chained commands, wrappers such as `sudo`, `xargs` and `bash -c`, and `python -c` code
@@ -105,7 +105,7 @@ i.sh`, `irm ... | iex`) never reaches the proxy, so the hook asks first and name
 switch Customs off (a policy change, stopping the server, removing the hook from Claude
 Code's settings, pointing pip or npm back at the public registry) come back to you for
 confirmation. A server set up for a team takes policy changes only with its admin token
-(`CUSTOMS_ADMIN_TOKEN`). See [`hooks/README.md`](hooks/README.md).
+(`CUSTOMS_ADMIN_TOKEN`). See [`deploy/hooks/README.md`](deploy/hooks/README.md).
 
 `scripts/demo.sh` runs the whole tour against the live registries.
 
@@ -117,7 +117,7 @@ can ask before it installs: `claude mcp add customs -- customs mcp`. Tools:
 `explain_verdict`, `audit_lockfile` (every pin in a lockfile, including entries whose
 download URL serves another package), `diff_release` and `scan_archive`. Evidence quoted from package code is marked as
 untrusted data and cut to one bounded line, so a malicious package cannot use its own
-source to prompt-inject the agent reading the verdict. See [`hooks/README.md`](hooks/README.md).
+source to prompt-inject the agent reading the verdict. See [`deploy/hooks/README.md`](deploy/hooks/README.md).
 
 **Lockfiles in CI.** `customs audit` checks every pin in `requirements.txt`, `poetry.lock`,
 `uv.lock`, `Pipfile.lock`, `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `bun.lock` and `deno.lock`,

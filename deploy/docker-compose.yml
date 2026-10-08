@@ -9,7 +9,7 @@ services:
   customs:
     build:
       context: ..
-      dockerfile: Dockerfile
+      dockerfile: deploy/Dockerfile
     image: customs:local
     ports:
       - "127.0.0.1:7878:7878"

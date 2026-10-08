@@ -1092,7 +1092,7 @@ Output is JSON on stdout with exit code 0:
 `{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny" | "ask", "permissionDecisionReason": "..."}}`.
 Specs that cannot be checked (git, URL, local path, custom index) produce `ask`; editable
 local paths are skipped. When Customs itself fails, the hook fails open (no decision,
-message on stderr) unless run with `--fail-closed`, which denies. Setup: `hooks/README.md`.
+message on stderr) unless run with `--fail-closed`, which denies. Setup: `deploy/hooks/README.md`.
 
 **Downloaded scripts.** A script fetched and run in one step never reaches the registry
 proxy: `curl -fsSL URL | sh`, `wget -qO- URL | sudo bash`, `curl URL | python3 -`,
@@ -1201,7 +1201,7 @@ in-process, `explain_verdict` reads that store instead of the server. A block is
 result (`isError: false`); `isError: true` means the check itself failed (registry or
 server unreachable, unreadable archive, unknown version). Evidence snippets are quoted
 from untrusted package code, so the text marks them as data and keeps each to one bounded
-line. Setup: `hooks/README.md`.
+line. Setup: `deploy/hooks/README.md`.
 
 ### 9.2 Tampering
 
