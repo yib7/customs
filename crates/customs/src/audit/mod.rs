@@ -65,6 +65,17 @@ pub struct Skipped {
     pub reason: String,
 }
 
+impl Skipped {
+    /// Whether installing this entry downloads code from somewhere (git, a URL, an index
+    /// Customs does not check), as opposed to the project's own files or a range a resolver
+    /// will pin later.
+    pub fn fetched(&self) -> bool {
+        !["local", "editable", "no version pinned", "no exact version"]
+            .iter()
+            .any(|k| self.reason.contains(k))
+    }
+}
+
 /// An npm lockfile entry whose registry `resolved` URL is not this package's tarball:
 /// npm installs whatever the URL serves, so the recorded name is not what gets installed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -539,12 +550,15 @@ fn npm_pin(
     };
     let spec = format!("{name}@{version}");
     if !valid_npm_name(name) || !is_npm_version(version) {
-        out.skip(
-            file,
-            line,
-            &spec,
-            "not a registry package (git, URL, or local path)",
-        );
+        let local = ["file:", "link:", ".", "/"]
+            .iter()
+            .any(|p| version.starts_with(p));
+        let reason = if local {
+            "installed from a local path"
+        } else {
+            "not a registry package (git or URL)"
+        };
+        out.skip(file, line, &spec, reason);
         return;
     }
     if let Some(r) = resolved {

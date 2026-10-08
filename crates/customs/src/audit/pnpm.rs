@@ -51,12 +51,10 @@ fn flush(entry: Option<(usize, String, Option<String>)>, file: &Path, out: &mut 
     };
     match split_key(&key) {
         Some((name, version)) => npm_pin(out, file, line, name, version, tarball.as_deref()),
-        None => out.skip(
-            file,
-            line,
-            &key,
-            "not a registry package (git, URL, or local path)",
-        ),
+        None if key.contains("file:") || key.contains("link:") => {
+            out.skip(file, line, &key, "installed from a local path")
+        }
+        None => out.skip(file, line, &key, "not a registry package (git or URL)"),
     }
 }
 

@@ -51,6 +51,7 @@ pub fn expand(manager: Manager, dir: &Path, extras: &[String]) -> Expanded {
     let eco = manager.ecosystem();
     let mut out = Expanded::default();
     let mut pinned = HashSet::new();
+    let mut unchecked = Vec::new();
     let lock = manager
         .lockfiles()
         .iter()
@@ -70,6 +71,7 @@ pub fn expand(manager: Manager, dir: &Path, extras: &[String]) -> Expanded {
                         m.message,
                     ));
                 }
+                unchecked = p.skipped.into_iter().filter(|k| k.fetched()).collect();
                 out.locked = p.deps.len();
                 for d in p.deps {
                     pinned.insert(d.name.clone());
@@ -97,8 +99,32 @@ pub fn expand(manager: Manager, dir: &Path, extras: &[String]) -> Expanded {
             _ => out.targets.push(t),
         }
     }
+    // Lockfile entries fetched from git, a URL or another registry install code nothing
+    // has checked; a lockfile edit can point one at any host.
+    for k in unchecked.iter().take(MAX_UNCHECKED_SHOWN) {
+        out.targets.push(Target::Unverifiable {
+            ecosystem: eco,
+            spec: k.spec.clone(),
+            reason: format!("{} (lockfile line {})", k.reason, k.line),
+        });
+    }
+    if let (Some(more), Some(lock)) = (unchecked.len().checked_sub(MAX_UNCHECKED_SHOWN), &lock) {
+        if more > 0 {
+            out.targets.push(Target::Unverifiable {
+                ecosystem: eco,
+                spec: format!("{more} more lockfile entries"),
+                reason: format!(
+                    "from git, URLs or other registries; `customs audit {}` lists them",
+                    lock.display()
+                ),
+            });
+        }
+    }
     out
 }
+
+/// Unchecked lockfile entries listed one by one before the rest are counted.
+const MAX_UNCHECKED_SHOWN: usize = 5;
 
 /// Direct dependencies the manifest lists, as install specs.
 fn manifest_targets(manager: Manager, dir: &Path, extras: &[String]) -> Vec<Target> {
@@ -362,7 +388,9 @@ mod tests {
   "node_modules/debug": {"version": "4.3.4", "resolved": "https://registry.npmjs.org/debug/-/debug-4.3.4.tgz"},
   "node_modules/sw": {"name": "string-width", "version": "4.2.3"},
   "node_modules/fork": {"version": "1.0.0", "resolved": "git+ssh://git@github.com/x/fork.git#abc"},
-  "node_modules/ms": {"version": "2.1.2", "resolved": "https://registry.npmjs.org/is-number/-/is-number-7.0.0.tgz"}
+  "node_modules/ms": {"version": "2.1.2", "resolved": "https://registry.npmjs.org/is-number/-/is-number-7.0.0.tgz"},
+  "node_modules/chalk": {"version": "5.3.0", "resolved": "https://evil.example/chalk/-/chalk-5.3.0.tgz"},
+  "node_modules/mine": {"version": "file:../mine"}
 }}"#,
         );
         let e = expand(Manager::Npm, d.path(), &[]);
@@ -373,9 +401,16 @@ mod tests {
                 "string-width 4.2.3",
                 "is-number 7.0.0",
                 "left-pad ^1.3.0",
-                "typescript 5.4.5"
+                "typescript 5.4.5",
+                // Fetched from elsewhere, so they need a look; the local folder does not.
+                "? fork@1.0.0",
+                "? chalk@5.3.0"
             ]
         );
+        assert!(matches!(
+            &e.targets[6],
+            Target::Unverifiable { reason, .. } if reason == "from a custom registry (evil.example) (lockfile line 7)"
+        ));
         assert_eq!(e.mismatches.len(), 1);
         assert_eq!(e.mismatches[0].0, "npm:ms 2.1.2");
         assert!(e.mismatches[0].1.contains("is-number@7.0.0"));
@@ -532,6 +567,31 @@ dev = ["ruff"]
         );
         assert_eq!(e.mismatches.len(), 1);
         assert_eq!(e.locked, 2);
+    }
+
+    #[test]
+    fn many_unchecked_entries_are_counted() {
+        let d = tempfile::tempdir().unwrap();
+        let entries: Vec<String> = (0..8)
+            .map(|i| {
+                format!(
+                    r#""node_modules/p{i}": {{"version": "1.0.0", "resolved": "https://npm.corp.example/p{i}/-/p{i}-1.0.0.tgz"}}"#
+                )
+            })
+            .collect();
+        write(
+            d.path(),
+            "package-lock.json",
+            &format!(
+                r#"{{"lockfileVersion": 3, "packages": {{{}}}}}"#,
+                entries.join(",")
+            ),
+        );
+        let e = expand(Manager::Npm, d.path(), &[]);
+        let n = names(&e);
+        assert_eq!(n.len(), 6);
+        assert_eq!(n[0], "? p0@1.0.0");
+        assert!(n[5].starts_with("? 3 more lockfile entries"), "{n:?}");
     }
 
     #[test]

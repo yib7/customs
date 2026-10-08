@@ -57,7 +57,8 @@ Project installs too: `npm install` and `npm ci` with no package, `pnpm install`
 `pip install -e .` (with extras such as `.[dev]`) for a directory with a `pyproject.toml`. The hook
 reads the project's lockfile, checks every pinned package, and denies the command when one
 is blocked or when a lockfile entry's tarball URL serves a different package than it
-names. Dependencies in `package.json`, `deno.json`, `pyproject.toml` or `Pipfile` that the lockfile does
+names. Lockfile entries fetched from git, a URL or another registry come back for review,
+since nothing has checked them. Dependencies in `package.json`, `deno.json`, `pyproject.toml` or `Pipfile` that the lockfile does
 not pin yet (one the agent just added) are checked as well. Warnings about packages the
 lockfile already pins do not stop the command; on a real 300-package lockfile, about 1% of
 legitimate packages are over the warn threshold. A large project with nothing cached yet

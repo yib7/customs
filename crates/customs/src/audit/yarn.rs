@@ -100,12 +100,7 @@ fn finish(e: Entry, file: &Path, out: &mut Parsed) {
             Some((name, r)) if r.starts_with("npm:") => {
                 npm_pin(out, file, e.line, name, version, None)
             }
-            _ => out.skip(
-                file,
-                e.line,
-                res,
-                "not a registry package (git, URL, or local path)",
-            ),
+            _ => out.skip(file, e.line, res, "not a registry package (git or URL)"),
         }
         return;
     }
@@ -119,13 +114,12 @@ fn finish(e: Entry, file: &Path, out: &mut Parsed) {
         .and_then(split_npm_spec)
         .map(|(real, _)| real)
         .unwrap_or(name);
-    if range.contains("://") || range.starts_with("git") || range.starts_with("file:") {
-        out.skip(
-            file,
-            e.line,
-            first,
-            "not a registry package (git, URL, or local path)",
-        );
+    if range.starts_with("file:") {
+        out.skip(file, e.line, first, "installed from a local path");
+        return;
+    }
+    if range.contains("://") || range.starts_with("git") {
+        out.skip(file, e.line, first, "not a registry package (git or URL)");
         return;
     }
     npm_pin(out, file, e.line, name, version, e.resolved.as_deref());

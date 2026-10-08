@@ -780,7 +780,11 @@ install a whole project (`crates/customs/src/hook/project.rs`). The hook reads t
 manager's lockfile in the project directory with the `customs audit` parsers (section 11):
 `npm-shrinkwrap.json` or `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `bun.lock`, `deno.lock`,
 `uv.lock`, `poetry.lock`, `Pipfile.lock`. Every pin is checked, and an entry whose tarball
-URL serves another package is a block. Direct dependencies in the manifest that the
+URL serves another package is a block. Entries the audit cannot check because they come
+from git, a URL or a registry other than npm's, PyPI or a Customs proxy produce `ask` (the
+first five by name with their lockfile line, then a count): a lockfile edit can point an
+entry at any host under a trusted name, and a test with Deno 2.9 installed such an entry
+without going through the proxy. The project's own local folders do not count. Direct dependencies in the manifest that the
 lockfile does not pin yet are checked too, as the ranges they name: `package.json`
 `dependencies`, `devDependencies` and `optionalDependencies` (skipping `workspace:`,
 `file:`, `link:` and `portal:`), `pyproject.toml` `[project].dependencies` (plus
