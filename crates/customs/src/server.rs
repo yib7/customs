@@ -25,7 +25,81 @@ pub struct AppState {
     pub engine: Arc<Engine>,
     /// Flips to `true` when the server begins shutting down.
     pub shutdown: watch::Receiver<bool>,
+    pub policy_auth: PolicyAuth,
 }
+
+/// Who may change the policy through `PUT /api/policy`.
+#[derive(Clone, Debug, Default)]
+pub enum PolicyAuth {
+    /// Anyone who passes the Host and Origin checks: a loopback server without a token,
+    /// or one started with `--allow-anonymous-policy-changes`.
+    #[default]
+    Open,
+    /// Requests must carry `Authorization: Bearer <token>`.
+    Token(Arc<str>),
+    /// A server reachable from the network without a token: changes are refused, since
+    /// anyone who can reach it could otherwise switch enforcement off.
+    Disabled,
+}
+
+impl PolicyAuth {
+    /// `None` when `headers` may change the policy, else the refusal.
+    pub fn refuse(
+        &self,
+        headers: &axum::http::HeaderMap,
+    ) -> Option<(StatusCode, &'static str, String)> {
+        match self {
+            PolicyAuth::Open => None,
+            PolicyAuth::Disabled => Some((
+                StatusCode::FORBIDDEN,
+                "policy_changes_disabled",
+                "policy changes over the API are off on a server reachable from the network; \
+                 start it with CUSTOMS_ADMIN_TOKEN (or --admin-token-file) to allow them with \
+                 that token, or edit the policy file and restart"
+                    .into(),
+            )),
+            PolicyAuth::Token(token) => {
+                let given = headers
+                    .get(header::AUTHORIZATION)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| {
+                        let (scheme, rest) = v.trim().split_once(' ')?;
+                        scheme.eq_ignore_ascii_case("bearer").then(|| rest.trim())
+                    });
+                match given {
+                    Some(g) if constant_time_eq(g.as_bytes(), token.as_bytes()) => None,
+                    Some(_) => Some((
+                        StatusCode::UNAUTHORIZED,
+                        "admin_token_invalid",
+                        "the admin token is not valid".into(),
+                    )),
+                    None => Some((
+                        StatusCode::UNAUTHORIZED,
+                        "admin_token_required",
+                        "changing the policy needs the admin token (Authorization: Bearer <token>)"
+                            .into(),
+                    )),
+                }
+            }
+        }
+    }
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+/// Server options beyond the engine.
+#[derive(Clone, Debug, Default)]
+pub struct ServeOptions {
+    /// Required on `PUT /api/policy` when set.
+    pub admin_token: Option<String>,
+    /// Accept policy changes without a token on a server reachable from the network.
+    pub allow_anonymous_policy_changes: bool,
+}
+
+/// Shortest admin token accepted.
+pub const MIN_ADMIN_TOKEN_LEN: usize = 16;
 
 /// The dev server origin of the dashboard; the built dashboard is same-origin.
 const DEV_ORIGIN: &str = "http://localhost:5173";
@@ -47,7 +121,7 @@ pub fn router(state: AppState, ui_dir: Option<&Path>) -> Router {
     let cors = CorsLayer::new()
         .allow_origin(AllowOrigin::list([HeaderValue::from_static(DEV_ORIGIN)]))
         .allow_methods([Method::GET, Method::POST, Method::PUT, Method::OPTIONS])
-        .allow_headers([header::CONTENT_TYPE, header::ACCEPT]);
+        .allow_headers([header::CONTENT_TYPE, header::ACCEPT, header::AUTHORIZATION]);
 
     let mut app = Router::new()
         .route("/pypi/simple", get(pypi::simple_index))
@@ -241,13 +315,44 @@ pub async fn serve_on(
     ui_dir: Option<PathBuf>,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<()> {
+    serve_with(listener, engine, ui_dir, ServeOptions::default(), shutdown).await
+}
+
+/// [`serve_on`] with [`ServeOptions`].
+pub async fn serve_with(
+    listener: TcpListener,
+    engine: Arc<Engine>,
+    ui_dir: Option<PathBuf>,
+    opts: ServeOptions,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> anyhow::Result<()> {
+    let addr = listener.local_addr()?;
+    let policy_auth = match opts.admin_token {
+        Some(t) => {
+            anyhow::ensure!(
+                t.len() >= MIN_ADMIN_TOKEN_LEN,
+                "the admin token must be at least {MIN_ADMIN_TOKEN_LEN} characters"
+            );
+            PolicyAuth::Token(t.into())
+        }
+        None if addr.ip().is_loopback() || opts.allow_anonymous_policy_changes => PolicyAuth::Open,
+        None => {
+            tracing::warn!(
+                %addr,
+                "policy changes over the API are off: this server is reachable from the network \
+                 and has no CUSTOMS_ADMIN_TOKEN"
+            );
+            PolicyAuth::Disabled
+        }
+    };
     let (tx, rx) = watch::channel(false);
     let state = AppState {
         engine,
         shutdown: rx,
+        policy_auth,
     };
     let mut app = router(state, ui_dir.as_deref());
-    if listener.local_addr()?.ip().is_loopback() {
+    if addr.ip().is_loopback() {
         app = app.layer(middleware::from_fn(guard_loopback_host));
     }
     axum::serve(
@@ -313,6 +418,38 @@ mod tests {
         }
         let extra = vec!["customs.corp".to_string()];
         assert!(host_allowed("Customs.Corp:443", &extra));
+    }
+
+    #[test]
+    fn admin_token() {
+        use axum::http::HeaderMap;
+        let auth = PolicyAuth::Token("0123456789abcdef".into());
+        let with = |v: &str| {
+            let mut h = HeaderMap::new();
+            h.insert(header::AUTHORIZATION, v.parse().unwrap());
+            h
+        };
+        assert!(auth.refuse(&with("Bearer 0123456789abcdef")).is_none());
+        assert!(auth.refuse(&with("bearer  0123456789abcdef ")).is_none());
+        let code = |h: &HeaderMap| auth.refuse(h).map(|r| (r.0, r.1));
+        assert_eq!(
+            code(&with("Bearer 0123456789abcdeX")),
+            Some((StatusCode::UNAUTHORIZED, "admin_token_invalid"))
+        );
+        assert_eq!(
+            code(&with("Basic 0123456789abcdef")),
+            Some((StatusCode::UNAUTHORIZED, "admin_token_required"))
+        );
+        assert_eq!(
+            code(&HeaderMap::new()),
+            Some((StatusCode::UNAUTHORIZED, "admin_token_required"))
+        );
+        assert!(PolicyAuth::Open.refuse(&HeaderMap::new()).is_none());
+        assert_eq!(
+            PolicyAuth::Disabled.refuse(&HeaderMap::new()).map(|r| r.0),
+            Some(StatusCode::FORBIDDEN)
+        );
+        assert!(!constant_time_eq(b"abc", b"abcd"));
     }
 
     #[test]

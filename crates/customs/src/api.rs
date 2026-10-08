@@ -193,7 +193,22 @@ async fn get_policy(State(state): State<AppState>) -> Response {
     Json(&*state.engine.policy()).into_response()
 }
 
-async fn put_policy(State(state): State<AppState>, body: String) -> Response {
+async fn put_policy(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    body: String,
+) -> Response {
+    if let Some((status, code, msg)) = state.policy_auth.refuse(&headers) {
+        tracing::warn!(code, "policy change refused");
+        let mut resp = (status, Json(json!({ "error": msg, "code": code }))).into_response();
+        if status == StatusCode::UNAUTHORIZED {
+            resp.headers_mut().insert(
+                axum::http::header::WWW_AUTHENTICATE,
+                axum::http::HeaderValue::from_static("Bearer realm=\"customs\""),
+            );
+        }
+        return resp;
+    }
     let policy = match Policy::from_json(&body) {
         Ok(p) => p,
         Err(e) => {

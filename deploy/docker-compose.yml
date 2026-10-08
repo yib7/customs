@@ -17,6 +17,10 @@ services:
       - customs-data:/var/lib/customs
     environment:
       CUSTOMS_LOG_JSON: "1"
+      # The container listens on 0.0.0.0, which would turn off anonymous policy changes;
+      # the port above is published on 127.0.0.1 only. Set CUSTOMS_ADMIN_TOKEN instead
+      # when publishing it more widely.
+      CUSTOMS_ALLOW_ANONYMOUS_POLICY_CHANGES: "true"
     restart: unless-stopped
     read_only: true
     tmpfs:

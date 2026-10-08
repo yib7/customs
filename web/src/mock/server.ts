@@ -43,6 +43,8 @@ export class MockServer {
   events: RawEvent[];
   verdicts = new Map<string, RawVerdict>();
   policy: Record<string, unknown> = structuredClone(INITIAL_POLICY);
+  /** When set, PUT /api/policy needs `Authorization: Bearer <adminToken>`, as with CUSTOMS_ADMIN_TOKEN. */
+  adminToken: string | null = null;
   private nextId: number;
   private listeners = new Set<Listener>();
   private rnd = mulberry32(99);
@@ -81,7 +83,7 @@ export class MockServer {
     return this.record(strip(eventFromVerdict(v, 0, new Date(), client, 'install')));
   }
 
-  handle(method: string, url: URL, body: unknown): MockResponse {
+  handle(method: string, url: URL, body: unknown, headers: Headers = new Headers()): MockResponse {
     const path = url.pathname;
     if (method === 'GET' && path === '/api/events') return this.listEvents(url.searchParams);
     if (method === 'GET' && path.startsWith('/api/verdicts/')) {
@@ -91,7 +93,14 @@ export class MockServer {
     }
     if (method === 'GET' && path === '/api/stats') return json(200, this.stats());
     if (method === 'GET' && path === '/api/policy') return json(200, this.policy);
-    if (method === 'PUT' && path === '/api/policy') return this.putPolicy(body);
+    if (method === 'PUT' && path === '/api/policy') {
+      if (this.adminToken !== null) {
+        const auth = headers.get('Authorization');
+        if (!auth) return json(401, { error: 'changing the policy needs the admin token (Authorization: Bearer <token>)', code: 'admin_token_required' });
+        if (auth !== `Bearer ${this.adminToken}`) return json(401, { error: 'the admin token is not valid', code: 'admin_token_invalid' });
+      }
+      return this.putPolicy(body);
+    }
     if (method === 'GET' && path === '/api/model') return json(200, MODEL_INFO);
     if (method === 'POST' && path === '/api/check') return this.check(body);
     if (method === 'GET' && path === '/healthz') return { status: 200, body: 'ok', contentType: 'text/plain' };

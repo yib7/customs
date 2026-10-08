@@ -98,7 +98,9 @@ The matcher `Bash|Edit|Write|MultiEdit|NotebookEdit` in the settings above is wh
 the hook see file edits. A command that builds itself at run time (`echo ... | base64 -d
 | sh`) is beyond any static check, so treat this as a tripwire for the obvious routes, not
 a sandbox; the proxy's own `PUT /api/policy` also refuses requests a browser page could
-send.
+send. For a stronger guarantee, start the server with `CUSTOMS_ADMIN_TOKEN` and keep the
+token out of the agent's environment: policy changes then need it, however the request is
+built.
 
 ## Options
 

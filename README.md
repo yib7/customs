@@ -98,7 +98,8 @@ the agent stops and asks you. Project installs (`npm ci`, `npm install`, `uv syn
 dependency added to the manifest but not locked yet. Commands and file edits that would
 switch Customs off (a policy change, stopping the server, removing the hook from Claude
 Code's settings, pointing pip or npm back at the public registry) come back to you for
-confirmation. See [`hooks/README.md`](hooks/README.md).
+confirmation. A server set up for a team takes policy changes only with its admin token
+(`CUSTOMS_ADMIN_TOKEN`). See [`hooks/README.md`](hooks/README.md).
 
 `scripts/demo.sh` runs the whole tour against the live registries.
 

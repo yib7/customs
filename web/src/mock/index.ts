@@ -64,7 +64,7 @@ export function installMocks(opts: { latencyMs?: number; autoEmitMs?: number } =
         reject(new DOMException('Aborted', 'AbortError'));
       });
     });
-    const res = server.handle(method, url, body);
+    const res = server.handle(method, url, body, new Headers(init?.headers));
     const isText = typeof res.body === 'string';
     return new Response(isText ? (res.body as string) : JSON.stringify(res.body), {
       status: res.status,

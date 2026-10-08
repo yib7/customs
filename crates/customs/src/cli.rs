@@ -16,7 +16,7 @@ use crate::hook::{run_agent, run_claude_code, Agent, HookOptions};
 use crate::mcp::{run_mcp, McpOptions};
 use crate::metrics::Metrics;
 use crate::notify::{Format as NotifyFormat, NotifyConfig};
-use crate::server::{serve_on, shutdown_signal};
+use crate::server::{serve_with, shutdown_signal, ServeOptions};
 use crate::util::{ecosystem_str, parse_ecosystem};
 use crate::verdict::Verdict;
 
@@ -90,6 +90,22 @@ pub struct ServeArgs {
     /// is a specific IP).
     #[arg(long, env = "CUSTOMS_PUBLIC_URL")]
     pub public_url: Option<String>,
+    /// Token required to change the policy through the API (`Authorization: Bearer`), at
+    /// least 16 characters.
+    #[arg(
+        long,
+        env = "CUSTOMS_ADMIN_TOKEN",
+        hide_env_values = true,
+        conflicts_with = "admin_token_file"
+    )]
+    pub admin_token: Option<String>,
+    /// File holding the admin token (a mounted secret).
+    #[arg(long, env = "CUSTOMS_ADMIN_TOKEN_FILE")]
+    pub admin_token_file: Option<PathBuf>,
+    /// Accept policy changes without a token on a server that listens beyond loopback,
+    /// for a container whose published port is itself bound to loopback.
+    #[arg(long, env = "CUSTOMS_ALLOW_ANONYMOUS_POLICY_CHANGES")]
+    pub allow_anonymous_policy_changes: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -410,8 +426,23 @@ async fn serve(a: ServeArgs) -> anyhow::Result<()> {
         cfg.validate().map_err(|e| anyhow::anyhow!("{e}"))?;
         crate::notify::spawn(engine.clone(), cfg);
     }
+    let admin_token = match (a.admin_token, a.admin_token_file) {
+        (Some(t), _) => Some(t.trim().to_string()),
+        (None, Some(path)) => Some(
+            std::fs::read_to_string(&path)
+                .map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))?
+                .trim()
+                .to_string(),
+        ),
+        (None, None) => None,
+    }
+    .filter(|t| !t.is_empty());
+    let opts = ServeOptions {
+        admin_token,
+        allow_anonymous_policy_changes: a.allow_anonymous_policy_changes,
+    };
     tracing::info!(%addr, "customs listening; run `customs env` for client settings");
-    serve_on(listener, engine, ui, shutdown_signal()).await
+    serve_with(listener, engine, ui, opts, shutdown_signal()).await
 }
 
 /// `name==1.0`, `name@1.0`, `@scope/name@^1` into name and optional version.
@@ -764,6 +795,31 @@ mod tests {
         };
         assert_eq!(a.notify_on, NotifyOnArg::Warn);
         assert_eq!(a.notify_format, NotifyFormatArg::Auto);
+        let c = Cli::try_parse_from([
+            "customs",
+            "serve",
+            "--admin-token-file",
+            "/run/secrets/token",
+            "--allow-anonymous-policy-changes",
+        ])
+        .unwrap();
+        let Command::Serve(a) = c.command else {
+            panic!("not serve")
+        };
+        assert_eq!(
+            a.admin_token_file.as_deref(),
+            Some(std::path::Path::new("/run/secrets/token"))
+        );
+        assert!(a.allow_anonymous_policy_changes);
+        assert!(Cli::try_parse_from([
+            "customs",
+            "serve",
+            "--admin-token",
+            "x",
+            "--admin-token-file",
+            "y"
+        ])
+        .is_err());
         for agent in ["cursor", "gemini"] {
             let c = Cli::try_parse_from(["customs", "hook", agent, "--fail-closed"]).unwrap();
             assert!(matches!(

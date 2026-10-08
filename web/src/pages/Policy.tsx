@@ -17,6 +17,26 @@ import {
 } from '../lib/policy';
 import { useTitle } from '../lib/useTitle';
 
+const TOKEN_KEY = 'customs-admin-token';
+
+/** The admin token entered earlier in this tab, if any (session storage may be unavailable). */
+function readAdminToken(): string {
+  try {
+    return sessionStorage.getItem(TOKEN_KEY) ?? '';
+  } catch {
+    return '';
+  }
+}
+
+function storeAdminToken(token: string): void {
+  try {
+    if (token) sessionStorage.setItem(TOKEN_KEY, token);
+    else sessionStorage.removeItem(TOKEN_KEY);
+  } catch {
+    // Without storage the token is asked for again after a reload.
+  }
+}
+
 function Switch({
   checked,
   onChange,
@@ -221,6 +241,9 @@ function PolicyForm({
   const [serverErrors, setServerErrors] = useState<Record<string, string>>({});
   const [serverMessage, setServerMessage] = useState<string | null>(null);
   const [saved, setSaved] = useState(initiallySaved);
+  const [adminToken, setAdminToken] = useState(readAdminToken);
+  const [needToken, setNeedToken] = useState(false);
+  const [refused, setRefused] = useState(false);
   const statusRef = useRef<HTMLDivElement>(null);
 
   const { errors: clientErrors, policy: valid } = validateDraft(draft);
@@ -255,7 +278,9 @@ function PolicyForm({
     }
     setSaving(true);
     try {
-      const next = await api.savePolicy({ ...valid, upstream: policy.upstream }, raw);
+      const next = await api.savePolicy({ ...valid, upstream: policy.upstream }, raw, adminToken.trim() || undefined);
+      if (adminToken.trim()) storeAdminToken(adminToken.trim());
+      setRefused(false);
       setServerErrors({});
       setAttempted(false);
       setSaved(true);
@@ -264,6 +289,11 @@ function PolicyForm({
       if (err instanceof ApiError) {
         setServerErrors(err.fieldErrors);
         setServerMessage(err.message);
+        setRefused(err.status === 401 || err.status === 403);
+        if (err.status === 401) {
+          setNeedToken(true);
+          storeAdminToken('');
+        }
       } else {
         setServerMessage(errorMessage(err));
       }
@@ -280,7 +310,7 @@ function PolicyForm({
       <div ref={statusRef} tabIndex={-1} className="outline-none" aria-live="polite">
         {serverMessage ? (
           <div role="alert" className="rounded-lg border border-block/40 bg-block-soft px-4 py-3 text-sm" data-testid="policy-server-error">
-            <p className="font-medium text-block-ink">The server rejected this policy</p>
+            <p className="font-medium text-block-ink">{refused ? 'The server refused the change' : 'The server rejected this policy'}</p>
             <p className="mt-0.5 text-ink-2">{safeLabel(serverMessage, 300)}</p>
             {unknownServerErrors.length > 0 ? (
               <ul className="mt-1 list-disc pl-5 text-ink-2">
@@ -529,6 +559,26 @@ function PolicyForm({
               </div>
             ))}
           </dl>
+        </Card>
+      ) : null}
+
+      {needToken ? (
+        <Card id="admin-token" title="Admin access">
+          <label className="block">
+            <span className="mb-1 block text-sm font-medium text-ink">Admin token</span>
+            <input
+              type="password"
+              autoComplete="current-password"
+              className={inputCls}
+              value={adminToken}
+              onChange={(e) => setAdminToken(e.target.value)}
+              aria-describedby="admin-token-help"
+            />
+          </label>
+          <p id="admin-token-help" className="mt-1 text-xs text-ink-2">
+            This server was started with an admin token (<code className="font-mono">CUSTOMS_ADMIN_TOKEN</code>), and changing the policy needs it. It is kept for
+            this browser tab only.
+          </p>
         </Card>
       ) : null}
 

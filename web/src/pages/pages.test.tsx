@@ -51,6 +51,34 @@ describe('Policy page', () => {
     expect(window.__customsMock?.server.policy).toMatchObject({ min_age_days: 7, allow: ['pypi:requests', 'npm:react', 'pypi:httpx'] });
   });
 
+  it('asks for the admin token when the server requires one', async () => {
+    const mock = window.__customsMock!.server;
+    mock.adminToken = 'team-token-0123456789';
+    try {
+      const user = userEvent.setup();
+      renderApp('/policy');
+      const age = await screen.findByRole('textbox', { name: 'Minimum age (days)' });
+      await user.clear(age);
+      await user.type(age, '5');
+      await user.click(screen.getByRole('button', { name: 'Save policy' }));
+      expect(await screen.findByTestId('policy-server-error')).toHaveTextContent('The server refused the change');
+      const token = screen.getByLabelText('Admin token');
+      await user.type(token, 'wrong-token');
+      await user.click(screen.getByRole('button', { name: 'Save policy' }));
+      expect(await screen.findByText('the admin token is not valid')).toBeInTheDocument();
+      expect(mock.policy).toMatchObject({ min_age_days: 3 });
+      await user.clear(token);
+      await user.type(token, 'team-token-0123456789');
+      await user.click(screen.getByRole('button', { name: 'Save policy' }));
+      expect(await screen.findByTestId('policy-saved')).toBeInTheDocument();
+      expect(mock.policy).toMatchObject({ min_age_days: 5 });
+      expect(sessionStorage.getItem('customs-admin-token')).toBe('team-token-0123456789');
+    } finally {
+      mock.adminToken = null;
+      sessionStorage.clear();
+    }
+  });
+
   it('edits the release history rules', async () => {
     const user = userEvent.setup();
     renderApp('/policy');

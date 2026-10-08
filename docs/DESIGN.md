@@ -745,6 +745,17 @@ API (JSON). CORS allows only `http://localhost:5173` (the Vite dev server).
   and learn what this machine installs. `PUT` takes the full policy (omitted keys
   take their defaults), validates, persists to the policy file, and returns it; invalid
   input returns 400 `{ "error", "errors": [ { "field", "message" } ] }`.
+  Who may `PUT` depends on how the server was started. With an admin token
+  (`CUSTOMS_ADMIN_TOKEN`, or `--admin-token-file` for a mounted secret, at least 16
+  characters) the request needs `Authorization: Bearer <token>`, compared in constant
+  time; without it the answer is 401 with `WWW-Authenticate: Bearer` and `code`
+  `admin_token_required` or `admin_token_invalid`, and the dashboard then asks for the
+  token and keeps it in session storage. Without a token, a server listening on loopback
+  accepts changes as before, while one listening on any other address refuses them with
+  403 `policy_changes_disabled`: anyone who can reach a team server could otherwise put it
+  in monitor mode or allow-list a package. `--allow-anonymous-policy-changes` lifts that
+  for a container whose published port is itself bound to loopback. Reads and checks
+  need no token.
 - `GET /api/model`: the contents of `metrics.json` (under `metrics`, or merged when the file
   already has a `metrics` key) plus `model_version`, `feature_schema_version`, `untrained`,
   `thresholds` (effective), `model_thresholds`, `manifest`, `models_dir`, and `components`

@@ -77,6 +77,10 @@ spec:
             #   kubectl -n customs create secret generic customs-notify --from-literal=url=https://hooks.slack.com/...
             - name: CUSTOMS_NOTIFY_URL
               valueFrom: { secretKeyRef: { name: customs-notify, key: url, optional: true } }
+            # Token for policy changes from the dashboard or API; without it they are refused.
+            #   kubectl -n customs create secret generic customs-admin --from-literal=token="$(openssl rand -hex 24)"
+            - name: CUSTOMS_ADMIN_TOKEN
+              valueFrom: { secretKeyRef: { name: customs-admin, key: token, optional: true } }
           readinessProbe:
             httpGet: { path: /healthz, port: http }
             periodSeconds: 10

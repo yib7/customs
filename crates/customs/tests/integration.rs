@@ -16,6 +16,7 @@ use chrono::Utc;
 use customs::config::{Mode, Policy, RuleSeverity};
 use customs::engine::{Engine, EngineConfig, Limits, ScanFn};
 use customs::metrics::Metrics;
+use customs::server::ServeOptions;
 use customs_model::Models;
 use customs_scan::{Ecosystem, Evidence, ScanReport};
 use serde_json::{json, Value};
@@ -448,6 +449,16 @@ impl Harness {
         ui: Option<PathBuf>,
         limits: Limits,
     ) -> Self {
+        Self::start_serving(edit, ui, limits, "127.0.0.1:0", ServeOptions::default()).await
+    }
+
+    async fn start_serving(
+        edit: impl FnOnce(&mut Policy),
+        ui: Option<PathBuf>,
+        limits: Limits,
+        bind: &str,
+        opts: ServeOptions,
+    ) -> Self {
         let mock = start_mock().await;
         let dir = tempfile::tempdir().unwrap();
         let mut policy = Policy::default();
@@ -467,13 +478,14 @@ impl Harness {
             metrics: Arc::new(Metrics::new()),
         })
         .unwrap();
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let base = format!("http://{}", listener.local_addr().unwrap());
+        let listener = TcpListener::bind(bind).await.unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-        let server = tokio::spawn(customs::server::serve_on(
+        let server = tokio::spawn(customs::server::serve_with(
             listener,
             engine.clone(),
             ui,
+            opts,
             async move {
                 let _ = rx.await;
             },
@@ -2240,5 +2252,85 @@ async fn young_releases_are_held_back_so_unpinned_installs_resolve_older() {
         html.contains(&file_name("rolling", "1.1.0")) && !html.contains("data-yanked"),
         "{html}"
     );
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn policy_changes_need_the_admin_token_when_one_is_set() {
+    let token = "s3cret-token-0123456789";
+    let opts = ServeOptions {
+        admin_token: Some(token.into()),
+        ..Default::default()
+    };
+    let h = Harness::start_serving(|_| {}, None, Limits::default(), "127.0.0.1:0", opts).await;
+    let mut p: Value = h.get("/api/policy").await.json().await.unwrap();
+    p["mode"] = json!("monitor");
+    let put = |auth: Option<&str>| {
+        let mut r = h.http.put(format!("{}/api/policy", h.base)).json(&p);
+        if let Some(a) = auth {
+            r = r.header("authorization", a);
+        }
+        r.send()
+    };
+    let r = put(None).await.unwrap();
+    assert_eq!(r.status(), 401);
+    assert!(r.headers()["www-authenticate"]
+        .to_str()
+        .unwrap()
+        .starts_with("Bearer"));
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(body["code"], "admin_token_required");
+    let r = put(Some("Bearer wrong-token-0123456789")).await.unwrap();
+    assert_eq!(r.status(), 401);
+    assert_eq!(h.engine.policy().mode, customs::config::Mode::Enforce);
+    let r = put(Some(&format!("Bearer {token}"))).await.unwrap();
+    assert_eq!(r.status(), 200);
+    assert_eq!(h.engine.policy().mode, customs::config::Mode::Monitor);
+    // Reads and checks need no token.
+    assert_eq!(h.get("/api/events").await.status(), 200);
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_network_facing_server_without_a_token_refuses_policy_changes() {
+    let h = Harness::start_serving(
+        |_| {},
+        None,
+        Limits::default(),
+        "0.0.0.0:0",
+        ServeOptions::default(),
+    )
+    .await;
+    let p: Value = h.get("/api/policy").await.json().await.unwrap();
+    let r = h
+        .http
+        .put(format!("{}/api/policy", h.base))
+        .json(&p)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 403);
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(body["code"], "policy_changes_disabled");
+    assert!(body["error"]
+        .as_str()
+        .unwrap()
+        .contains("CUSTOMS_ADMIN_TOKEN"));
+    h.stop().await;
+
+    // The explicit opt-out restores anonymous changes.
+    let opts = ServeOptions {
+        allow_anonymous_policy_changes: true,
+        ..Default::default()
+    };
+    let h = Harness::start_serving(|_| {}, None, Limits::default(), "0.0.0.0:0", opts).await;
+    let r = h
+        .http
+        .put(format!("{}/api/policy", h.base))
+        .json(&p)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
     h.stop().await;
 }

@@ -139,10 +139,11 @@ export const api = {
    * Saves the policy. `base` is the raw object last received from the server so that
    * fields this client does not know about are sent back unchanged.
    */
-  savePolicy(policy: Policy, base: Record<string, unknown> = {}): Promise<Policy> {
+  savePolicy(policy: Policy, base: Record<string, unknown> = {}, adminToken?: string): Promise<Policy> {
     return request('/api/policy', parsePolicy, {
       method: 'PUT',
       body: JSON.stringify({ ...base, ...policy }),
+      ...(adminToken ? { headers: { Authorization: `Bearer ${adminToken}` } } : {}),
     });
   },
   /** Fetches the policy along with the raw body (used as the merge base when saving). */
