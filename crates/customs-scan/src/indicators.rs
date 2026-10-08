@@ -688,7 +688,21 @@ pub(crate) fn literal_code(toks: &[Token<'_>], lang: Lang) -> Vec<(usize, Encodi
             continue;
         }
         if i > 0 && toks[i - 1].text == "." && toks[i - 1].kind == TokKind::Punct {
-            continue;
+            // A method named exec is not the builtin, unless it is read off the builtins
+            // module: `builtins.exec(...)`, `__import__('builtins').exec(...)`.
+            let off_builtins = lang == Lang::Python
+                && match toks.get(i.wrapping_sub(2)) {
+                    Some(r) if r.kind == TokKind::Ident => {
+                        matches!(r.text, "builtins" | "__builtins__")
+                    }
+                    Some(r) if r.text == ")" => {
+                        i >= 3 && toks[i - 3].kind == TokKind::Str && toks[i - 3].text == "builtins"
+                    }
+                    _ => false,
+                };
+            if !off_builtins {
+                continue;
+            }
         }
         match (lang, t.text) {
             (Lang::Python, "exec" | "eval" | "compile") | (Lang::Js, "eval") => {
@@ -1636,6 +1650,10 @@ mod tests {
         let bundled =
             "eval(\"require('child_process').exec('id')\\n//# sourceURL=webpack:///./a.js\")\n";
         assert_eq!(js(bundled)[PROC_EXEC], 0);
+        let c = py("__import__('builtins').exec('import socket\\nsocket.socket()')\n");
+        assert!(c[NETWORK] >= 1);
+        let c = py("import builtins\nbuiltins.exec('import socket\\nsocket.socket()')\n");
+        assert!(c[NETWORK] >= 1);
         let c = py("cursor.exec('import socket\\nsocket.socket()')\n");
         assert_eq!((c[NETWORK], c[DYN_CODE]), (0, 0));
     }
