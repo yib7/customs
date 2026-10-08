@@ -394,7 +394,7 @@ function PolicyForm({
             checked={draft.hide_young_versions}
             onChange={(v) => set('hide_young_versions', v)}
             label="Resolve installs to versions old enough"
-            description="Leave blocked young versions out of the package lists the proxy serves, so an install without a pinned version gets the newest version past the minimum age instead of failing. A pinned young version is still blocked."
+            description="Hold blocked young versions back in the package lists the proxy serves (marked yanked on PyPI, left out on npm), so an install without a pinned version gets the newest version past the minimum age instead of failing. A pinned young version is still blocked."
           />
           <Switch
             checked={draft.block_nonexistent}

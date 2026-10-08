@@ -2149,14 +2149,25 @@ async fn blocks_are_posted_to_the_webhook_once() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn young_releases_are_hidden_so_unpinned_installs_resolve_older() {
+async fn young_releases_are_held_back_so_unpinned_installs_resolve_older() {
     let h = Harness::start(|_| {}).await;
-    // PyPI HTML and JSON simple pages leave out the release from an hour ago.
+    // PyPI HTML and JSON simple pages mark the release from an hour ago yanked, which
+    // resolvers skip unless it is pinned with `==`.
     let r = h.get("/pypi/simple/rolling/").await;
     assert_eq!(r.headers()["x-customs-hidden-versions"], "1");
     let html = r.text().await.unwrap();
-    assert!(html.contains(&file_name("rolling", "1.0.0")), "{html}");
-    assert!(!html.contains(&file_name("rolling", "1.1.0")), "{html}");
+    let link = |v: &str| {
+        let f = file_name("rolling", v);
+        html.lines()
+            .find(|l| l.contains(&format!(">{f}<")))
+            .unwrap_or_else(|| panic!("{f} missing: {html}"))
+            .to_string()
+    };
+    assert!(!link("1.0.0").contains("data-yanked"), "{html}");
+    assert!(
+        link("1.1.0").contains("data-yanked=\"Customs: published less than 3 days ago"),
+        "{html}"
+    );
     let r = h
         .http
         .get(format!("{}/pypi/simple/rolling/", h.base))
@@ -2165,13 +2176,17 @@ async fn young_releases_are_hidden_so_unpinned_installs_resolve_older() {
         .await
         .unwrap();
     let doc: Value = r.json().await.unwrap();
-    let files: Vec<&str> = doc["files"]
+    let files: Vec<(&str, bool)> = doc["files"]
         .as_array()
         .unwrap()
         .iter()
-        .map(|f| f["filename"].as_str().unwrap())
+        .map(|f| {
+            let yanked = f.get("yanked").is_some_and(|y| y.is_string());
+            (f["filename"].as_str().unwrap(), yanked)
+        })
         .collect();
-    assert_eq!(files, vec![file_name("rolling", "1.0.0")]);
+    let (old, young) = (file_name("rolling", "1.0.0"), file_name("rolling", "1.1.0"));
+    assert_eq!(files, vec![(old.as_str(), false), (young.as_str(), true)]);
     // A pin on the young release is still refused, with the rule's reason.
     let r = h.get(&pypi_file_path("rolling", "1.1.0")).await;
     assert_eq!(r.status(), 403);
@@ -2221,6 +2236,9 @@ async fn young_releases_are_hidden_so_unpinned_installs_resolve_older() {
     h.stop().await;
     let h = Harness::start(|p| p.hide_young_versions = false).await;
     let html = h.get("/pypi/simple/rolling/").await.text().await.unwrap();
-    assert!(html.contains(&file_name("rolling", "1.1.0")), "{html}");
+    assert!(
+        html.contains(&file_name("rolling", "1.1.0")) && !html.contains("data-yanked"),
+        "{html}"
+    );
     h.stop().await;
 }

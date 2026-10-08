@@ -26,6 +26,13 @@ jobs:
       - run: cargo test --workspace
       # Rust inference must reproduce the Python reference on the shipped models.
       - run: cargo test -p customs-model --test parity
+      # Real pip, uv and npm through `customs serve`, against a local fake registry.
+      - run: cargo build -p customs
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v6
+      - run: python3 scripts/installer_e2e.py --bin target/debug/customs
 
   python:
     runs-on: ubuntu-latest

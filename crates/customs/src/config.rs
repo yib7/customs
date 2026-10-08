@@ -210,9 +210,10 @@ pub struct Policy {
     /// what turns a young package with install scripts into a block.
     #[serde(default)]
     pub min_age_severity: AgeSeverity,
-    /// Leave the versions `min_age_days` would block out of npm packuments and PyPI simple
-    /// pages, so an unpinned install resolves to the newest version old enough instead of
-    /// failing (enforce mode with a blocking `min_age_days` only).
+    /// Hold back the versions `min_age_days` would block: leave them out of npm packuments
+    /// and mark their files yanked on PyPI simple pages, so an unpinned install resolves to
+    /// the newest version old enough instead of failing (enforce mode with a blocking
+    /// `min_age_days` only).
     #[serde(default = "default_true")]
     pub hide_young_versions: bool,
     #[serde(default = "default_true")]

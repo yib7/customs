@@ -179,12 +179,13 @@ async fn fetch_and_rewrite(
         Some(p) => super::young_versions(state, Ecosystem::Pypi, p).await,
         None => Default::default(),
     };
+    let reason = crate::cooldown::yank_reason(policy.min_age_days);
     let mut removed = 0;
     let body = if ct.contains("json") {
         match serde_json::from_slice::<Value>(&page.body) {
             Ok(mut v) => {
                 if let Some(p) = project {
-                    removed = crate::cooldown::filter_simple_json(&mut v, p, &hidden);
+                    removed = crate::cooldown::filter_simple_json(&mut v, p, &hidden, &reason);
                 }
                 rw.rewrite_json(&mut v, &page_url);
                 v.to_string()
@@ -198,7 +199,7 @@ async fn fetch_and_rewrite(
         let html = String::from_utf8_lossy(&page.body);
         let html = match project {
             Some(p) => {
-                let (h, n) = crate::cooldown::filter_simple_html(&html, p, &hidden);
+                let (h, n) = crate::cooldown::filter_simple_html(&html, p, &hidden, &reason);
                 removed = n;
                 h
             }

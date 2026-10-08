@@ -130,10 +130,10 @@ and a link to the verdict page. An agent retrying the same blocked install produ
 message an hour, and bursts are rate-limited.
 
 **Release cooldown.** Compromised releases are usually found and pulled within days, so
-versions younger than `min_age_days` (3 by default) are blocked. The proxy also leaves them
-out of the package lists it serves, so `pip install foo` or `npm install foo` installs the
-newest version past the cooldown instead of failing. A pinned young version is still
-blocked.
+versions younger than `min_age_days` (3 by default) are blocked. The proxy also holds them
+back in the package lists it serves (marked yanked on PyPI, left out on npm), so `pip
+install foo` or `npm install foo` installs the newest version past the cooldown instead of
+failing. A pinned young version is still blocked, and pip and uv show why.
 
 **Release history rules.** Account takeovers show up in registry metadata before anyone
 reads the code. The policy engine compares each release with the ones before it and flags
@@ -273,6 +273,9 @@ methodology, is in [`docs/EVALUATION.md`](docs/EVALUATION.md).
   that unit tests missed (a name-encoding label leak in the source data, CNN pooling over
   batch padding, the CNN skipped on empty token streams in Rust, and a feature derived
   from the archive file name); after the fixes the binary matches the evaluation to 1e-7.
+  `scripts/installer_e2e.py`, run in CI, drives real pip, uv and npm through the proxy
+  against a fake registry: dependency resolution, the release cooldown, and blocks by the
+  startup-hook and install-script rules.
 * **Seed noise measured.** Five retrains that differ only in random seed give ROC AUC
   0.968 to 0.969 but block recall 61% to 70%, because the block threshold rests on two or
   three validation packages. Model changes are judged against that spread. One scanner

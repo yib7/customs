@@ -3,10 +3,10 @@
 //! A blocking `min_age_days` would otherwise fail every unpinned install of a package for
 //! the days after each of its releases: the resolver picks the newest version and the
 //! proxy then refuses its archive. With the young versions left out of the npm packument
-//! and the PyPI simple page, the resolver picks the newest version that is old enough,
-//! which is what `minimumReleaseAge` (pnpm) and `--exclude-newer` (uv) do. A version
-//! named exactly (a pin, a lockfile) is still requested, and still blocked with the rule's
-//! reason.
+//! and marked yanked on the PyPI simple page, the resolver picks the newest version that
+//! is old enough, which is what `minimumReleaseAge` (pnpm) and `--exclude-newer` (uv) do.
+//! A version named exactly (a pin, a lockfile) is still requested, and still blocked with
+//! the rule's reason; on npm a pin of a hidden version fails as "no matching version".
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashSet};
@@ -172,26 +172,45 @@ fn hidden_file(project: &str, filename: &str, hidden: &HashSet<String>) -> bool 
     })
 }
 
-/// Remove hidden versions' files from a PEP 691 JSON simple page (`files`, and the PEP 700
-/// `versions` list). Returns how many files were removed.
-pub fn filter_simple_json(doc: &mut Value, project: &str, hidden: &HashSet<String>) -> usize {
+/// Why a held-back PyPI file is marked yanked; pip and uv print it when a pin selects one.
+pub fn yank_reason(min_age_days: u32) -> String {
+    format!(
+        "Customs: published less than {min_age_days} days ago (min_age_days); \
+         installing it is blocked"
+    )
+}
+
+/// Mark hidden versions' files yanked (PEP 592) on a PEP 691 JSON simple page. Resolvers
+/// skip yanked files unless a requirement pins the version with `==`, so unpinned installs
+/// resolve to an older version while a pin still requests the file and gets the block
+/// reason from the proxy. Files already yanked keep their reason. Returns how many files
+/// were marked.
+pub fn filter_simple_json(
+    doc: &mut Value,
+    project: &str,
+    hidden: &HashSet<String>,
+    reason: &str,
+) -> usize {
     if hidden.is_empty() {
         return 0;
     }
-    let mut removed = 0;
+    let mut marked = 0;
     if let Some(files) = doc.get_mut("files").and_then(Value::as_array_mut) {
-        let before = files.len();
-        files.retain(|f| {
-            !f.get("filename")
+        for f in files {
+            let held = f
+                .get("filename")
                 .and_then(Value::as_str)
-                .is_some_and(|n| hidden_file(project, n, hidden))
-        });
-        removed = before - files.len();
+                .is_some_and(|n| hidden_file(project, n, hidden));
+            let yanked = f
+                .get("yanked")
+                .is_some_and(|y| y.as_bool() != Some(false) && !y.is_null());
+            if held && !yanked {
+                f["yanked"] = Value::String(reason.to_string());
+                marked += 1;
+            }
+        }
     }
-    if let Some(versions) = doc.get_mut("versions").and_then(Value::as_array_mut) {
-        versions.retain(|v| !v.as_str().is_some_and(|v| hidden.contains(v)));
-    }
-    removed
+    marked
 }
 
 fn anchor_re() -> &'static Regex {
@@ -201,23 +220,37 @@ fn anchor_re() -> &'static Regex {
     })
 }
 
-/// Remove hidden versions' links from a PEP 503 HTML simple page. The link text is the
-/// file name on PyPI and its mirrors. Returns how many links were removed.
-pub fn filter_simple_html(html: &str, project: &str, hidden: &HashSet<String>) -> (String, usize) {
+/// Mark hidden versions' links yanked (`data-yanked`, PEP 592) on a PEP 503 HTML simple
+/// page; see [`filter_simple_json`]. The link text is the file name on PyPI and its
+/// mirrors. Returns how many links were marked.
+pub fn filter_simple_html(
+    html: &str,
+    project: &str,
+    hidden: &HashSet<String>,
+    reason: &str,
+) -> (String, usize) {
     if hidden.is_empty() {
         return (html.to_string(), 0);
     }
-    let mut removed = 0;
+    let attr = reason
+        .replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;");
+    let mut marked = 0;
     let out = anchor_re().replace_all(html, |c: &regex::Captures| {
-        let text = c[1].trim();
-        if hidden_file(project, text, hidden) {
-            removed += 1;
-            String::new()
+        let all = &c[0];
+        let open_tag = &all[..all.find('>').unwrap_or(all.len())];
+        if hidden_file(project, c[1].trim(), hidden)
+            && !open_tag.to_ascii_lowercase().contains("data-yanked")
+        {
+            marked += 1;
+            format!("<a data-yanked=\"{attr}\"{}", &all[2..])
         } else {
-            c[0].to_string()
+            all.to_string()
         }
     });
-    (out.into_owned(), removed)
+    (out.into_owned(), marked)
 }
 
 #[cfg(test)]
@@ -338,28 +371,41 @@ mod tests {
     }
 
     #[test]
-    fn filters_pypi_simple_pages() {
+    fn marks_young_pypi_files_yanked() {
         let hidden: HashSet<String> = ["2.0".to_string()].into();
-        let html = "<html><body>\n<a href=\"https://f/p/demo-1.0.tar.gz#sha256=1\">demo-1.0.tar.gz</a><br/>\n<a href=\"https://f/p/demo-2.0-py3-none-any.whl#sha256=2\" data-requires-python=\"&gt;=3.8\">demo-2.0-py3-none-any.whl</a><br/>\n<a href=\"https://f/p/demo-2.0.tar.gz\">demo-2.0.tar.gz</a>\n</body></html>";
-        let (out, n) = filter_simple_html(html, "demo", &hidden);
-        assert_eq!(n, 2, "{out}");
+        let html = "<html><body>\n<a href=\"https://f/p/demo-1.0.tar.gz#sha256=1\">demo-1.0.tar.gz</a><br/>\n<a href=\"https://f/p/demo-2.0-py3-none-any.whl#sha256=2\" data-requires-python=\"&gt;=3.8\">demo-2.0-py3-none-any.whl</a><br/>\n<a href=\"https://f/p/demo-2.0.tar.gz\" data-yanked=\"broken\">demo-2.0.tar.gz</a>\n</body></html>";
+        let (out, n) = filter_simple_html(html, "demo", &hidden, "too \"new\"");
+        assert_eq!(n, 1, "{out}");
         assert!(
-            out.contains("demo-1.0.tar.gz") && !out.contains("demo-2.0"),
+            out.contains("<a href=\"https://f/p/demo-1.0.tar.gz#sha256=1\">"),
+            "{out}"
+        );
+        assert!(
+            out.contains("<a data-yanked=\"too &quot;new&quot;\" href=\"https://f/p/demo-2.0-py3"),
+            "{out}"
+        );
+        // A file the project already yanked keeps its own reason.
+        assert!(
+            out.contains("data-yanked=\"broken\">demo-2.0.tar.gz"),
             "{out}"
         );
         let mut doc = json!({
             "name": "demo",
             "files": [
-                {"filename": "demo-1.0.tar.gz"},
-                {"filename": "demo-2.0.0-py3-none-any.whl"}
+                {"filename": "demo-1.0.tar.gz", "yanked": false},
+                {"filename": "demo-2.0.0-py3-none-any.whl"},
+                {"filename": "demo-2.0.tar.gz", "yanked": "broken"}
             ],
             "versions": ["1.0", "2.0"]
         });
         // `2.0.0` in a file name is the same PEP 440 version as `2.0`.
-        assert_eq!(filter_simple_json(&mut doc, "demo", &hidden), 1);
-        assert_eq!(doc["versions"], json!(["1.0"]));
+        assert_eq!(filter_simple_json(&mut doc, "demo", &hidden, "young"), 1);
+        assert_eq!(doc["files"][0]["yanked"], json!(false));
+        assert_eq!(doc["files"][1]["yanked"], json!("young"));
+        assert_eq!(doc["files"][2]["yanked"], json!("broken"));
+        assert_eq!(doc["versions"], json!(["1.0", "2.0"]));
         // Another project's files on the page are left alone.
-        let (_, n) = filter_simple_html("<a href=\"x\">other-2.0.tar.gz</a>", "demo", &hidden);
+        let (_, n) = filter_simple_html("<a href=\"x\">other-2.0.tar.gz</a>", "demo", &hidden, "r");
         assert_eq!(n, 0);
     }
 }

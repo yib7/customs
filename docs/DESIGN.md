@@ -823,7 +823,7 @@ warn_threshold = "model"    # "model" uses ensemble.json thresholds, or a number
 block_threshold = "model"
 min_age_days = 3            # versions published less recently hit min_age_days; 0 disables
 min_age_severity = "block"  # or "warn"
-hide_young_versions = true  # leave blocked young versions out of the indexes the proxy serves
+hide_young_versions = true  # hold blocked young versions back in the indexes the proxy serves
 block_nonexistent = true    # requesting a name the registry does not know is recorded and denied in hooks
 block_install_scripts_from_new = true  # npm install scripts in packages younger than min_age_days
 # Release history rules: "off", "warn" or "block"
@@ -862,15 +862,21 @@ key that holds them. Without `--config`, the server reads `./customs.toml`, then
 **Resolving past young releases.** A minimum age that only blocks breaks every unpinned
 install for days after each upstream release: `pip install foo` and `npm install foo` pick
 the newest version, which is the one being refused. With `hide_young_versions` (the
-default), the proxy leaves versions younger than `min_age_days` out of the PyPI simple
-index (HTML and JSON) and the npm packument, moves `latest` and any dist-tag pointing at a
-hidden version to the newest visible one, and sets `x-customs-hidden-versions` to the
-count. Installers then resolve to the newest version old enough, the same cooldown that
-pip's `--uploaded-prior-to` and pnpm's `minimumReleaseAge` give one machine. Hiding applies
+default), the proxy holds back versions younger than `min_age_days`. On the PyPI simple
+index (HTML and JSON) their files are marked yanked (PEP 592, `data-yanked` and
+`"yanked"`, with the reason); resolvers skip yanked files unless a requirement pins the
+version with `==`, so `pip install foo` and `foo>=1` get an older release while
+`foo==1.2.0` still fetches the file, receives the 403, and pip and uv print the reason. npm
+has no such marker, so the packument leaves the versions out and moves `latest` and any
+dist-tag pointing at one to the newest remaining version; a pin of a held-back version then
+fails as "no matching version". `x-customs-hidden-versions` carries the count. Installers
+resolve to the newest version old enough, the same cooldown that pip's
+`--uploaded-prior-to` and pnpm's `minimumReleaseAge` give one machine. Holding back applies
 only in enforce mode with `min_age_severity = "block"`: allow-listed versions stay visible
 unless also denied, a package whose versions are all young keeps them (the install then
 fails with the block reason instead of "no matching version"), and a pinned young version
-is still blocked when fetched. Metadata fetch errors fail open (nothing hidden).
+is still blocked when fetched. Metadata fetch errors fail open (nothing held back).
+`scripts/installer_e2e.py` checks this with real pip, uv and npm.
 
 `POST /api/check` resolves an unpinned or ranged version the same way by default
 (`"resolve": "served"`) and adds a `min_age_resolution` hit naming the newer version it
