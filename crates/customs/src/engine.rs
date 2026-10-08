@@ -171,6 +171,10 @@ struct ScanSummary {
     /// Code files the scanner could not read (over its per-file size cap).
     #[serde(default)]
     unread_code: Vec<String>,
+    /// `.pth` files whose code launches a process, connects or downloads at every
+    /// interpreter start.
+    #[serde(default)]
+    startup_hooks: Vec<String>,
 }
 
 type Flight = Arc<OnceCell<Result<Outcome, EngineError>>>;
@@ -593,6 +597,7 @@ impl Engine {
             scanned: false,
             not_scanned_reason: not_scanned,
             unread_code: Vec::new(),
+            startup_hooks: Vec::new(),
         }
     }
 
@@ -906,6 +911,21 @@ fn scan_hits(policy: &Policy, s: &ScanSummary) -> Vec<PolicyHit> {
             ),
         });
     }
+    if let (Some(severity), Some(first)) = (policy.startup_hook.decision(), s.startup_hooks.first())
+    {
+        let more = match s.startup_hooks.len() {
+            1 => String::new(),
+            n => format!(" (and {} more)", n - 1),
+        };
+        hits.push(PolicyHit {
+            rule: "startup_hook".into(),
+            severity,
+            detail: format!(
+                "{first}{more}: a .pth file runs this at every Python start, not only at \
+                 install"
+            ),
+        });
+    }
     hits
 }
 
@@ -941,6 +961,7 @@ fn scan_and_score(
                 scanned: true,
                 not_scanned_reason: None,
                 unread_code: report.unread_code,
+                startup_hooks: report.startup_hooks,
             }
         }
         Err(e) => {
@@ -962,6 +983,7 @@ fn scan_and_score(
                 scanned: false,
                 not_scanned_reason: None,
                 unread_code: Vec::new(),
+                startup_hooks: Vec::new(),
             }
         }
     }
@@ -1100,6 +1122,7 @@ mod tests {
             scanned: true,
             not_scanned_reason: None,
             unread_code: unread.iter().map(|s| s.to_string()).collect(),
+            startup_hooks: vec![],
         };
         let mut policy = Policy::default();
         assert!(scan_hits(&policy, &summary(&[])).is_empty());
@@ -1138,6 +1161,41 @@ mod tests {
     }
 
     #[test]
+    fn startup_hooks_are_a_policy_hit() {
+        let mut s = ScanSummary {
+            risk: Some(0.09),
+            scores: Scores::default(),
+            reasons: vec![],
+            evidence: vec![],
+            install_surface: vec![],
+            scan_errors: vec![],
+            install_scripts: vec![],
+            scanned_ms: 1,
+            scanned: true,
+            not_scanned_reason: None,
+            unread_code: vec![],
+            startup_hooks: vec![],
+        };
+        let mut policy = Policy::default();
+        assert!(scan_hits(&policy, &s).is_empty());
+        s.startup_hooks = vec!["litellm_init.pth: proc_exec, network, download_exec".into()];
+        let hits = scan_hits(&policy, &s);
+        assert_eq!(
+            (hits[0].rule.as_str(), hits[0].severity),
+            ("startup_hook", Decision::Block)
+        );
+        assert!(hits[0].detail.starts_with("litellm_init.pth: proc_exec"));
+        policy.startup_hook = RuleSeverity::Warn;
+        assert_eq!(scan_hits(&policy, &s)[0].severity, Decision::Warn);
+        policy.startup_hook = RuleSeverity::Off;
+        assert!(scan_hits(&policy, &s).is_empty());
+        let mut old = serde_json::to_value(&s).unwrap();
+        old.as_object_mut().unwrap().remove("startup_hooks");
+        let back: ScanSummary = serde_json::from_value(old).unwrap();
+        assert!(back.startup_hooks.is_empty());
+    }
+
+    #[test]
     fn install_scripts_from_surface() {
         let r = ScanReport {
             schema_version: 1,
@@ -1152,6 +1210,7 @@ mod tests {
             tokens: None,
             errors: vec![],
             unread_code: vec![],
+            startup_hooks: vec![],
         };
         assert_eq!(install_scripts_from_report(&r), vec!["postinstall"]);
     }

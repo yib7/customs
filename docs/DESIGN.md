@@ -428,6 +428,16 @@ on name and metadata only (`not_scanned`): large legitimate wheels are common, P
 uploads at 100 MB by default, and age and history rules still apply to them. Only content needed for analysis is kept in memory (source, manifest,
 README and nested-archive entries in full, a short magic-number prefix otherwise).
 
+A third rule, `startup_hook`, reads the install surface itself. Python runs the `import`
+lines of every `.pth` file in site-packages at each interpreter start, so a hook there runs
+in every later Python process, including ones the agent starts long after the install
+was approved. The scanner lists each `.pth` file whose code carries a process launch,
+network or download call, an exfiltration endpoint, a secret path, persistence, recon, a
+wallet path or a raw-IP URL, and the rule blocks by default. Across the 58K scanned
+archives, such a `.pth` file appears in 19 malicious archives and no benign one. On the
+test split it adds 5 blocks at no benign cost, among them litellm 1.82.8, whose 52 MB of
+legitimate library code holds the model's risk at 0.09.
+
 Root normalization: top-level directories are stripped while the current level holds
 exactly one directory and nothing besides sidecar `*.json` files (other than
 `package.json`), stopping at a level that has `package.json`, `PKG-INFO`, `setup.py`,
@@ -620,7 +630,8 @@ hits (`allow`, `not_scanned`), else `warn` or `block`. Rules: `deny`, `allow`,
 rules of section 8 (`provenance_dropped`, `install_script_added`, `publisher_changed`,
 `dormant_revival`, `version_anomaly`, `nonregistry_dependency_added`,
 `young_dependency_added`), `scan_error` (scanner rejected the archive, block by default),
-`unread_code` (a code file over the per-file scan limit, block by default), `not_scanned`
+`unread_code` (a code file over the per-file scan limit, block by default), `startup_hook`
+(a `.pth` file that launches, connects, downloads or reads secrets, block by default), `not_scanned`
 (archive above the scan size limit).
 `reasons` mix model features (positive contributions to the stacked logit, largest first)
 and name signals (`name_dist1`, `name_contains_popular_token`, ...). In `monitor` mode the
@@ -740,8 +751,9 @@ version_anomaly = "off"        # major version jump, or a release on a long-quie
 nonregistry_dependency_added = "block"  # npm: new git/URL/file dependency since the previous release
 young_dependency_added = "block"        # npm: new dependency first published days before, by strangers
 young_dependency_days = 7
-# Scan coverage: "off", "warn" or "block"
+# Scanner rules: "off", "warn" or "block"
 unread_code = "block"       # a code file or manifest over the 32 MiB per-file scan limit
+startup_hook = "block"      # a .pth file that runs a process, network or secret access at startup
 scan_error = "block"        # the scanner rejected the archive (limits, bomb, corrupt)
 allow = ["pypi:requests", "npm:react"]  # always allow (exact names)
 deny  = ["npm:event-stream@3.3.6"]

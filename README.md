@@ -298,6 +298,12 @@ and 20,001 empty files made any archive unscannable; both now block (`unread_cod
 `scan_error`), and neither fires on any of the 22,258 benign corpus archives. See
 [DESIGN.md section 4.7](docs/DESIGN.md#47-archive-handling).
 
+A `.pth` file runs at every Python start, not only at install, so a `.pth` file that
+launches a process, connects out, downloads or reads secrets blocks on its own
+(`startup_hook`). Across 58K scanned archives one appears in 19 malicious packages and no
+benign one; it catches litellm 1.82.8, whose 52 MB of real library code drowns the model's
+score.
+
 ## License
 
 MIT

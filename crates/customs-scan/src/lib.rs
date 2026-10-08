@@ -129,7 +129,29 @@ pub struct ScanReport {
     /// it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unread_code: Vec<String>,
+    /// `.pth` files on the install surface whose code launches a process, opens a
+    /// connection, downloads, or reads secrets, each as `file: indicator, ...`. Python runs
+    /// a `.pth` file's import lines at every interpreter start, so this is code the package
+    /// runs on every later Python process; benign `.pth` files only extend `sys.path` or
+    /// switch on a feature from an environment variable.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub startup_hooks: Vec<String>,
 }
+
+/// Indicators that make a `.pth` file a startup hook worth blocking. Across the corpus none
+/// of these appears in a benign `.pth` file; `dyn_code`, `env_access`, `url` and `file_write`
+/// do (namespace-package shims, coverage, a fork that copies itself over urllib3).
+const STARTUP_HOOK_INDICATORS: [usize; 9] = [
+    indicators::PROC_EXEC,
+    indicators::NETWORK,
+    indicators::DOWNLOAD_EXEC,
+    indicators::EXFIL_ENDPOINT,
+    indicators::SECRET_PATHS,
+    indicators::PERSISTENCE,
+    indicators::RECON,
+    indicators::CRYPTO_WALLET,
+    indicators::IP_URL,
+];
 
 #[derive(Debug, thiserror::Error)]
 pub enum ScanError {
@@ -998,6 +1020,20 @@ impl<'a> Scanner<'a> {
         }
 
         let evidence = self.select_evidence(&analyses);
+        let startup_hooks = self
+            .units
+            .iter()
+            .zip(&analyses)
+            .filter(|(u, _)| u.inst && u.label.ends_with(".pth"))
+            .filter_map(|(u, a)| {
+                let found: Vec<&str> = STARTUP_HOOK_INDICATORS
+                    .iter()
+                    .filter(|&&i| a.counts[i] > 0)
+                    .map(|&i| INDICATORS[i])
+                    .collect();
+                (!found.is_empty()).then(|| format!("{}: {}", u.label, found.join(", ")))
+            })
+            .collect();
         let tokens = self.opts.tokens.then(|| {
             let mut out = Vec::new();
             for u in self.units.iter().filter(|u| u.inst) {
@@ -1041,6 +1077,7 @@ impl<'a> Scanner<'a> {
             tokens,
             errors,
             unread_code,
+            startup_hooks,
         }
     }
 

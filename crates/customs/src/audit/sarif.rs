@@ -97,6 +97,12 @@ fn rule(id: &str) -> Rule {
             "The archive holds a code file or manifest above the scanner's 32 MiB per-file limit. The installer runs it, but no rule or model inspected it; padding a payload past the limit is an evasion.",
             "error",
         ),
+        "customs/startup-hook" => (
+            "StartupHook",
+            "Package installs a .pth file that runs code at every Python start",
+            "A .pth file in the package launches a process, opens a connection, downloads, or reads secrets. Python executes its import lines whenever any interpreter starts, so the code keeps running long after the install.",
+            "error",
+        ),
         "customs/unavailable" => (
             "UnavailableVersion",
             "Pinned version is not available on the registry",
@@ -163,6 +169,7 @@ fn primary_rule(v: &Verdict) -> String {
         };
     }
     let order = [
+        "startup_hook",
         "unread_code",
         "block_install_scripts_from_new",
         "min_age_days",

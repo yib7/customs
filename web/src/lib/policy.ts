@@ -37,6 +37,7 @@ export interface PolicyDraft {
   dormantDays: string;
   youngDependencyDays: string;
   unread_code: RuleSeverity;
+  startup_hook: RuleSeverity;
   scan_error: RuleSeverity;
   allow: string[];
   deny: string[];
@@ -80,6 +81,7 @@ export function policyToDraft(p: Policy): PolicyDraft {
     dormantDays: String(p.dormant_days),
     youngDependencyDays: String(p.young_dependency_days),
     unread_code: p.unread_code,
+    startup_hook: p.startup_hook,
     scan_error: p.scan_error,
     allow: [...p.allow],
     deny: [...p.deny],
@@ -158,6 +160,7 @@ export function validateDraft(d: PolicyDraft): DraftResult {
       dormant_days: dormant,
       young_dependency_days: young,
       unread_code: d.unread_code,
+      startup_hook: d.startup_hook,
       scan_error: d.scan_error,
       allow: d.allow.map((e) => e.trim()),
       deny: d.deny.map((e) => e.trim()),

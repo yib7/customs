@@ -345,6 +345,7 @@ fn fake_scanner(calls: Arc<AtomicUsize>) -> ScanFn {
             } else {
                 vec![]
             },
+            startup_hooks: vec![],
         })
     })
 }

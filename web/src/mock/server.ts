@@ -199,6 +199,7 @@ export class MockServer {
       'nonregistry_dependency_added',
       'young_dependency_added',
       'unread_code',
+      'startup_hook',
       'scan_error',
     ] as const) {
       const v = body[f];

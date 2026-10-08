@@ -262,6 +262,12 @@ pub struct Policy {
     /// enough to make any package unscannable.
     #[serde(default = "default_block")]
     pub scan_error: RuleSeverity,
+    /// A `.pth` file on the install surface launches a process, connects, downloads or
+    /// reads secrets. Python runs it at every interpreter start. 19 malicious archives in
+    /// the corpus have one (among them litellm 1.82.8, which the model scored 0.09) and no
+    /// benign archive does: benign `.pth` files extend `sys.path` or switch on a feature.
+    #[serde(default = "default_block")]
+    pub startup_hook: RuleSeverity,
     #[serde(default)]
     pub allow: Vec<String>,
     #[serde(default)]
@@ -291,6 +297,7 @@ impl Default for Policy {
             young_dependency_days: default_young_dependency_days(),
             unread_code: default_block(),
             scan_error: default_block(),
+            startup_hook: default_block(),
             allow: Vec::new(),
             deny: Vec::new(),
             upstream: Upstream::default(),
@@ -616,6 +623,7 @@ npm = "https://registry.npmjs.org"
         assert_eq!(p.young_dependency_added, RuleSeverity::Block);
         assert_eq!(p.unread_code, RuleSeverity::Block);
         assert_eq!(p.scan_error, RuleSeverity::Block);
+        assert_eq!(p.startup_hook, RuleSeverity::Block);
         assert_eq!(Policy::default().young_dependency_days, 7);
         let e = Policy::from_toml("young_dependency_days = 0").unwrap_err();
         assert_eq!(e.key, "young_dependency_days");

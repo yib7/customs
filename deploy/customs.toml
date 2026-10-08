@@ -19,5 +19,6 @@ young_dependency_added = "block"
 young_dependency_days = 7
 unread_code = "block"
 scan_error = "block"
+startup_hook = "block"
 allow = []
 deny = []

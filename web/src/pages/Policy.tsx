@@ -399,14 +399,23 @@ function PolicyForm({
         </div>
       </Card>
 
-      <Card id="scan-coverage" title="Scan coverage" description="What happens when the scanner cannot read part of a package">
+      <Card id="scan-coverage" title="Scanner rules" description="Package contents that decide the verdict on their own, whatever the model says">
         <SeverityField
-          id="rule-unread_code"
-          label="Code too large to scan"
-          description="The package ships a code file or manifest over the scanner's 32 MiB per-file limit. The installer still runs it, and padding a payload past the limit hides it from every rule and the model. No benign package in the training corpus has one, so it blocks by default."
-          value={draft.unread_code}
-          onChange={(v) => set('unread_code', v)}
+          id="rule-startup_hook"
+          label="Startup hook in a .pth file"
+          description="The package installs a .pth file that launches a process, opens a connection, downloads, or reads secrets. Python runs .pth import lines at every interpreter start, so the code runs in every later Python process, not only at install. No benign package in the training corpus has one, so it blocks by default."
+          value={draft.startup_hook}
+          onChange={(v) => set('startup_hook', v)}
         />
+        <div className="border-t border-line">
+          <SeverityField
+            id="rule-unread_code"
+            label="Code too large to scan"
+            description="The package ships a code file or manifest over the scanner's 32 MiB per-file limit. The installer still runs it, and padding a payload past the limit hides it from every rule and the model. No benign package in the training corpus has one, so it blocks by default."
+            value={draft.unread_code}
+            onChange={(v) => set('unread_code', v)}
+          />
+        </div>
         <div className="border-t border-line">
           <SeverityField
             id="rule-scan_error"
