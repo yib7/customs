@@ -799,7 +799,8 @@ def render(scheme: str = SCHEME) -> str:
             "were read off later from PyPI itself (the project was removed) and from OpenSSF "
             "malicious-package reports.\n"
         )
-        add(f"Window: {live['window'][0]} to {live['window'][1]} (UTC).\n")
+        version = f", models {live['model_version']}" if live.get("model_version") else ""
+        add(f"Window: {live['window'][0]} to {live['window'][1]} (UTC{version}).\n")
         add("| Decision | Releases | Later removed from PyPI | OpenSSF report |")
         add("|---|---:|---:|---:|")
         for k in ("allow", "warn", "block"):

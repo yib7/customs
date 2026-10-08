@@ -89,6 +89,11 @@ def watch(out: Path, server: str, workers: int, hours: float) -> None:
     rpc = xmlrpc.client.ServerProxy(f"{PYPI}/pypi")
     serial = state.get("serial") or rpc.changelog_last_serial()
     state.setdefault("started", now())
+    # The study is only meaningful with the same models throughout; record which ones.
+    with urllib.request.urlopen(f"{server}/healthz", timeout=30) as r:
+        version = json.load(r).get("model_version")
+    if state.setdefault("model_version", version) != version:
+        sys.exit(f"server runs models {version}, the study started with {state['model_version']}")
     pending: queue.Queue = queue.Queue()
     lock = threading.Lock()
     created: dict[str, float] = {}
@@ -320,12 +325,15 @@ def report(out: Path) -> dict:
         f"{n}=={v}" in covered for n, v in zip(rows.name, rows.version, strict=True)
     ]
     scored = rows[rows.risk.notna()]
+    state_path = out / "state.json"
+    state = json.loads(state_path.read_text()) if state_path.exists() else {}
     by = scored.groupby("model_decision")
     summary = {
         "window": [
             time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(int(t)))
             for t in (rows.published.min(), rows.published.max())
         ],
+        "model_version": state.get("model_version"),
         "releases": len(rows),
         "scanned": len(scored),
         "new_projects": int(rows.new_project.sum()),

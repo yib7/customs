@@ -718,6 +718,10 @@ def stage_train() -> dict:
             tail_score(val_benign.base_risk.to_numpy(), b),
             tail_score(val_benign.diff_risk.to_numpy(), d),
         )
+        # Every score above all validation benign pairs gets the same tail score; when more
+        # than f of the negatives do, a strict threshold at that tie admits nothing. Break
+        # ties by the larger raw risk (1e-6 is far below the gap between tail steps).
+        comb = comb + 1e-6 * np.maximum(b, d)
         matched = {}
         for f in (0.001, 0.005, 0.01):
             tb, tc = np.quantile(b[y == 0], 1 - f), np.quantile(comb[y == 0], 1 - f)
