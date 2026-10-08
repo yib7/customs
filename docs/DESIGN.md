@@ -223,15 +223,24 @@ How indicators are counted (`customs-scan`, schema 1):
   and Python raw strings keep their backslashes. A literal reversed at run time is read
   forwards: Python `'...'[::-1]` (over the whole run of adjacent literals, which Python joins
   first) and `''.join(reversed('...'))`, JavaScript `'...'.split('').reverse().join('')` and
-  `[...'...'].reverse().join('')`. Both came from the red team (section 10): spelling every
-  literal as escapes cut automatic blocking of held-out malware from 67.1% to 60.6%, and
-  reversing every literal cut it from 67.2% to 60.5%. On the same 6,000 corpus archives,
-  decoding escapes changed features in 232 malicious and 60 benign archives (mostly string
-  entropy) and reading reversals forwards in 5 malicious and no benign ones; in both cases
-  every indicator that appeared where there was none before appeared in malware. Building
-  literals from character codes (`String.fromCharCode(...)`, `''.join(map(chr, [...]))`)
-  is not decoded: the red team found it costs no detection, since `decode_obf` and the CNN
-  already flag the construct.
+  `[...'...'].reverse().join('')`. A list of literals joined at run time is read as the
+  joined string: Python `sep.join(['...', '...'])` over a list or tuple, JavaScript
+  `['...', '...'].join(sep)` (a comma when `sep` is left out), where `sep` is a literal;
+  joins come after reversals, so a reversed piece is joined forwards, and before `+`
+  folding. All three came from the red team (section 10): spelling every literal as escapes
+  cut automatic blocking of held-out malware from 67.1% to 60.6%, reversing every literal
+  cut it from 67.2% to 60.5%, and splitting every literal into joined pieces cut it from
+  67.5% to 59.8%. On the same 6,000 corpus archives, decoding escapes changed features in
+  232 malicious and 60 benign archives (mostly string entropy) and reading reversals forwards
+  in 5 malicious and no benign ones, and every indicator that appeared where there was none
+  before appeared in malware. Joining lists changed features in 79 malicious and 19 benign
+  archives: URL counts rose in 41 malicious archives and 1 benign one, the rest is string
+  entropy, and no indicator appeared where there was none.
+  Building literals from character codes (`String.fromCharCode(...)`,
+  `''.join(map(chr, [...]))`) is not decoded, and neither is a string table (every literal
+  moved into one array and read back by index, as javascript-obfuscator lays it out): the
+  red team found neither costs detection, since `decode_obf` and the CNN already flag
+  character codes and a table keeps each literal whole.
 
 ### 4.3 Structural and obfuscation features (no prefix unless stated)
 
@@ -924,7 +933,7 @@ As implemented; results are in `docs/EVALUATION.md` and `models/metrics.json`.
   sizes, or file counts).
 - **Robustness and augmentation.** Text-level evasions applied to held-out malware and
   re-scored: string splitting, hex and Unicode escapes, character codes, reversed literals,
-  base64 wrapping, burial in a real library, install-surface indirection, metadata mimicry,
+  joined literal lists, a string table, base64 wrapping, burial in a real library, install-surface indirection, metadata mimicry,
   starjacking. The augmentation stage then adds starjacked
   and buried copies of training malware (benign training donors only) and everything is
   retrained; the report shows before and after, separating evasion families used in
