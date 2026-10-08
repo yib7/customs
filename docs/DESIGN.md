@@ -263,12 +263,19 @@ How indicators are counted (`customs-scan`, schema 1):
   in 5 malicious and no benign ones, and every indicator that appeared where there was none
   before appeared in malware. Joining lists changed features in 79 malicious and 19 benign
   archives: URL counts rose in 41 malicious archives and 1 benign one, the rest is string
-  entropy, and no indicator appeared where there was none.
+  entropy, and no indicator appeared where there was none. After retraining on joined
+  features the joined-pieces rewrite is blocked at 59.9% against 62.0% for the clean
+  samples, a 2.1-point gap from 7.7.
+  A string table (every literal moved into one array and read back by index, as
+  javascript-obfuscator lays it out) is read in place: a name assigned once to a list of
+  plain literals, never touched through `.` (so the `push`/`shift` rotation the obfuscator
+  adds leaves it alone) and never written by index, has each `name[3]` read (decimal or hex)
+  replaced by its literal on the line of the read, and a literal read this way leaves the
+  table so it counts once. The red team's table rewrite cost 0.4 points of block recall with
+  the earlier models and 2.75 points once the models had learned from joined literals.
   Building literals from character codes (`String.fromCharCode(...)`,
-  `''.join(map(chr, [...]))`) is not decoded, and neither is a string table (every literal
-  moved into one array and read back by index, as javascript-obfuscator lays it out): the
-  red team found neither costs detection, since `decode_obf` and the CNN already flag
-  character codes and a table keeps each literal whole.
+  `''.join(map(chr, [...]))`) is not decoded: `decode_obf` and the CNN already flag
+  character codes, and the red team found it costs no detection.
 
 ### 4.3 Structural and obfuscation features (no prefix unless stated)
 
