@@ -21,6 +21,7 @@ Writes `$CUSTOMS_DATA/work/loadtest.json`.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import importlib.util
 import json
 import os
@@ -66,7 +67,9 @@ def run_batch(urls: list[str], conc: int) -> dict:
         "p95_ms": float(np.percentile(lat, 95)),
         "p99_ms": float(np.percentile(lat, 99)),
         "max_ms": float(lat.max()),
-        "statuses": {str(k): int(v) for k, v in pd.Series([r[1] for r in res]).value_counts().items()},
+        "statuses": {
+            str(k): int(v) for k, v in pd.Series([r[1] for r in res]).value_counts().items()
+        },
         "_lat": lat,
     }
 
@@ -79,10 +82,8 @@ def metrics(proxy: str) -> dict[str, float]:
         if line.startswith("#") or " " not in line:
             continue
         k, v = line.rsplit(" ", 1)
-        try:
+        with contextlib.suppress(ValueError):
             out[k] = float(v)
-        except ValueError:
-            pass
     return out
 
 
@@ -118,12 +119,15 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=3)
     args = ap.parse_args()
 
-    data = Path(os.environ.get("CUSTOMS_DATA", "/tmp/customs-data"))
+    data = Path(os.environ.get("CUSTOMS_DATA") or Path(tempfile.gettempdir()) / "customs-data")
     df = pd.read_parquet(
         data / "work" / "dataset.parquet",
         columns=["ecosystem", "name", "version", "label", "split_temporal", "canonical_path"],
     )
-    test = df[(df.split_temporal == "test") & df.canonical_path.map(lambda p: bool(p) and Path(p).exists())]
+    test = df[
+        (df.split_temporal == "test")
+        & df.canonical_path.map(lambda p: bool(p) and Path(p).exists())
+    ]
     test = test.drop_duplicates(["ecosystem", "name"])
     need = args.n * len(args.concurrency) + args.flight_packages
     rows = test.sample(min(need, len(test)), random_state=args.seed).reset_index(drop=True)
@@ -143,91 +147,106 @@ def main() -> None:
         f'pypi_json = "{base}/pypi"\nnpm = "{base}/npm"\n'
     )
     proxy = f"http://127.0.0.1:{args.port}"
-    server = subprocess.Popen(
-        [str(ROOT / "target/release/customs"), "serve", "--bind", f"127.0.0.1:{args.port}",
-         "--config", str(policy), "--data-dir", str(work / "data"),
-         "--ui-dir", str(ROOT / "web/dist"), "--models", str(ROOT / "models")],
-        stdout=subprocess.DEVNULL, stderr=open(work / "server.log", "w"),
-    )
-    res: dict = {"archives": len(rows), "cpus": os.cpu_count()}
-    try:
-        for _ in range(100):
-            try:
-                urllib.request.urlopen(f"{proxy}/healthz", timeout=1)
-                break
-            except OSError:
-                time.sleep(0.1)
-        res["archive_kb"] = {
-            "p50": float(rows.bytes.quantile(0.5) / 1024),
-            "p95": float(rows.bytes.quantile(0.95) / 1024),
-            "max": float(rows.bytes.max() / 1024),
-        }
-        first = rows.iloc[: args.n]
-        res["direct"] = strip(run_batch([direct_url(base, r) for r in first.itertuples()], 1))
-
-        cold = {}
-        m0 = metrics(proxy)
-        for i, c in enumerate(args.concurrency):
-            part = rows.iloc[i * args.n : (i + 1) * args.n]
-            b = run_batch([proxy_url(proxy, r) for r in part.itertuples()], c)
-            if i == 0:
-                # Latency against archive size, on the sequential run.
-                lat = b["_lat"]
-                kb = part.bytes.to_numpy() / 1024
-                b["p50_ms_by_size"] = {
-                    name: float(np.median(lat[m])) if m.any() else None
-                    for name, m in (
-                        ("under_100kb", kb < 100),
-                        ("100kb_to_1mb", (kb >= 100) & (kb < 1024)),
-                        ("over_1mb", kb >= 1024),
-                    )
-                }
-                b["overhead_p50_ms"] = b["p50_ms"] - res["direct"]["p50_ms"]
-            cold[str(c)] = strip(b)
-        m1 = metrics(proxy)
-        n_scans = m1.get("customs_scan_duration_seconds_count", 0) - m0.get(
-            "customs_scan_duration_seconds_count", 0
+    with open(work / "server.log", "w") as log:
+        server = subprocess.Popen(
+            [
+                str(ROOT / "target/release/customs"),
+                "serve",
+                "--bind",
+                f"127.0.0.1:{args.port}",
+                "--config",
+                str(policy),
+                "--data-dir",
+                str(work / "data"),
+                "--ui-dir",
+                str(ROOT / "web/dist"),
+                "--models",
+                str(ROOT / "models"),
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=log,
         )
-        scan_sum = m1.get("customs_scan_duration_seconds_sum", 0) - m0.get(
-            "customs_scan_duration_seconds_sum", 0
-        )
-        res["cold"] = cold
-        res["server_scan_mean_ms"] = 1000 * scan_sum / max(n_scans, 1)
-        res["server_scans"] = int(n_scans)
+        res: dict = {"archives": len(rows), "cpus": os.cpu_count()}
+        try:
+            for _ in range(100):
+                try:
+                    urllib.request.urlopen(f"{proxy}/healthz", timeout=1)
+                    break
+                except OSError:
+                    time.sleep(0.1)
+            res["archive_kb"] = {
+                "p50": float(rows.bytes.quantile(0.5) / 1024),
+                "p95": float(rows.bytes.quantile(0.95) / 1024),
+                "max": float(rows.bytes.max() / 1024),
+            }
+            first = rows.iloc[: args.n]
+            res["direct"] = strip(run_batch([direct_url(base, r) for r in first.itertuples()], 1))
 
-        warm_rows = rows.iloc[: args.n]
-        res["warm"] = strip(
-            run_batch([proxy_url(proxy, r) for r in warm_rows.itertuples()], max(args.concurrency))
-        )
+            cold = {}
+            m0 = metrics(proxy)
+            for i, c in enumerate(args.concurrency):
+                part = rows.iloc[i * args.n : (i + 1) * args.n]
+                b = run_batch([proxy_url(proxy, r) for r in part.itertuples()], c)
+                if i == 0:
+                    # Latency against archive size, on the sequential run.
+                    lat = b["_lat"]
+                    kb = part.bytes.to_numpy() / 1024
+                    b["p50_ms_by_size"] = {
+                        name: float(np.median(lat[m])) if m.any() else None
+                        for name, m in (
+                            ("under_100kb", kb < 100),
+                            ("100kb_to_1mb", (kb >= 100) & (kb < 1024)),
+                            ("over_1mb", kb >= 1024),
+                        )
+                    }
+                    b["overhead_p50_ms"] = b["p50_ms"] - res["direct"]["p50_ms"]
+                cold[str(c)] = strip(b)
+            m1 = metrics(proxy)
+            n_scans = m1.get("customs_scan_duration_seconds_count", 0) - m0.get(
+                "customs_scan_duration_seconds_count", 0
+            )
+            scan_sum = m1.get("customs_scan_duration_seconds_sum", 0) - m0.get(
+                "customs_scan_duration_seconds_sum", 0
+            )
+            res["cold"] = cold
+            res["server_scan_mean_ms"] = 1000 * scan_sum / max(n_scans, 1)
+            res["server_scans"] = int(n_scans)
 
-        fl = rows.iloc[args.n * len(args.concurrency) :]
-        before = metrics(proxy)
-        lats = []
-        for r in fl.itertuples():
-            b = run_batch([proxy_url(proxy, r)] * args.flight_clients, args.flight_clients)
-            lats.append(b["p50_ms"])
-        after = metrics(proxy)
-        res["single_flight"] = {
-            "packages": len(fl),
-            "clients_per_package": args.flight_clients,
-            "requests": len(fl) * args.flight_clients,
-            "scans": int(
-                after.get("customs_scan_duration_seconds_count", 0)
-                - before.get("customs_scan_duration_seconds_count", 0)
-            ),
-            "joins": int(
-                after.get("customs_singleflight_joins_total", 0)
-                - before.get("customs_singleflight_joins_total", 0)
-            ),
-            "p50_ms": float(np.median(lats)),
-        }
-        print(json.dumps(res, indent=1))
-        (data / "work" / "loadtest.json").write_text(json.dumps(res, indent=1))
-    finally:
-        server.terminate()
-        server.wait(timeout=30)
-        shutil.rmtree(work, ignore_errors=True)
-        fake.shutdown()
+            warm_rows = rows.iloc[: args.n]
+            res["warm"] = strip(
+                run_batch(
+                    [proxy_url(proxy, r) for r in warm_rows.itertuples()], max(args.concurrency)
+                )
+            )
+
+            fl = rows.iloc[args.n * len(args.concurrency) :]
+            before = metrics(proxy)
+            lats = []
+            for r in fl.itertuples():
+                b = run_batch([proxy_url(proxy, r)] * args.flight_clients, args.flight_clients)
+                lats.append(b["p50_ms"])
+            after = metrics(proxy)
+            res["single_flight"] = {
+                "packages": len(fl),
+                "clients_per_package": args.flight_clients,
+                "requests": len(fl) * args.flight_clients,
+                "scans": int(
+                    after.get("customs_scan_duration_seconds_count", 0)
+                    - before.get("customs_scan_duration_seconds_count", 0)
+                ),
+                "joins": int(
+                    after.get("customs_singleflight_joins_total", 0)
+                    - before.get("customs_singleflight_joins_total", 0)
+                ),
+                "p50_ms": float(np.median(lats)),
+            }
+            print(json.dumps(res, indent=1))
+            (data / "work" / "loadtest.json").write_text(json.dumps(res, indent=1))
+        finally:
+            server.terminate()
+            server.wait(timeout=30)
+            shutil.rmtree(work, ignore_errors=True)
+            fake.shutdown()
 
 
 if __name__ == "__main__":

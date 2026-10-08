@@ -7,7 +7,7 @@
     customs-ml train                                             # every pipeline stage
     customs-ml report                                            # docs/EVALUATION.md
 
-All data goes under $CUSTOMS_DATA (default /tmp/customs-data).
+All data goes under $CUSTOMS_DATA (default: customs-data in the system temp directory).
 """
 
 from __future__ import annotations

@@ -80,7 +80,7 @@ class Registry:
             def do_GET(self):
                 path = urllib.parse.unquote(self.path.split("?", 1)[0])
                 if path.startswith("/npm/"):
-                    rest = path[len("/npm/"):]
+                    rest = path[len("/npm/") :]
                     if "/-/" in rest:
                         name, fname = rest.split("/-/", 1)
                         hit = reg.npm.get(name)
@@ -92,9 +92,15 @@ class Registry:
                         return self.send(404, b'{"error":"Not found"}')
                     v, fname, _ = hit
                     doc = {
-                        "name": rest, "dist-tags": {"latest": v},
-                        "versions": {v: {"name": rest, "version": v, "dist": {
-                            "tarball": f"{base}/npm/{rest}/-/{fname}"}}},
+                        "name": rest,
+                        "dist-tags": {"latest": v},
+                        "versions": {
+                            v: {
+                                "name": rest,
+                                "version": v,
+                                "dist": {"tarball": f"{base}/npm/{rest}/-/{fname}"},
+                            }
+                        },
                         "time": {"created": OLD, "modified": OLD, v: OLD},
                     }
                     return self.send(200, json.dumps(doc).encode())
@@ -105,13 +111,18 @@ class Registry:
                     if not hit:
                         return self.send(404, b'{"message":"Not Found"}')
                     v, fname, _ = hit
-                    f = {"filename": fname, "url": f"{base}/files/{key}/{fname}",
-                         "packagetype": "sdist", "upload_time_iso_8601": OLD,
-                         "upload_time": OLD[:19], "yanked": False}
+                    f = {
+                        "filename": fname,
+                        "url": f"{base}/files/{key}/{fname}",
+                        "packagetype": "sdist",
+                        "upload_time_iso_8601": OLD,
+                        "upload_time": OLD[:19],
+                        "yanked": False,
+                    }
                     doc = {"info": {"name": m[1], "version": v}, "releases": {v: [f]}, "urls": [f]}
                     return self.send(200, json.dumps(doc).encode())
                 if path.startswith("/files/"):
-                    p = reg.files.get(path[len("/files/"):])
+                    p = reg.files.get(path[len("/files/") :])
                     if p:
                         return self.send(200, p.read_bytes(), "application/octet-stream")
                 return self.send(404, b"{}")
@@ -138,15 +149,24 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=1)
     args = ap.parse_args()
 
-    data = Path(os.environ.get("CUSTOMS_DATA", "/tmp/customs-data"))
+    data = Path(os.environ.get("CUSTOMS_DATA") or Path(tempfile.gettempdir()) / "customs-data")
     df = pd.read_parquet(data / "work" / "dataset.parquet")
     if "augmented" in df:
         df = df[df.augmented.isna()]
-    test = df[(df.split_temporal == "test") & df.canonical_path.map(lambda p: bool(p) and Path(p).exists())]
-    rows = pd.concat([
-        test[test.label == 1].sample(min(args.n, (test.label == 1).sum()), random_state=args.seed),
-        test[test.label == 0].sample(min(args.n, (test.label == 0).sum()), random_state=args.seed),
-    ])
+    test = df[
+        (df.split_temporal == "test")
+        & df.canonical_path.map(lambda p: bool(p) and Path(p).exists())
+    ]
+    rows = pd.concat(
+        [
+            test[test.label == 1].sample(
+                min(args.n, (test.label == 1).sum()), random_state=args.seed
+            ),
+            test[test.label == 0].sample(
+                min(args.n, (test.label == 0).sum()), random_state=args.seed
+            ),
+        ]
+    )
     # One row per (ecosystem, name): the fake registry serves a single version per name.
     rows = rows.drop_duplicates(["ecosystem", "name"])
 
@@ -164,77 +184,105 @@ def main() -> None:
         f'pypi_json = "{base}/pypi"\nnpm = "{base}/npm"\n'
     )
     proxy = f"http://127.0.0.1:{args.port}"
-    server = subprocess.Popen(
-        [str(ROOT / "target/release/customs"), "serve", "--bind", f"127.0.0.1:{args.port}",
-         "--config", str(policy), "--data-dir", str(work / "data"),
-         "--ui-dir", str(ROOT / "web/dist"), "--models", str(ROOT / "models")],
-        stdout=subprocess.DEVNULL, stderr=open(work / "server.log", "w"),
-    )
-    try:
-        for _ in range(100):
-            try:
-                urllib.request.urlopen(f"{proxy}/healthz", timeout=1)
-                break
-            except OSError:
-                time.sleep(0.1)
-        out = []
-        t0 = time.time()
-        for r in rows.itertuples():
-            v = str(r.version)
-            if r.ecosystem == "npm":
-                bare = r.name.split("/", 1)[-1]
-                url = f"{proxy}/npm/{r.name}/-/{bare}-{v}.tgz"
-            else:
-                key = re.sub(r"[-_.]+", "-", r.name).lower()
-                url = f"{proxy}/pypi/files/{key}/{dist_name(r.name)}-{v}.tar.gz"
-            status, headers = fetch(url)
-            vid = headers.get("x-customs-verdict") or headers.get("X-Customs-Verdict")
-            verdict = {}
-            if vid:
-                with urllib.request.urlopen(f"{proxy}/api/verdicts/{vid}") as resp:
-                    verdict = json.load(resp)
-            out.append({
-                "name": r.name, "url": url,
-                "label": r.label, "ecosystem": r.ecosystem, "status": status,
-                "decision": verdict.get("decision"), "risk": verdict.get("risk"),
-                "py_risk": r.ens_risk_temporal,
-                "scores": verdict.get("scores"),
-                "py_logits": [r.gbdt_logit_temporal, r.cnn_logit_temporal, r.name_logit],
-            })
-        elapsed = time.time() - t0
-        res = pd.DataFrame(out)
-        ens = json.loads((ROOT / "models/ensemble.json").read_text())["thresholds"]
-        res["py_decision"] = np.select(
-            [res.py_risk >= ens["block"], res.py_risk >= ens["warn"]], ["block", "warn"], "allow")
-        ok = res.risk.notna()
-        summary = {
-            "requests": len(res),
-            "seconds_per_request": round(elapsed / max(len(res), 1), 3),
-            "malicious_blocked": float((res[res.label == 1].status == 403).mean()),
-            "malicious_block_or_warn": float(res[res.label == 1].decision.isin(["block", "warn"]).mean()),
-            "benign_blocked": float((res[res.label == 0].status == 403).mean()),
-            "benign_warned": float((res[res.label == 0].decision == "warn").mean()),
-            "decision_agreement_with_python": float((res.decision == res.py_decision)[ok].mean()),
-            "max_abs_risk_diff": float((res.risk - res.py_risk).abs()[ok].max()),
-        }
-        summary["status_counts"] = {str(k): int(v) for k, v in res.status.value_counts().items()}
-        summary["no_verdict"] = int((~ok).sum())
-        bad = res[~ok]
-        if len(bad):
-            print(bad.head(10).to_string())
-        print(json.dumps(summary, indent=1))
-        (data / "work" / "replay.json").write_text(json.dumps(summary, indent=1))
-        res.to_json(data / "work" / "replay_rows.jsonl", orient="records", lines=True)
-        if args.keep:
-            print(f"firewall running at {proxy} (pid {server.pid}); Ctrl-C to stop")
-            signal.pause()
-    finally:
-        if not args.keep:
-            server.terminate()
-            server.wait(timeout=30)
-            # The firewall's artifact cache holds every replayed archive.
-            shutil.rmtree(work, ignore_errors=True)
-        fake.shutdown()
+    with open(work / "server.log", "w") as log:
+        server = subprocess.Popen(
+            [
+                str(ROOT / "target/release/customs"),
+                "serve",
+                "--bind",
+                f"127.0.0.1:{args.port}",
+                "--config",
+                str(policy),
+                "--data-dir",
+                str(work / "data"),
+                "--ui-dir",
+                str(ROOT / "web/dist"),
+                "--models",
+                str(ROOT / "models"),
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=log,
+        )
+        try:
+            for _ in range(100):
+                try:
+                    urllib.request.urlopen(f"{proxy}/healthz", timeout=1)
+                    break
+                except OSError:
+                    time.sleep(0.1)
+            out = []
+            t0 = time.time()
+            for r in rows.itertuples():
+                v = str(r.version)
+                if r.ecosystem == "npm":
+                    bare = r.name.split("/", 1)[-1]
+                    url = f"{proxy}/npm/{r.name}/-/{bare}-{v}.tgz"
+                else:
+                    key = re.sub(r"[-_.]+", "-", r.name).lower()
+                    url = f"{proxy}/pypi/files/{key}/{dist_name(r.name)}-{v}.tar.gz"
+                status, headers = fetch(url)
+                vid = headers.get("x-customs-verdict") or headers.get("X-Customs-Verdict")
+                verdict = {}
+                if vid:
+                    with urllib.request.urlopen(f"{proxy}/api/verdicts/{vid}") as resp:
+                        verdict = json.load(resp)
+                out.append(
+                    {
+                        "name": r.name,
+                        "url": url,
+                        "label": r.label,
+                        "ecosystem": r.ecosystem,
+                        "status": status,
+                        "decision": verdict.get("decision"),
+                        "risk": verdict.get("risk"),
+                        "py_risk": r.ens_risk_temporal,
+                        "scores": verdict.get("scores"),
+                        "py_logits": [r.gbdt_logit_temporal, r.cnn_logit_temporal, r.name_logit],
+                    }
+                )
+            elapsed = time.time() - t0
+            res = pd.DataFrame(out)
+            ens = json.loads((ROOT / "models/ensemble.json").read_text())["thresholds"]
+            res["py_decision"] = np.select(
+                [res.py_risk >= ens["block"], res.py_risk >= ens["warn"]],
+                ["block", "warn"],
+                "allow",
+            )
+            ok = res.risk.notna()
+            summary = {
+                "requests": len(res),
+                "seconds_per_request": round(elapsed / max(len(res), 1), 3),
+                "malicious_blocked": float((res[res.label == 1].status == 403).mean()),
+                "malicious_block_or_warn": float(
+                    res[res.label == 1].decision.isin(["block", "warn"]).mean()
+                ),
+                "benign_blocked": float((res[res.label == 0].status == 403).mean()),
+                "benign_warned": float((res[res.label == 0].decision == "warn").mean()),
+                "decision_agreement_with_python": float(
+                    (res.decision == res.py_decision)[ok].mean()
+                ),
+                "max_abs_risk_diff": float((res.risk - res.py_risk).abs()[ok].max()),
+            }
+            summary["status_counts"] = {
+                str(k): int(v) for k, v in res.status.value_counts().items()
+            }
+            summary["no_verdict"] = int((~ok).sum())
+            bad = res[~ok]
+            if len(bad):
+                print(bad.head(10).to_string())
+            print(json.dumps(summary, indent=1))
+            (data / "work" / "replay.json").write_text(json.dumps(summary, indent=1))
+            res.to_json(data / "work" / "replay_rows.jsonl", orient="records", lines=True)
+            if args.keep:
+                print(f"firewall running at {proxy} (pid {server.pid}); Ctrl-C to stop")
+                signal.pause()
+        finally:
+            if not args.keep:
+                server.terminate()
+                server.wait(timeout=30)
+                # The firewall's artifact cache holds every replayed archive.
+                shutil.rmtree(work, ignore_errors=True)
+            fake.shutdown()
 
 
 if __name__ == "__main__":

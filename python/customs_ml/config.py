@@ -7,6 +7,7 @@ repository). Only trained model artifacts and aggregate metrics are written into
 from __future__ import annotations
 
 import os
+import tempfile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -15,7 +16,8 @@ DOCS_DIR = REPO_ROOT / "docs"
 
 
 def data_dir() -> Path:
-    root = Path(os.environ.get("CUSTOMS_DATA", "/tmp/customs-data"))
+    """``$CUSTOMS_DATA``, else ``customs-data`` in the system temp directory."""
+    root = Path(os.environ.get("CUSTOMS_DATA") or Path(tempfile.gettempdir()) / "customs-data")
     root.mkdir(parents=True, exist_ok=True)
     return root
 

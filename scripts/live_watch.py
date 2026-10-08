@@ -29,20 +29,18 @@ import time
 import urllib.error
 import urllib.request
 import xmlrpc.client
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 PYPI = "https://pypi.org"
 DELAY = 180  # seconds between a release event and its scan
-OSSF_TREE = (
-    "https://api.github.com/repos/ossf/malicious-packages/git/trees/main?recursive=1"
-)
+OSSF_TREE = "https://api.github.com/repos/ossf/malicious-packages/git/trees/main?recursive=1"
 OSSF_REPO = "https://github.com/ossf/malicious-packages"
 OSSF_RAW = "https://raw.githubusercontent.com/ossf/malicious-packages/main/"
 
 
 def now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 def post_json(url: str, body: dict, timeout: float = 180) -> tuple[int, dict]:
@@ -127,9 +125,7 @@ def watch(out: Path, server: str, workers: int, hours: float) -> None:
                 "risk": v.get("risk"),
                 "model_decision": v.get("model_decision"),
                 "scores": v.get("scores"),
-                "reasons": [
-                    r.get("label") or r.get("feature") for r in v.get("reasons", [])
-                ][:6],
+                "reasons": [r.get("label") or r.get("feature") for r in v.get("reasons", [])][:6],
                 "evidence": [
                     {k: e.get(k) for k in ("file", "line", "indicator", "snippet")}
                     for e in v.get("evidence", [])[:4]
@@ -147,7 +143,7 @@ def watch(out: Path, server: str, workers: int, hours: float) -> None:
 
     stop_at = time.time() + hours * 3600
     print(
-        f"watching from serial {serial} until {datetime.fromtimestamp(stop_at, timezone.utc)}",
+        f"watching from serial {serial} until {datetime.fromtimestamp(stop_at, UTC)}",
         flush=True,
     )
     while time.time() < stop_at:
@@ -202,17 +198,13 @@ def follow(out: Path) -> None:
     with (out / "followups.jsonl").open("a") as f:
         f.write(json.dumps(rec) + "\n")
     gone = sum(1 for s in status.values() if s == 404)
-    print(
-        f"{len(names)} names; {gone} removed; OSSF reports cover {len(ossf)} releases: {ossf}"
-    )
+    print(f"{len(names)} names; {gone} removed; OSSF reports cover {len(ossf)} releases: {ossf}")
 
 
 def ossf_pypi_reports() -> dict[str, list[str]]:
     """Report paths per lowercased PyPI name in OpenSSF malicious-packages: from the GitHub
     tree API, or, when that is unavailable, from a blobless clone (file names only)."""
-    req = urllib.request.Request(
-        OSSF_TREE, headers={"User-Agent": "customs-live-study"}
-    )
+    req = urllib.request.Request(OSSF_TREE, headers={"User-Agent": "customs-live-study"})
     try:
         with urllib.request.urlopen(req, timeout=120) as r:
             paths = [t["path"] for t in json.load(r)["tree"]]
@@ -234,9 +226,7 @@ def report_covers(report: dict, version: str) -> bool:
             return True
         for rng in a.get("ranges") or []:
             ev = rng.get("events") or []
-            if any(e.get("introduced") == "0" for e in ev) and not any(
-                "fixed" in e for e in ev
-            ):
+            if any(e.get("introduced") == "0" for e in ev) and not any("fixed" in e for e in ev):
                 return True
     return False
 
@@ -310,9 +300,7 @@ def report(out: Path) -> dict:
     import pandas as pd
 
     rows = pd.read_json(out / "scans.jsonl", lines=True)
-    ups = [
-        json.loads(line) for line in (out / "followups.jsonl").read_text().splitlines()
-    ]
+    ups = [json.loads(line) for line in (out / "followups.jsonl").read_text().splitlines()]
     last = ups[-1]
     first_gone: dict[str, str] = {}
     for u in ups:
@@ -321,9 +309,7 @@ def report(out: Path) -> dict:
                 first_gone[n] = u["checked_at"]
     rows["removed"] = rows.name.map(lambda n: last["status"].get(n) == 404)
     covered = set(last["ossf"])
-    rows["ossf"] = [
-        f"{n}=={v}" in covered for n, v in zip(rows.name, rows.version, strict=True)
-    ]
+    rows["ossf"] = [f"{n}=={v}" in covered for n, v in zip(rows.name, rows.version, strict=True)]
     scored = rows[rows.risk.notna()]
     state_path = out / "state.json"
     state = json.loads(state_path.read_text()) if state_path.exists() else {}
@@ -337,9 +323,7 @@ def report(out: Path) -> dict:
         "releases": len(rows),
         "scanned": len(scored),
         "new_projects": int(rows.new_project.sum()),
-        "decisions": {
-            k: int(v) for k, v in scored.model_decision.value_counts().items()
-        },
+        "decisions": {k: int(v) for k, v in scored.model_decision.value_counts().items()},
         "removed_by_decision": {
             k: {
                 "n": len(g),

@@ -37,12 +37,12 @@ import threading
 import time
 import urllib.request
 import zipfile
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-NOW = datetime.now(timezone.utc)
+NOW = datetime.now(UTC)
 
 
 def ago(**kw) -> str:
@@ -180,7 +180,8 @@ def wheel(
     dist = name.replace("-", "_")
     info = f"{dist}-{version}.dist-info"
     files = {
-        f"{dist}/__init__.py": f'__version__ = "{version}"\n\nfrom .text import chunks, plural, slugify, squash, truncate  # noqa: F401\n',
+        f"{dist}/__init__.py": f'__version__ = "{version}"\n\n'
+        "from .text import chunks, plural, slugify, squash, truncate  # noqa: F401\n",
         f"{dist}/text.py": PY_CODE,
         f"{info}/METADATA": "Metadata-Version: 2.1\n"
         f"Name: {name}\nVersion: {version}\n"
@@ -347,7 +348,10 @@ class Registry:
                 rows = reg.wheels.get(project)
                 if not rows:
                     return self.send(404, "Not Found", "text/plain")
-                url = lambda r: f"{reg.base}/files/packages/ab/cd/{r['filename']}"
+
+                def url(r):
+                    return f"{reg.base}/files/packages/ab/cd/{r['filename']}"
+
                 if "application/vnd.pypi.simple.v1+json" in self.headers.get("Accept", ""):
                     return self.send(
                         200,
