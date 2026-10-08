@@ -160,9 +160,116 @@ pub fn delta(prev: &Contents, cur: &Contents) -> (Contents, DeltaStats) {
     (out, stats)
 }
 
+/// One file in a [`FileDiff`]. Line counts are for text files whose content was read in
+/// full on both sides; a binary or unread file has none.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct FileChange {
+    pub path: String,
+    /// Size in the newer release (the older one for a removed file).
+    pub size: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lines_added: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lines_removed: Option<u64>,
+}
+
+/// Which files of a release are new, changed or gone relative to an earlier release.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct FileDiff {
+    pub added: Vec<FileChange>,
+    pub modified: Vec<FileChange>,
+    pub removed: Vec<FileChange>,
+    pub unchanged: u64,
+}
+
+fn count_lines(b: &[u8]) -> u64 {
+    if is_blank(b) {
+        return 0;
+    }
+    b.split(|&c| c == b'\n').filter(|l| !is_blank(l)).count() as u64
+}
+
+fn text_lines(e: &Entry) -> Option<u64> {
+    (!is_binary(e)).then(|| count_lines(&e.data))
+}
+
+/// File-level comparison of two releases' top-level entries, sorted by path.
+pub fn file_diff(prev: &Contents, cur: &Contents) -> FileDiff {
+    let index = |c: &Contents| -> std::collections::BTreeMap<String, Entry> {
+        c.entries
+            .iter()
+            .filter(|e| e.depth == 0)
+            .map(|e| (e.path.clone(), e.clone()))
+            .collect()
+    };
+    let (old, new) = (index(prev), index(cur));
+    let mut out = FileDiff::default();
+    for (path, e) in &new {
+        match old.get(path) {
+            None => out.added.push(FileChange {
+                path: path.clone(),
+                size: e.size,
+                lines_added: text_lines(e),
+                lines_removed: None,
+            }),
+            Some(o) if same(o, e) => out.unchanged += 1,
+            Some(o) => {
+                let text = !is_binary(e) && !is_binary(o);
+                out.modified.push(FileChange {
+                    path: path.clone(),
+                    size: e.size,
+                    lines_added: text.then(|| count_lines(&new_lines(&o.data, &e.data))),
+                    lines_removed: text.then(|| count_lines(&new_lines(&e.data, &o.data))),
+                });
+            }
+        }
+    }
+    for (path, o) in &old {
+        if !new.contains_key(path) {
+            out.removed.push(FileChange {
+                path: path.clone(),
+                size: o.size,
+                lines_added: None,
+                lines_removed: text_lines(o),
+            });
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_diff_lists_changes() {
+        let prev = contents(&[
+            ("index.js", b"a\nb\nc\n"),
+            ("README.md", b"same"),
+            ("old.js", b"x\ny\n"),
+        ]);
+        let cur = contents(&[
+            ("index.js", b"a\nc\nd\ne\n"),
+            ("README.md", b"same"),
+            ("setup.js", b"require('child_process')\n\nrun()\n"),
+            ("bin/tool", b"\x7fELF\x00\x01"),
+        ]);
+        let d = file_diff(&prev, &cur);
+        assert_eq!(d.unchanged, 1);
+        let added: Vec<(&str, Option<u64>)> = d
+            .added
+            .iter()
+            .map(|f| (f.path.as_str(), f.lines_added))
+            .collect();
+        assert_eq!(added, vec![("bin/tool", None), ("setup.js", Some(2))]);
+        assert_eq!(d.modified[0].path, "index.js");
+        assert_eq!(
+            (d.modified[0].lines_added, d.modified[0].lines_removed),
+            (Some(2), Some(1))
+        );
+        assert_eq!(d.removed[0].path, "old.js");
+        assert_eq!(d.removed[0].lines_removed, Some(2));
+    }
 
     fn entry(path: &str, data: &[u8]) -> Entry {
         Entry {

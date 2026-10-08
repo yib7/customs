@@ -29,6 +29,7 @@ use crate::util::{parse_ecosystem, registry_name};
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/check", post(check))
+        .route("/diff", get(diff))
         .route("/events", get(events))
         .route("/events/stream", get(events_stream))
         .route("/verdicts/{id}", get(verdict))
@@ -117,6 +118,53 @@ async fn check(
         )
             .into_response(),
         Ok(v) => Json(v).into_response(),
+        Err(e) => engine_error(e),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct DiffQuery {
+    ecosystem: String,
+    name: String,
+    /// Default: the release published before `to`.
+    from: Option<String>,
+    /// Exact version, range, dist-tag; default the newest.
+    to: Option<String>,
+    client: Option<String>,
+}
+
+async fn diff(
+    State(state): State<AppState>,
+    q: Result<Query<DiffQuery>, axum::extract::rejection::QueryRejection>,
+) -> Response {
+    let Query(q) = match q {
+        Ok(q) => q,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e.body_text()),
+    };
+    let Some(eco) = parse_ecosystem(&q.ecosystem) else {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            format!("unknown ecosystem '{}'", q.ecosystem),
+        );
+    };
+    let name = q.name.trim();
+    if name.is_empty() || name.len() > 214 || name.chars().any(char::is_whitespace) {
+        return api_error(StatusCode::BAD_REQUEST, "invalid package name");
+    }
+    let blank = |v: Option<String>| v.filter(|s| !s.trim().is_empty());
+    let client = q.client.or_else(|| Some("api".into()));
+    match state
+        .engine
+        .diff_releases(
+            eco,
+            name,
+            blank(q.from).as_deref(),
+            blank(q.to).as_deref(),
+            client,
+        )
+        .await
+    {
+        Ok(d) => Json(d).into_response(),
         Err(e) => engine_error(e),
     }
 }

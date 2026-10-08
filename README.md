@@ -87,6 +87,7 @@ customs doctor                             # find installs in this project that 
 customs check pypi reqeusts                # BLOCK: does not exist, 1 edit from 'requests'
 customs check npm left-pad                 # ALLOW
 customs scan ./some-package-1.0.tgz        # offline verdict for a local archive
+customs diff npm axios                     # what the newest release changes since the one before
 ```
 
 **Claude Code:** merge [`hooks/claude-code-settings.json`](hooks/claude-code-settings.json)
@@ -109,7 +110,7 @@ confirmation. A server set up for a team takes policy changes only with its admi
 can ask before it installs: `claude mcp add customs -- customs mcp`. Tools:
 `check_package`, `check_install_command` (parses a whole shell command),
 `explain_verdict`, `audit_lockfile` (every pin in a lockfile, including entries whose
-download URL serves another package) and `scan_archive`. Evidence quoted from package code is marked as
+download URL serves another package), `diff_release` and `scan_archive`. Evidence quoted from package code is marked as
 untrusted data and cut to one bounded line, so a malicious package cannot use its own
 source to prompt-inject the agent reading the verdict. See [`hooks/README.md`](hooks/README.md).
 
@@ -126,6 +127,15 @@ turns blocked dependencies into alerts on the lockfile line in the pull request:
 customs audit -r --fail-on warn                       # whole repo; exit 1 on warn or block
 customs audit -r --format sarif -o customs.sarif      # see docs/github-action.md
 ```
+
+**Release diffs.** A compromised release is usually a trusted package with a little
+added. `customs diff npm pkg` compares the newest release with the one before it, and
+`customs diff pypi pkg==2.0 --from 1.9` with the version you pin: files added, changed and
+removed, new or respecified dependencies, install scripts, a new publisher or dropped
+provenance, and the scanner findings and install-time code the older release did not
+have, followed by the verdict for the newer one. The same report is `GET /api/diff` and
+the `diff_release` MCP tool, so an agent bumping a dependency can show you what the
+upgrade brings in.
 
 **Alerts.** `customs serve --notify-url <webhook>` posts each block (or each warn, with
 `--notify-on warn`) to Slack, Discord or any JSON receiver, with the rule or model reason

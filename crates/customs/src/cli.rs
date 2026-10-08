@@ -42,6 +42,8 @@ pub enum Command {
     Serve(ServeArgs),
     /// Check one package: `customs check pypi requests==2.32.3`, `customs check npm @scope/pkg@^1`.
     Check(CheckArgs),
+    /// Show what a release changes relative to the one before it: `customs diff npm axios@1.14.1`, `customs diff pypi requests --from 2.31.0`.
+    Diff(DiffArgs),
     /// Check every package pinned in lockfiles or launched by MCP server configurations: `customs audit`, `customs audit -r --format sarif`.
     Audit(AuditArgs),
     /// Scan a local archive offline and print the verdict.
@@ -154,6 +156,24 @@ pub struct CheckArgs {
     #[arg(long)]
     pub json: bool,
     /// Server to ask; when unreachable the check runs in-process.
+    #[arg(long, default_value = DEFAULT_SERVER, env = "CUSTOMS_SERVER")]
+    pub server: String,
+    #[command(flatten)]
+    pub local: LocalArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct DiffArgs {
+    /// pypi or npm, or the whole spec as `<ecosystem>:<name>@<version>`.
+    pub ecosystem: String,
+    /// name, or name@version / name==version for the newer release (default: the newest).
+    pub package: Option<String>,
+    /// The earlier release (default: the one published before).
+    #[arg(long)]
+    pub from: Option<String>,
+    #[arg(long)]
+    pub json: bool,
+    /// Server to ask; when unreachable the diff runs in-process.
     #[arg(long, default_value = DEFAULT_SERVER, env = "CUSTOMS_SERVER")]
     pub server: String,
     #[command(flatten)]
@@ -321,6 +341,7 @@ pub async fn run(cli: Cli) -> i32 {
     let result = match cli.command {
         Command::Serve(a) => serve(a).await.map(|_| 0),
         Command::Check(a) => check(a).await,
+        Command::Diff(a) => diff(a).await,
         Command::Audit(a) => Ok(crate::audit::run(AuditOptions {
             paths: a.paths,
             recursive: a.recursive,
@@ -471,15 +492,7 @@ pub fn split_package_arg(eco: Ecosystem, s: &str) -> (String, Option<String>) {
 }
 
 async fn check(a: CheckArgs) -> anyhow::Result<i32> {
-    let (eco_str, package) = match &a.package {
-        Some(p) => (a.ecosystem.as_str(), p.as_str()),
-        None => a.ecosystem.split_once(':').ok_or_else(|| {
-            anyhow::anyhow!("expected `<ecosystem> <package>` or `<ecosystem>:<package>`")
-        })?,
-    };
-    let eco = parse_ecosystem(eco_str)
-        .ok_or_else(|| anyhow::anyhow!("unknown ecosystem '{eco_str}' (use pypi or npm)"))?;
-    let (name, version) = split_package_arg(eco, package);
+    let (eco, name, version) = package_spec(&a.ecosystem, a.package.as_deref())?;
     let checker = Checker::connect(&a.server, &a.local.options()).await?;
     let v = checker
         .check(eco, &name, version.as_deref(), "cli")
@@ -498,6 +511,39 @@ async fn check(a: CheckArgs) -> anyhow::Result<i32> {
         );
     }
     Ok(exit_code(v.decision))
+}
+
+fn package_spec<'a>(
+    ecosystem: &'a str,
+    package: Option<&'a str>,
+) -> anyhow::Result<(Ecosystem, String, Option<String>)> {
+    let (eco_str, package) = match package {
+        Some(p) => (ecosystem, p),
+        None => ecosystem.split_once(':').ok_or_else(|| {
+            anyhow::anyhow!("expected `<ecosystem> <package>` or `<ecosystem>:<package>`")
+        })?,
+    };
+    let eco = parse_ecosystem(eco_str)
+        .ok_or_else(|| anyhow::anyhow!("unknown ecosystem '{eco_str}' (use pypi or npm)"))?;
+    let (name, version) = split_package_arg(eco, package);
+    Ok((eco, name, version))
+}
+
+/// Exit code as for `check`, from the newer release's verdict.
+async fn diff(a: DiffArgs) -> anyhow::Result<i32> {
+    let (eco, name, to) = package_spec(&a.ecosystem, a.package.as_deref())?;
+    let checker = Checker::connect(&a.server, &a.local.options()).await?;
+    let d = checker
+        .diff(eco, &name, a.from.as_deref(), to.as_deref(), "cli")
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    if a.json {
+        println!("{}", serde_json::to_string_pretty(&d)?);
+    } else {
+        let url = d.verdict.as_ref().and_then(|v| checker.verdict_url(v.id));
+        print!("{}", crate::diff::render_text(&d, url.as_deref()));
+    }
+    Ok(d.verdict.as_ref().map_or(0, |v| exit_code(v.decision)))
 }
 
 /// 0 allow, 2 warn, 3 block (1 is reserved for errors).

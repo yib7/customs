@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, OnceCell};
 
 use crate::config::{Policy, RuleSeverity};
+use crate::diff::{ReleaseDiff, ReleaseSide};
 use crate::history::{release_history, DependencyInfo, ReleaseHistory, MAX_ADDED_LOOKUPS};
 use crate::metrics::Metrics;
 use crate::policy::{effective_thresholds, evaluate, PolicyContext};
@@ -902,6 +903,172 @@ impl Engine {
             })
             .await?;
         Ok(out.verdict)
+    }
+
+    /// What release `to` (default: the newest) changes relative to `from` (default: the
+    /// release published before it): registry metadata, dependencies, files, and the
+    /// scanner findings and install-time code `from` does not have. Both archives are
+    /// downloaded into the cache and scanned (the scans are cached as for any check), and
+    /// `to` is checked, so its verdict is recorded as well.
+    pub async fn diff_releases(
+        self: &Arc<Self>,
+        eco: Ecosystem,
+        name: &str,
+        from: Option<&str>,
+        to: Option<&str>,
+        client: Option<String>,
+    ) -> Result<ReleaseDiff, EngineError> {
+        let policy = self.policy();
+        let name = normalize_name(eco, name);
+        let Some(meta) = self
+            .registry
+            .package_meta(&policy.upstream, eco, &name)
+            .await?
+        else {
+            return Err(EngineError::NotFound(format!(
+                "'{name}' does not exist on {}",
+                crate::util::registry_name(eco)
+            )));
+        };
+        let to_v = match exact_version(&meta, to) {
+            Some(v) => v,
+            None => resolve_version(&meta, to).map_err(EngineError::Unresolvable)?,
+        };
+        let from_v = match from {
+            Some(f) => exact_version(&meta, Some(f))
+                .ok_or_else(|| EngineError::Unresolvable(format!("{name} has no version {f}")))?,
+            None => release_history(&meta, &to_v)
+                .and_then(|h| h.previous)
+                .map(|p| p.version)
+                .ok_or_else(|| {
+                    EngineError::Unresolvable(format!(
+                        "{name} {to_v} has no earlier release to compare with; pass --from"
+                    ))
+                })?,
+        };
+        if from_v == to_v {
+            return Err(EngineError::Unresolvable(format!(
+                "both sides are {name} {to_v}; name two different versions"
+            )));
+        }
+        let missing = |v: &str| EngineError::Unresolvable(format!("{name} has no version {v}"));
+        let vm_to = meta.version(&to_v).cloned().ok_or_else(|| missing(&to_v))?;
+        let vm_from = meta
+            .version(&from_v)
+            .cloned()
+            .ok_or_else(|| missing(&from_v))?;
+
+        let verdict = self
+            .check_resolving(eco, &name, Some(&to_v), client, false)
+            .await?;
+
+        let file_to = choose_file(eco, &vm_to.files).cloned();
+        // Compare like with like: the same kind of archive (sdist, or the wheel with the
+        // same tags) when the earlier release has one.
+        let file_from = file_to.as_ref().and_then(|t| {
+            let same_name = t.filename.replace(&to_v, &from_v);
+            let usable = |f: &&FileMeta| !f.url.is_empty();
+            vm_from
+                .files
+                .iter()
+                .filter(usable)
+                .find(|f| f.filename == same_name)
+                .or_else(|| {
+                    vm_from
+                        .files
+                        .iter()
+                        .filter(usable)
+                        .find(|f| f.packagetype == t.packagetype)
+                })
+                .or_else(|| choose_file(eco, &vm_from.files))
+                .cloned()
+        });
+        let mut d = ReleaseDiff {
+            ecosystem: eco,
+            name: name.clone(),
+            from: ReleaseSide {
+                version: from_v.clone(),
+                published: vm_from.published,
+                filename: file_from.as_ref().map(|f| f.filename.clone()),
+            },
+            to: ReleaseSide {
+                version: to_v.clone(),
+                published: vm_to.published,
+                filename: file_to.as_ref().map(|f| f.filename.clone()),
+            },
+            metadata: crate::diff::metadata_changes(&vm_from, &vm_to),
+            dependencies: crate::diff::dependency_changes(&vm_from, &vm_to),
+            files: None,
+            files_note: None,
+            new_evidence: Vec::new(),
+            new_install_surface: Vec::new(),
+            verdict: Some(verdict),
+        };
+        let (Some(file_from), Some(file_to)) = (file_from, file_to) else {
+            d.files_note = Some("a release has no downloadable files".into());
+            return Ok(d);
+        };
+        let limit = self.limits.max_check_bytes;
+        if let Some(big) = [&file_from, &file_to]
+            .into_iter()
+            .find(|f| f.size.is_some_and(|s| s > limit))
+        {
+            d.files_note = Some(format!(
+                "{} is above the {} MB check limit",
+                big.filename,
+                limit >> 20
+            ));
+            return Ok(d);
+        }
+        let (a, b) = tokio::join!(
+            self.fetch_artifact(&file_from.url, &file_from.filename),
+            self.fetch_artifact(&file_to.url, &file_to.filename)
+        );
+        let ((path_a, sha_a, size_a), (path_b, sha_b, size_b)) = (a?, b?);
+        let (scan_a, _) = self
+            .scan_cached(
+                eco,
+                &name,
+                Some(&from_v),
+                &sha_a,
+                &path_a,
+                &file_from.filename,
+                size_a,
+            )
+            .await?;
+        let (scan_b, _) = self
+            .scan_cached(
+                eco,
+                &name,
+                Some(&to_v),
+                &sha_b,
+                &path_b,
+                &file_to.filename,
+                size_b,
+            )
+            .await?;
+        d.new_evidence = crate::diff::new_evidence(&scan_a.evidence, &scan_b.evidence);
+        d.new_install_surface =
+            crate::diff::new_entries(&scan_a.install_surface, &scan_b.install_surface);
+        if size_a.max(size_b) > self.limits.max_scan_bytes {
+            d.files_note = Some(format!(
+                "an archive is above the {} MB scan limit",
+                self.limits.max_scan_bytes >> 20
+            ));
+            return Ok(d);
+        }
+        let (ra, rb) = tokio::join!(tokio::fs::read(&path_a), tokio::fs::read(&path_b));
+        let (bytes_a, bytes_b) = (ra.map_err(internal)?, rb.map_err(internal)?);
+        let files = tokio::task::spawn_blocking(move || {
+            customs_scan::diff_archives(&bytes_a, &bytes_b, &ScanOptions::default())
+        })
+        .await
+        .map_err(internal)?;
+        match files {
+            Ok(f) => d.files = Some(f),
+            Err(e) => d.files_note = Some(format!("the archives could not be read: {e}")),
+        }
+        Ok(d)
     }
 
     /// Scan a local archive without network access or persistence (`customs scan`).

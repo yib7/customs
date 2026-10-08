@@ -9,6 +9,7 @@ use customs_scan::Ecosystem;
 use serde_json::{json, Value};
 
 use crate::config::resolve_policy;
+use crate::diff::ReleaseDiff;
 use crate::engine::{default_scanner, load_models, Engine, EngineConfig, EngineError, Limits};
 use crate::metrics::Metrics;
 use crate::util::ecosystem_str;
@@ -170,14 +171,7 @@ impl Checker {
             Checker::Local(engine) => engine
                 .check_resolving(eco, name, version, Some(client.to_string()), false)
                 .await
-                .map_err(|e| match e {
-                    EngineError::NotFound(m)
-                    | EngineError::Unresolvable(m)
-                    | EngineError::TooLarge(m) => CheckError::Package(m),
-                    EngineError::Upstream(m) | EngineError::Internal(m) => {
-                        CheckError::Infrastructure(m)
-                    }
-                }),
+                .map_err(check_error),
             Checker::Remote { base, http, routed } => {
                 let resp = http
                     .post(format!("{base}/api/check"))
@@ -209,6 +203,77 @@ impl Checker {
                     }
                 }
                 let msg = parsed
+                    .and_then(|v| v.get("error").and_then(Value::as_str).map(str::to_string))
+                    .unwrap_or(body);
+                if matches!(status.as_u16(), 404 | 413 | 422) {
+                    Err(CheckError::Package(msg))
+                } else {
+                    Err(CheckError::Infrastructure(format!(
+                        "server returned {status}: {msg}"
+                    )))
+                }
+            }
+        }
+    }
+}
+
+fn check_error(e: EngineError) -> CheckError {
+    match e {
+        EngineError::NotFound(m) | EngineError::Unresolvable(m) | EngineError::TooLarge(m) => {
+            CheckError::Package(m)
+        }
+        EngineError::Upstream(m) | EngineError::Internal(m) => CheckError::Infrastructure(m),
+    }
+}
+
+impl Checker {
+    /// What release `to` (default: newest) changes relative to `from` (default: the
+    /// release before it); see [`Engine::diff_releases`].
+    pub async fn diff(
+        &self,
+        eco: Ecosystem,
+        name: &str,
+        from: Option<&str>,
+        to: Option<&str>,
+        client: &str,
+    ) -> Result<ReleaseDiff, CheckError> {
+        match self {
+            Checker::Local(engine) => engine
+                .diff_releases(eco, name, from, to, Some(client.to_string()))
+                .await
+                .map_err(check_error),
+            Checker::Remote { base, http, .. } => {
+                let mut query = vec![
+                    ("ecosystem", ecosystem_str(eco).to_string()),
+                    ("name", name.to_string()),
+                    ("client", client.to_string()),
+                ];
+                if let Some(f) = from {
+                    query.push(("from", f.to_string()));
+                }
+                if let Some(t) = to {
+                    query.push(("to", t.to_string()));
+                }
+                // Two downloads and two scans on a cold cache.
+                let resp = http
+                    .get(format!("{base}/api/diff"))
+                    .query(&query)
+                    .timeout(Duration::from_secs(180))
+                    .send()
+                    .await
+                    .map_err(|e| CheckError::Infrastructure(format!("calling {base}: {e}")))?;
+                let status = resp.status();
+                let body = resp
+                    .text()
+                    .await
+                    .map_err(|e| CheckError::Infrastructure(e.to_string()))?;
+                if status.is_success() {
+                    return serde_json::from_str(&body).map_err(|e| {
+                        CheckError::Infrastructure(format!("bad diff from server: {e}"))
+                    });
+                }
+                let msg = serde_json::from_str::<Value>(&body)
+                    .ok()
                     .and_then(|v| v.get("error").and_then(Value::as_str).map(str::to_string))
                     .unwrap_or(body);
                 if matches!(status.as_u16(), 404 | 413 | 422) {

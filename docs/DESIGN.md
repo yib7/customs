@@ -756,6 +756,28 @@ API (JSON). CORS allows only `http://localhost:5173` (the Vite dev server).
   in monitor mode or allow-list a package. `--allow-anonymous-policy-changes` lifts that
   for a container whose published port is itself bound to loopback. Reads and checks
   need no token.
+- `GET /api/diff?ecosystem=npm&name=pkg&to=1.0.1&from=1.0.0`: what release `to` (an
+  exact version, range or dist-tag; default the newest) changes relative to `from` (an
+  exact version; default the release published before `to`). Both archives are
+  downloaded into the cache and scanned with the usual scan cache, and `to` is checked as
+  `POST /api/check` would with `resolve: upstream`, so its verdict is recorded. Returns
+  `{ "ecosystem", "name", "from": { "version", "published", "filename" }, "to", "metadata":
+  [ { "field", "before", "after" } ], "dependencies": [ { "name", "before", "after" } ],
+  "files": { "added", "modified", "removed": [ { "path", "size", "lines_added?",
+  "lines_removed?" } ], "unchanged" }, "files_note", "new_evidence", "new_install_surface",
+  "verdict" }`. `metadata` covers the publisher, provenance and each install script;
+  `dependencies` the npm `dependencies` and `optionalDependencies` added, removed or
+  respecified. Files are compared by path at the top level of the archive (the same
+  depth-0 entries the delta scan reads, section 10.2) and counted in non-blank lines, with
+  a modified file's lines as a multiset difference; binary files have no line counts.
+  Archives are matched by kind (the same sdist or wheel tags when the earlier release has
+  them). `new_evidence` lists findings of `to` with no finding of the same indicator, file
+  and code in `from`, ignoring the line, since an edit above a finding moves it; both
+  sides come from capped evidence lists (50 items), so a release with more findings than
+  that can list some old ones as new. An archive above the check limit is not
+  downloaded and one above the scan limit is not compared; `files_note` says why. Errors:
+  404 for an unknown package, 422 for a version that does not resolve, no earlier
+  release, or `from` equal to `to`.
 - `GET /api/policy/changes?limit=50`: the policy changes accepted through `PUT`, newest
   first: `{ "changes": [ { "id", "ts", "remote", "client", "auth", "changes": [ { "field",
   "before", "after" } ] } ] }`. `remote` is the connection's address (a proxy in front
@@ -1094,6 +1116,7 @@ concurrently. Stdout carries protocol messages only; logs go to stderr.
 | `check_install_command` | `command`, `cwd?` | Parses the command with the hook parser (section 9), checks every target, returns a per-package table and the most severe decision |
 | `explain_verdict` | `id` | `GET /api/verdicts/{id}` on the server, rendered with reasons and evidence (file, line, snippet) |
 | `audit_lockfile` | `path`, `recursive?` | Same as `customs audit` (section 11) with the default 8 concurrent checks: the overall decision, a summary, and one row per package that is not allowed (mismatched download URLs included); allowed rows are only counted so a large lockfile stays small |
+| `diff_release` | `ecosystem`, `name`, `to?`, `from?` | Same as `customs diff` (`GET /api/diff`, section 7): the report as text, the diff as `structuredContent` |
 | `scan_archive` | `path`, `ecosystem?`, `name?` | Same as `customs scan`: offline, a throwaway engine, nothing stored |
 
 Checks go through the same `client::Checker` as `customs check` and the hook: the server at

@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-pub use delta::{new_lines, DeltaStats};
+pub use delta::{new_lines, DeltaStats, FileChange, FileDiff};
 pub use indicators::INDICATORS as INDICATOR_NAMES;
 pub use large::install_time_code;
 
@@ -336,6 +336,18 @@ pub fn scan_delta(
     let sha256 = hex(&Sha256::digest(cur));
     let report = Scanner::new(&d, ecosystem, opts).run(filename, sha256);
     Ok(DeltaScan { stats, report })
+}
+
+/// Which files of `cur` are new, changed or gone relative to `prev`, an earlier release
+/// of the same package. Both archives are read in full under the caps of `opts`.
+pub fn diff_archives(prev: &[u8], cur: &[u8], opts: &ScanOptions) -> Result<FileDiff, ScanError> {
+    let read = ScanOptions {
+        read_all: true,
+        ..opts.clone()
+    };
+    let prev_c = archive::read_archive(prev, &read)?;
+    let cur_c = archive::read_archive(cur, &read)?;
+    Ok(delta::file_diff(&prev_c, &cur_c))
 }
 
 fn hex(bytes: &[u8]) -> String {

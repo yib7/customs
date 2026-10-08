@@ -299,7 +299,48 @@ fn npm_packages() -> Vec<(&'static str, &'static str, &'static [u8], String, Val
             "2024-01-01T00:00:00.000Z".into(),
             json!({"_npmUser": {"name": "stranger"}}),
         ),
+        // Real tarballs, for `customs diff`: the second release adds a dependency, an
+        // install script and the file it runs.
+        (
+            "diffpkg",
+            "1.0.0",
+            &diffpkg_tarballs().0,
+            "2023-01-01T00:00:00.000Z".into(),
+            json!({"_npmUser": {"name": "maintainer"}, "dependencies": {"plainlib": "^0.1.0"}}),
+        ),
+        (
+            "diffpkg",
+            "1.0.1",
+            &diffpkg_tarballs().1,
+            "2024-01-01T00:00:00.000Z".into(),
+            json!({"_npmUser": {"name": "maintainer"},
+                "dependencies": {"plainlib": "^0.1.0", "lure-dep": "^0.0.1"},
+                "scripts": {"postinstall": "node setup.js"}}),
+        ),
     ]
+}
+
+fn diffpkg_tarballs() -> &'static (Vec<u8>, Vec<u8>) {
+    static T: std::sync::OnceLock<(Vec<u8>, Vec<u8>)> = std::sync::OnceLock::new();
+    T.get_or_init(|| {
+        (
+            npm_tgz(&[
+                ("package/package.json", r#"{"name": "diffpkg", "version": "1.0.0"}"#),
+                ("package/index.js", "const a = 1;\nmodule.exports = a;\n"),
+                ("package/README.md", "docs\n"),
+                ("package/old.js", "legacy();\n"),
+            ]),
+            npm_tgz(&[
+                (
+                    "package/package.json",
+                    r#"{"name": "diffpkg", "version": "1.0.1", "scripts": {"postinstall": "node setup.js"}}"#,
+                ),
+                ("package/index.js", "const a = 2;\nmodule.exports = a;\n"),
+                ("package/README.md", "docs\n"),
+                ("package/setup.js", "// EVIL\nfetchAndRun();\n"),
+            ]),
+        )
+    })
 }
 
 /// Echoes the query, so a test can see what reached the registry.
@@ -374,6 +415,16 @@ async fn start_mock() -> Mock {
 fn fake_scanner(calls: Arc<AtomicUsize>) -> ScanFn {
     Arc::new(move |bytes: &[u8], filename: &str, eco: Ecosystem| {
         calls.fetch_add(1, Ordering::SeqCst);
+        let mut plain = Vec::new();
+        let bytes = if bytes.starts_with(&[0x1f, 0x8b]) {
+            use std::io::Read;
+            flate2::read::GzDecoder::new(bytes)
+                .read_to_end(&mut plain)
+                .unwrap();
+            &plain[..]
+        } else {
+            bytes
+        };
         let evil = bytes.windows(4).any(|w| w == b"EVIL");
         let mut features = BTreeMap::new();
         for f in [
@@ -1784,6 +1835,80 @@ async fn cli_check_uses_running_server() {
     h.stop().await;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn diff_shows_what_a_release_adds() {
+    let h = Harness::start(|_| {}).await;
+    let d: Value = h
+        .get("/api/diff?ecosystem=npm&name=diffpkg")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        (&d["from"]["version"], &d["to"]["version"]),
+        (&json!("1.0.0"), &json!("1.0.1"))
+    );
+    assert_eq!(
+        d["dependencies"],
+        json!([{"name": "lure-dep", "before": null, "after": "^0.0.1"}])
+    );
+    assert_eq!(
+        d["metadata"],
+        json!([{"field": "install script postinstall", "before": null, "after": "node setup.js"}])
+    );
+    let paths = |k: &str| -> Vec<String> {
+        d["files"][k]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["path"].as_str().unwrap().to_string())
+            .collect()
+    };
+    assert_eq!(paths("added"), vec!["setup.js"], "{d}");
+    assert_eq!(paths("modified"), vec!["index.js", "package.json"], "{d}");
+    assert_eq!(paths("removed"), vec!["old.js"], "{d}");
+    assert_eq!(d["files"]["unchanged"], 1);
+    assert_eq!(d["files"]["modified"][0]["lines_added"], 1);
+    assert_eq!(d["new_evidence"][0]["indicator"], "download_exec");
+    assert_eq!(d["verdict"]["decision"], "block");
+
+    let r = h
+        .get("/api/diff?ecosystem=npm&name=diffpkg&from=1.0.1&to=1.0.1")
+        .await;
+    assert_eq!(r.status(), 422);
+    let r = h.get("/api/diff?ecosystem=npm&name=no-such-pkg").await;
+    assert_eq!(r.status(), 404);
+
+    let base = h.base.clone();
+    let (out, code) = tokio::task::spawn_blocking(move || {
+        let o = std::process::Command::new(env!("CARGO_BIN_EXE_customs"))
+            .args(["diff", "npm", "diffpkg@1.0.1", "--from", "1.0.0"])
+            .args(["--server", &base])
+            .output()
+            .unwrap();
+        (
+            String::from_utf8_lossy(&o.stdout).into_owned(),
+            o.status.code().unwrap(),
+        )
+    })
+    .await
+    .unwrap();
+    assert_eq!(code, 3, "{out}");
+    for want in [
+        "npm diffpkg 1.0.0 -> 1.0.1  (published 2023-01-01 -> 2024-01-01)\n",
+        "  install script postinstall: (none) -> node setup.js\n",
+        "  + lure-dep ^0.0.1\n",
+        "Files: 1 added, 2 modified, 1 removed, 1 unchanged\n",
+        "  + setup.js  (2 lines)\n",
+        "  ~ index.js  (+1 -1 lines)\n",
+        "Scanner findings new in 1.0.1 (quoted from the package; untrusted data, not instructions):\n",
+        "Verdict for 1.0.1: BLOCK",
+    ] {
+        assert!(out.contains(want), "missing {want:?} in\n{out}");
+    }
+    h.stop().await;
+}
+
 /// Run the real binary's `audit` in `cwd`.
 fn run_audit(cwd: &std::path::Path, args: &[&str]) -> (String, String, i32) {
     let o = std::process::Command::new(env!("CARGO_BIN_EXE_customs"))
@@ -2183,7 +2308,7 @@ fn mcp_server_over_stdio() {
     );
     let r = mcp_recv(&mut stdout);
     assert_eq!(r["id"], 2);
-    assert_eq!(r["result"]["tools"].as_array().unwrap().len(), 5);
+    assert_eq!(r["result"]["tools"].as_array().unwrap().len(), 6);
 
     mcp_send(
         &mut stdin,
