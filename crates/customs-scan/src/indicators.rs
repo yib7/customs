@@ -612,10 +612,12 @@ fn nested_code(toks: &[Token<'_>], lang: Lang, fa: &mut FileAnalysis, depth: u32
                 unescape_code(t.text)
             }
             // The encoded blob stays a string too: its length and entropy are evidence.
-            Encoding::Base64 => match decode_base64_text(t.text) {
-                Some(text) => std::borrow::Cow::Owned(text),
-                None => continue,
-            },
+            Encoding::Base64 | Encoding::Base64Deflated => {
+                match decode_base64_text(t.text, enc == Encoding::Base64Deflated) {
+                    Some(text) => std::borrow::Cow::Owned(text),
+                    None => continue,
+                }
+            }
         };
         let mut inner = FileAnalysis::default();
         analyze_source(&code, lang, &mut inner, depth + 1);
@@ -632,7 +634,21 @@ fn nested_code(toks: &[Token<'_>], lang: Lang, fa: &mut FileAnalysis, depth: u32
 pub(crate) enum Encoding {
     Plain,
     Base64,
+    /// Base64 over zlib, gzip or raw deflate data (`exec(zlib.decompress(b64decode(..)))`).
+    Base64Deflated,
 }
+
+/// Names of decompressors for deflate data in Python and Node.
+const INFLATERS: &[&str] = &[
+    "decompress",
+    "inflateSync",
+    "gunzipSync",
+    "unzipSync",
+    "inflateRawSync",
+];
+
+/// Most decompressed text read from one literal.
+const MAX_INFLATED: u64 = 1 << 20;
 
 /// Names of base64 decoders in Python and JavaScript.
 const B64_DECODERS: &[&str] = &[
@@ -679,8 +695,8 @@ pub(crate) fn literal_code(toks: &[Token<'_>], lang: Lang) -> Vec<(usize, Encodi
                 // The code is the first argument; the rest are scopes, a file name or a mode.
                 if is_str(i + 2) && (is(i + 3, ")") || is(i + 3, ",")) {
                     out.push((i + 2, Encoding::Plain));
-                } else if let Some(k) = base64_argument(toks, i + 1) {
-                    out.push((k, Encoding::Base64));
+                } else if let Some(found) = base64_argument(toks, i + 1) {
+                    out.push(found);
                 }
             }
             (Lang::Js, "Function") => {
@@ -691,8 +707,8 @@ pub(crate) fn literal_code(toks: &[Token<'_>], lang: Lang) -> Vec<(usize, Encodi
                 }
                 if is_str(k) && is(k + 1, ")") {
                     out.push((k, Encoding::Plain));
-                } else if let Some(k) = base64_argument(toks, i + 1) {
-                    out.push((k, Encoding::Base64));
+                } else if let Some(found) = base64_argument(toks, i + 1) {
+                    out.push(found);
                 }
             }
             _ => {}
@@ -705,21 +721,29 @@ pub(crate) fn literal_code(toks: &[Token<'_>], lang: Lang) -> Vec<(usize, Encodi
 }
 
 /// The one string literal inside the parenthesized argument list that opens at `open`,
-/// when that list also decodes base64 (a decoder name, or `'base64'` as an encoding).
-fn base64_argument(toks: &[Token<'_>], open: usize) -> Option<usize> {
+/// when that list also decodes base64 (a decoder name, or `'base64'` as an encoding), and
+/// whether the list also inflates the decoded bytes.
+fn base64_argument(toks: &[Token<'_>], open: usize) -> Option<(usize, Encoding)> {
     let mut depth = 0usize;
     let mut lit = None;
     let mut decodes = false;
+    let mut inflates = false;
     for (k, t) in toks.iter().enumerate().skip(open) {
         match (t.kind, t.text) {
             (TokKind::Punct, "(" | "[" | "{") => depth += 1,
             (TokKind::Punct, ")" | "]" | "}") => {
                 depth = depth.checked_sub(1)?;
                 if depth == 0 {
-                    return (decodes).then_some(lit?);
+                    let enc = if inflates {
+                        Encoding::Base64Deflated
+                    } else {
+                        Encoding::Base64
+                    };
+                    return decodes.then_some((lit?, enc));
                 }
             }
             (TokKind::Ident, name) if B64_DECODERS.contains(&name) => decodes = true,
+            (TokKind::Ident, name) if INFLATERS.contains(&name) => inflates = true,
             (TokKind::Str, "base64" | "base64url") => decodes = true,
             (TokKind::Str, text) if text.len() >= 16 => {
                 if lit.is_some() {
@@ -753,8 +777,9 @@ fn interpreter_list(toks: &[Token<'_>], c: usize) -> bool {
 }
 
 /// Decode a base64 literal (standard or URL-safe alphabet, whitespace and `\n` escapes
-/// ignored) to text; `None` unless it decodes cleanly to mostly printable UTF-8.
-pub(crate) fn decode_base64_text(s: &str) -> Option<String> {
+/// ignored) to text, inflating the bytes first when `inflate` is set; `None` unless it
+/// decodes cleanly to mostly printable UTF-8.
+pub(crate) fn decode_base64_text(s: &str, inflate: bool) -> Option<String> {
     let mut bits = 0u32;
     let mut nbits = 0u32;
     let mut out = Vec::with_capacity(s.len() / 4 * 3);
@@ -782,12 +807,31 @@ pub(crate) fn decode_base64_text(s: &str) -> Option<String> {
             bits &= (1 << nbits) - 1;
         }
     }
+    if inflate {
+        out = inflate_any(&out)?;
+    }
     let text = String::from_utf8(out).ok()?;
     let printable = text
         .chars()
         .filter(|c| !c.is_control() || c.is_whitespace())
         .count();
     (text.len() >= 8 && printable * 10 >= text.chars().count() * 9).then_some(text)
+}
+
+/// Inflate zlib, gzip or raw deflate bytes, reading at most [`MAX_INFLATED`] bytes out.
+fn inflate_any(data: &[u8]) -> Option<Vec<u8>> {
+    use flate2::read::{DeflateDecoder, GzDecoder, ZlibDecoder};
+    use std::io::Read;
+    let read = |r: &mut dyn Read| {
+        let mut out = Vec::new();
+        r.take(MAX_INFLATED).read_to_end(&mut out).ok()?;
+        (!out.is_empty()).then_some(out)
+    };
+    match data {
+        [0x1f, 0x8b, ..] => read(&mut GzDecoder::new(data)),
+        [0x78, ..] => read(&mut ZlibDecoder::new(data)),
+        _ => read(&mut DeflateDecoder::new(data)),
+    }
 }
 
 fn analyze_shell(text: &str, fa: &mut FileAnalysis) {
@@ -1621,6 +1665,14 @@ mod tests {
             let c = js(&wrapped);
             assert!(c[PROC_EXEC] >= 1 && c[URL] == 1, "{wrapped}");
         }
+        // Compressed before encoding: exec(zlib.decompress(b64decode(..))).
+        let c = py("import zlib, base64\n\
+                    exec(zlib.decompress(base64.b64decode(\
+                    'eJzLzC3ILypRKM5Pzk4t4YJQehBKQ1MvOT8vLzW5RENDKbUsM0cvtSIxtyAnVUlHwQQINDW5AM3KFM4=')))\n");
+        assert!(c[NETWORK] >= 1);
+        let c = js("eval(zlib.inflateSync(Buffer.from(\
+                    'eJwrSi0szSxK1VBPzsjMSYkvKMpPTi0uVtfUS61ITdZQz0xR1wQA7EoMPg==', 'base64')).toString())\n");
+        assert!(c[PROC_EXEC] >= 1);
         // Python run through an interpreter's -c flag (the litellm 1.82.8 .pth shape).
         let c = py("import subprocess, sys\n\
                     subprocess.Popen([sys.executable, '-c', 'import socket\\nsocket.socket()'])\n");
@@ -1636,17 +1688,25 @@ mod tests {
     #[test]
     fn base64_text_decoding() {
         assert_eq!(
-            decode_base64_text("aW1wb3J0IG9zCg==").as_deref(),
+            decode_base64_text("aW1wb3J0IG9zCg==", false).as_deref(),
             Some("import os\n")
         );
         assert_eq!(
-            decode_base64_text("aW1wb3J0\\nIG9zCg").as_deref(),
+            decode_base64_text("aW1wb3J0\\nIG9zCg", false).as_deref(),
             Some("import os\n")
         );
         // Not base64, too short, or binary once decoded.
-        assert_eq!(decode_base64_text("not base64 at all!"), None);
-        assert_eq!(decode_base64_text("aGk="), None);
-        assert_eq!(decode_base64_text("AAECAwQFBgcICQoLDA0ODw=="), None);
+        // zlib (Python zlib.compress) and gzip both inflate.
+        let z = "eJzLzC3ILypRKM5Pzk4t4YJQehBKQ1MvOT8vLzW5RENDKbUsM0cvtSIxtyAnVUlHwQQINDW5AM3KFM4=";
+        let g = "H4sIAAAAAAAC/8vMLcgvKlEozk/OTi3hglB6EEpDUy85Py8vNblEQ0MptSwzRy+1IjG3ICdVSUfBBAg0NbkABS4RFz4AAAA=";
+        for s in [z, g] {
+            let text = decode_base64_text(s, true).unwrap();
+            assert!(text.starts_with("import socket\n"));
+            assert_eq!(decode_base64_text(s, false), None);
+        }
+        assert_eq!(decode_base64_text("not base64 at all!", false), None);
+        assert_eq!(decode_base64_text("aGk=", false), None);
+        assert_eq!(decode_base64_text("AAECAwQFBgcICQoLDA0ODw==", false), None);
     }
 
     #[test]
