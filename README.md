@@ -80,7 +80,7 @@ flowchart LR
 ```sh
 cargo install --path crates/customs        # or: docker compose -f deploy/docker-compose.yml up
 customs serve                              # proxy, API and dashboard on http://127.0.0.1:7878
-eval "$(customs env)"                      # route pip, uv and npm through it
+eval "$(customs env)"                      # route pip, uv, pipenv, PDM, npm, pnpm, Yarn and Bun through it
 
 customs check pypi reqeusts                # BLOCK: does not exist, 1 edit from 'requests'
 customs check npm left-pad                 # ALLOW

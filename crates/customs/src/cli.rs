@@ -45,7 +45,7 @@ pub enum Command {
     Audit(AuditArgs),
     /// Scan a local archive offline and print the verdict.
     Scan(ScanArgs),
-    /// Print shell exports that route pip, uv, and npm through the proxy.
+    /// Print shell exports that route pip, uv, pipenv, PDM, npm, pnpm, Yarn and Bun through the proxy.
     Env(EnvArgs),
     /// Model Context Protocol server on stdio, so agents can check packages before installing.
     Mcp(McpArgs),
@@ -499,16 +499,32 @@ pub fn pretty(v: &Verdict, url: Option<&str>, via: &str) -> String {
     s
 }
 
-/// Shell exports for pip, uv, and npm.
+/// Shell exports that send pip, uv, pipenv, PDM, npm, pnpm, Yarn and Bun through the
+/// proxy. Bun, pnpm and Yarn 1 read `npm_config_registry`; Yarn 2+ reads only its own
+/// variables and refuses plain-HTTP registries other than localhost unless whitelisted.
+/// Pipenv takes its index from the Pipfile and ignores `PIP_INDEX_URL` unless
+/// `PIPENV_PYPI_MIRROR` replaces pypi.org.
 pub fn env_exports(server: &str, shell: ShellArg) -> String {
     let base = server.trim_end_matches('/');
-    let vars = [
-        ("PIP_INDEX_URL", format!("{base}/pypi/simple")),
-        ("UV_INDEX_URL", format!("{base}/pypi/simple")),
-        ("UV_DEFAULT_INDEX", format!("{base}/pypi/simple")),
-        ("npm_config_registry", format!("{base}/npm/")),
-        ("CUSTOMS_SERVER", base.to_string()),
+    let simple = format!("{base}/pypi/simple");
+    let npm = format!("{base}/npm/");
+    let mut vars = vec![
+        ("PIP_INDEX_URL", simple.clone()),
+        ("UV_INDEX_URL", simple.clone()),
+        ("UV_DEFAULT_INDEX", simple.clone()),
+        ("PIPENV_PYPI_MIRROR", simple.clone()),
+        ("PDM_PYPI_URL", simple),
+        ("npm_config_registry", npm.clone()),
+        ("YARN_NPM_REGISTRY_SERVER", npm),
     ];
+    if let Ok(u) = url::Url::parse(base) {
+        if u.scheme() == "http" {
+            if let Some(host) = u.host_str() {
+                vars.push(("YARN_UNSAFE_HTTP_WHITELIST", host.to_string()));
+            }
+        }
+    }
+    vars.push(("CUSTOMS_SERVER", base.to_string()));
     let mut out = String::new();
     for (k, v) in vars {
         out.push_str(&match shell {
@@ -554,6 +570,11 @@ mod tests {
         assert!(e.contains("export PIP_INDEX_URL=\"http://127.0.0.1:7878/pypi/simple\""));
         assert!(e.contains("export npm_config_registry=\"http://127.0.0.1:7878/npm/\""));
         assert!(e.contains("UV_INDEX_URL"));
+        assert!(e.contains("export PIPENV_PYPI_MIRROR=\"http://127.0.0.1:7878/pypi/simple\""));
+        assert!(e.contains("export YARN_NPM_REGISTRY_SERVER=\"http://127.0.0.1:7878/npm/\""));
+        assert!(e.contains("export YARN_UNSAFE_HTTP_WHITELIST=\"127.0.0.1\""));
+        // Yarn needs no exception for an HTTPS proxy.
+        assert!(!env_exports("https://customs.example", ShellArg::Sh).contains("WHITELIST"));
         assert!(env_exports("http://h", ShellArg::Fish).contains("set -gx PIP_INDEX_URL"));
     }
 

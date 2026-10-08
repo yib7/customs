@@ -121,7 +121,7 @@ pub fn tool_definitions() -> Value {
                     "ecosystem": {
                         "type": "string",
                         "enum": ["pypi", "npm"],
-                        "description": "Registry: pypi for pip, uv and poetry; npm for npm, pnpm, yarn and bun."
+                        "description": "Registry: pypi for pip, uv, poetry and pipenv; npm for npm, pnpm, yarn and bun."
                     },
                     "name": {
                         "type": "string",
@@ -140,7 +140,7 @@ pub fn tool_definitions() -> Value {
         {
             "name": "check_install_command",
             "title": "Check an install command",
-            "description": "Check every package a shell command would install before you run it or suggest it to the user. Understands pip, pip3, python -m pip, uv (pip install, add, tool install, run --with), uvx, poetry, pdm, pipx, npm, pnpm, yarn, bun, bunx and npx, requirements files (-r), chained commands (&&, ;, pipes) and wrappers such as sudo, env or bash -c. Returns one row per package and the overall decision, which is the most severe one: block means do not run the command, warn means ask the user first, allow means no known problems. Git URLs, local paths and custom indexes cannot be checked and come back as warn. A command that installs nothing returns allow with no rows.",
+            "description": "Check every package a shell command would install before you run it or suggest it to the user. Understands pip, pip3, python -m pip, uv (pip install, add, tool install, run --with), uvx, poetry, pipenv, pdm, pipx, npm, pnpm, yarn, bun, bunx and npx, requirements files (-r), chained commands (&&, ;, pipes) and wrappers such as sudo, env or bash -c. Project installs (npm ci, npm install with no names, uv sync, poetry install, pipenv install, pip install -e .) are checked against the project's lockfile and manifest. Returns one row per package and the overall decision, which is the most severe one: block means do not run the command, warn means ask the user first, allow means no known problems. Git URLs, local paths and custom indexes cannot be checked and come back as warn. A command that installs nothing returns allow with no rows.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

@@ -1,11 +1,11 @@
 # Customs: design
 
 Customs is a package firewall for AI coding agents. It sits between a package manager
-(pip, uv, npm, pnpm, yarn) and the public registry, inspects every package archive before
-it reaches the machine, and blocks archives that a malware classifier trained on real
-malicious packages scores as dangerous. It also plugs into Claude Code as a PreToolUse hook,
-so an agent that tries to `pip install` a hallucinated or malicious package is stopped
-before the command runs.
+(pip, uv, pipenv, PDM, npm, pnpm, Yarn, Bun) and the public registry, inspects every package
+archive before it reaches the machine, and blocks archives that a malware classifier trained
+on real malicious packages scores as dangerous. It also plugs into Claude Code as a
+PreToolUse hook, so an agent that tries to `pip install` a hallucinated or malicious package
+is stopped before the command runs.
 
 This document is the contract between components. Anything that crosses a component
 boundary (feature names, artifact formats, HTTP routes, JSON shapes) is defined here.
@@ -620,6 +620,16 @@ API (JSON). CORS allows only `http://localhost:5173` (the Vite dev server).
   `GET /healthz`: `{ "status": "ok", "version", "model_version", "mode" }`.
 - `GET /` and static assets: the dashboard from `--ui-dir` (default `web/dist`), with
   unknown non-API paths served `index.html`; a placeholder page when it is not built.
+
+Clients: `customs env` prints the variables that point installers at the proxy, checked with
+real installs through it. pip and pipx read `PIP_INDEX_URL`; uv `UV_DEFAULT_INDEX` (and the
+older `UV_INDEX_URL`); PDM `PDM_PYPI_URL`. Pipenv installs from the Pipfile's `[[source]]` and
+ignores `PIP_INDEX_URL`; `PIPENV_PYPI_MIRROR` replaces pypi.org there. npm, pnpm, Yarn 1 and
+Bun read `npm_config_registry`. Yarn 2 and later read only `YARN_NPM_REGISTRY_SERVER`, and
+refuse a plain-HTTP registry on any host but `localhost` until it is listed in
+`YARN_UNSAFE_HTTP_WHITELIST`, which is set for an `http://` server. Poetry has no
+environment variable that replaces PyPI, so `poetry install` goes straight to pypi.org; the
+Claude Code hook (section 9) still checks every `poetry.lock` pin before the command runs.
 
 Caching: archives are stored by sha256 under `<data-dir>/cache`, verdict inputs (scan and
 model output) in SQLite keyed by (ecosystem, name, version, sha256, model_version).

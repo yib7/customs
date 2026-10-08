@@ -1,6 +1,8 @@
 # Customs plus Prometheus scraping its /metrics endpoint.
 #   docker compose -f deploy/docker-compose.yml up --build
 # Then point package managers at it:
+#   eval "$(customs env --server http://localhost:7878)"
+# or, without the binary:
 #   export PIP_INDEX_URL=http://localhost:7878/pypi/simple
 #   export npm_config_registry=http://localhost:7878/npm/
 services:
