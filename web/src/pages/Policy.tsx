@@ -510,8 +510,8 @@ function PolicyForm({
             History window (days)
           </label>
           <p className="text-xs text-muted">
-            Provenance, publisher, revival and version rules apply to releases this recent. Install scripts and dependencies
-            are checked at any age. 0 applies all rules at any age.
+            Provenance, publisher, revival, version and new dependency rules apply to releases this recent. Install scripts
+            and git or URL dependencies are checked at any age. 0 applies all rules at any age.
           </p>
           <input
             id="history-window-days"

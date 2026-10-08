@@ -245,12 +245,14 @@ pub struct Policy {
     pub dormant_revival: RuleSeverity,
     #[serde(default = "default_dormant_days")]
     pub dormant_days: u32,
-    /// `provenance_dropped`, `publisher_changed`, `dormant_revival` and `version_anomaly`
-    /// apply to releases published within this many days (0: any age). They are
-    /// circumstantial signs of a takeover, and a hijacked release is found and pulled
-    /// within days; one that has stayed on the registry past the window is the package's
-    /// accepted history. The rules about code that runs at install (install scripts,
-    /// dependencies) apply at any age.
+    /// `provenance_dropped`, `publisher_changed`, `dormant_revival`, `version_anomaly` and
+    /// `young_dependency_added` apply to releases published within this many days (0: any
+    /// age). They are circumstantial signs of a takeover, and a hijacked release is found
+    /// and pulled within days; one that has stayed on the registry past the window is the
+    /// package's accepted history (and a dependency added then is no longer young, and is
+    /// checked itself when installed). `install_script_added` and
+    /// `nonregistry_dependency_added` apply at any age: what they flag runs at install or
+    /// is fetched without passing the proxy.
     #[serde(default = "default_history_window_days")]
     pub history_window_days: u32,
     /// Jumps of more than one major version, and releases on an old major line that had

@@ -208,7 +208,11 @@ pub fn history_hits(
     let mut hit = |rule: &str, severity: RuleSeverity, detail: String| {
         let circumstantial = matches!(
             rule,
-            "provenance_dropped" | "publisher_changed" | "dormant_revival" | "version_anomaly"
+            "provenance_dropped"
+                | "publisher_changed"
+                | "dormant_revival"
+                | "version_anomaly"
+                | "young_dependency_added"
         );
         if circumstantial && !recent {
             return;
@@ -1008,8 +1012,9 @@ mod tests {
         let mut h = release_history(&m, "1.0.1").unwrap();
         let t = |s: &str| s.parse::<DateTime<Utc>>().unwrap();
         let p = Policy::default();
+        let now = t("2025-03-02T00:00:00Z");
         // Not looked up yet: nothing to judge.
-        assert!(history_hits(&p, Ecosystem::Npm, &h, Utc::now()).is_empty());
+        assert!(history_hits(&p, Ecosystem::Npm, &h, now).is_empty());
         for d in h.added_dependencies.iter_mut() {
             d.info = Some(match d.name.as_str() {
                 "lure" => DependencyInfo {
@@ -1030,7 +1035,7 @@ mod tests {
                 },
             });
         }
-        let hits = history_hits(&p, Ecosystem::Npm, &h, Utc::now());
+        let hits = history_hits(&p, Ecosystem::Npm, &h, now);
         assert_eq!(rules(&hits), vec!["young_dependency_added"]);
         assert_eq!(
             hits[0].detail,
@@ -1038,7 +1043,7 @@ mod tests {
         );
         // A dependency the registry does not know.
         h.added_dependencies[0].info = Some(DependencyInfo::default());
-        let hits = history_hits(&p, Ecosystem::Npm, &h, Utc::now());
+        let hits = history_hits(&p, Ecosystem::Npm, &h, now);
         assert!(
             hits[0].detail.contains("lure is not on the registry"),
             "{}",
@@ -1050,13 +1055,24 @@ mod tests {
             created: Some(t("2025-02-20T00:00:00Z")),
             people: vec![],
         });
-        assert!(history_hits(&p, Ecosystem::Npm, &h, Utc::now()).is_empty());
+        assert!(history_hits(&p, Ecosystem::Npm, &h, now).is_empty());
         let wide = Policy {
             young_dependency_days: 30,
             ..Policy::default()
         };
         assert_eq!(
-            rules(&history_hits(&wide, Ecosystem::Npm, &h, Utc::now())),
+            rules(&history_hits(&wide, Ecosystem::Npm, &h, now)),
+            vec!["young_dependency_added"]
+        );
+        // A release past the history window is the package's accepted history.
+        let later = t("2025-06-01T00:00:00Z");
+        assert!(history_hits(&wide, Ecosystem::Npm, &h, later).is_empty());
+        let always = Policy {
+            history_window_days: 0,
+            ..wide
+        };
+        assert_eq!(
+            rules(&history_hits(&always, Ecosystem::Npm, &h, later)),
             vec!["young_dependency_added"]
         );
     }

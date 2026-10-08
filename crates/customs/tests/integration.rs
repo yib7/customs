@@ -218,6 +218,8 @@ async fn files(State(m): State<Mock>, Path(path): Path<String>) -> Response {
 fn npm_packages() -> Vec<(&'static str, &'static str, &'static [u8], String, Value)> {
     let old = "2019-05-01T00:00:00.000Z".to_string();
     let fresh = (Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+    // Inside the history rules' 90-day window.
+    let recent = chrono::DateTime::from_timestamp(Utc::now().timestamp() - 10 * 86_400, 0).unwrap();
     let attested = json!({"attestations": {"url": "https://r/attestations/x", "provenance": {}}});
     vec![
         (
@@ -298,7 +300,7 @@ fn npm_packages() -> Vec<(&'static str, &'static str, &'static [u8], String, Val
             "depjack",
             "2.0.1",
             b"benign depjack 2.0.1",
-            "2024-01-02T00:00:00.000Z".into(),
+            recent.to_rfc3339(),
             json!({"_npmUser": {"name": "maintainer"}, "dependencies":
                 {"plainlib": "^0.1.0", "lure-dep": "^0.0.1"},
                 "optionalDependencies": {"@depjack/setup": "github:evil/payload#abc"}}),
@@ -307,7 +309,7 @@ fn npm_packages() -> Vec<(&'static str, &'static str, &'static [u8], String, Val
             "lure-dep",
             "0.0.1",
             b"benign lure",
-            "2024-01-01T00:00:00.000Z".into(),
+            (recent - chrono::Duration::days(1)).to_rfc3339(),
             json!({"_npmUser": {"name": "stranger"}}),
         ),
         // Real tarballs, for `customs diff`: the second release adds a dependency, an
