@@ -18,6 +18,7 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, OnceCell};
 
+use crate::audit;
 use crate::cli::{scan_file, split_package_arg};
 use crate::client::{is_loopback, CheckError, Checker, LocalOptions};
 use crate::engine::Limits;
@@ -108,6 +109,9 @@ impl ToolOutput {
     }
 }
 
+/// Concurrent checks for `audit_lockfile`, the `customs audit` default.
+const AUDIT_JOBS: usize = 8;
+
 /// `tools/list` entries. Descriptions are written for the model that reads them.
 pub fn tool_definitions() -> Value {
     json!([
@@ -175,6 +179,27 @@ pub fn tool_definitions() -> Value {
                 "additionalProperties": false
             },
             "annotations": { "readOnlyHint": true, "openWorldHint": false }
+        },
+        {
+            "name": "audit_lockfile",
+            "title": "Audit a lockfile",
+            "description": "Check every package a lockfile pins: package-lock.json, npm-shrinkwrap.json, yarn.lock, pnpm-lock.yaml, bun.lock, requirements.txt, poetry.lock, uv.lock, Pipfile.lock or pylock.toml. Pass a lockfile or a project directory. Use it before installing a project you did not write, and when reviewing a change that edits a lockfile: an entry whose download URL serves a different package than the one it names (lockfile injection) is a block. Returns the overall decision with one row per package that is not allowed; allowed packages are only counted. Git, URL and local entries cannot be checked and are listed. Packages not seen before take a few seconds each, eight at a time.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "A lockfile, or a directory to look for lockfiles in. Absolute or relative to the server's working directory."
+                    },
+                    "recursive": {
+                        "type": "boolean",
+                        "description": "Also search subdirectories of a directory (node_modules and hidden folders are skipped). Default false."
+                    }
+                },
+                "required": ["path"],
+                "additionalProperties": false
+            },
+            "annotations": { "readOnlyHint": true, "openWorldHint": true }
         },
         {
             "name": "scan_archive",
@@ -247,6 +272,13 @@ struct CheckCommandArgs {
 #[derive(Debug, Deserialize)]
 struct ExplainArgs {
     id: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct AuditArgs {
+    path: String,
+    #[serde(default)]
+    recursive: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -372,6 +404,7 @@ impl McpServer {
             "check_install_command" => self.check_command(parse_args(name, args)?).await,
             "explain_verdict" => self.explain(parse_args(name, args)?).await,
             "scan_archive" => self.scan(parse_args(name, args)?).await,
+            "audit_lockfile" => self.audit(parse_args(name, args)?).await,
             _ => Err(invalid_params(format!("unknown tool '{name}'"))),
         }
     }
@@ -521,6 +554,58 @@ impl McpServer {
             Ok(v) => ToolOutput::ok(explain_text(&v, Some(&url)), to_json(&v)),
             Err(e) => ToolOutput::error(format!("bad verdict from {url}: {e}")),
         })
+    }
+
+    async fn audit(&self, a: AuditArgs) -> Result<ToolOutput, RpcError> {
+        let files = match audit::find_lockfiles(&[PathBuf::from(&a.path)], a.recursive) {
+            Ok(f) => f,
+            Err(e) => return Ok(ToolOutput::error(e)),
+        };
+        let parsed = match audit::collect(&files) {
+            Ok(p) => p,
+            Err(errors) => return Ok(ToolOutput::error(errors.join("\n"))),
+        };
+        let mut findings = audit::mismatch_findings(parsed.mismatches);
+        let via = if parsed.deps.is_empty() {
+            "nothing to check".to_string()
+        } else {
+            let checker = match self.checker().await {
+                Ok(c) => c,
+                Err(e) => return Ok(ToolOutput::error(format!("{e:#}"))),
+            };
+            findings.extend(audit::check_all(checker, parsed.deps, AUDIT_JOBS).await);
+            checker.describe()
+        };
+        let report = audit::Report {
+            files,
+            findings,
+            skipped: parsed.skipped,
+            via,
+        };
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let decision = report.decision();
+        let mut text = format!("Decision: {}. {}\n", decision.as_str(), guidance(decision));
+        if report.failed() > 0 {
+            text.push_str(&format!(
+                "{} check(s) failed, so this result is incomplete.\n",
+                report.failed()
+            ));
+        }
+        text.push('\n');
+        text.push_str(&audit::render_text(&report, &cwd));
+        // Allowed rows and full verdicts would swamp a large lockfile; the text and the
+        // verdict URLs carry the rest.
+        let mut json = audit::render_json(&report, &cwd);
+        if let Some(rows) = json["results"].as_array_mut() {
+            rows.retain(|r| r["status"] != "allow");
+            for r in rows.iter_mut() {
+                if let Some(o) = r.as_object_mut() {
+                    o.remove("verdict");
+                }
+            }
+        }
+        json["decision"] = json!(decision.as_str());
+        Ok(ToolOutput::ok(text, json))
     }
 
     async fn scan(&self, a: ScanArchiveArgs) -> Result<ToolOutput, RpcError> {
@@ -1105,6 +1190,7 @@ mod tests {
                 "check_package",
                 "check_install_command",
                 "explain_verdict",
+                "audit_lockfile",
                 "scan_archive"
             ]
         );
@@ -1120,6 +1206,42 @@ mod tests {
             tools[0]["inputSchema"]["properties"]["ecosystem"]["enum"],
             json!(["pypi", "npm"])
         );
+    }
+
+    #[tokio::test]
+    async fn audit_lockfile_flags_injected_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        // A registry URL that is not a tarball: a mismatch with nothing left to check, so
+        // no server is needed.
+        std::fs::write(
+            dir.path().join("package-lock.json"),
+            r#"{"lockfileVersion": 3, "packages": {"": {"name": "app"},
+                "node_modules/ms": {"version": "2.1.2", "resolved": "https://registry.npmjs.org/ms"}}}"#,
+        )
+        .unwrap();
+        let s = server();
+        let r = tool(&s, "audit_lockfile", json!({"path": dir.path()})).await;
+        let res = &r["result"];
+        assert_eq!(res["isError"], false, "{r}");
+        let text = res["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.starts_with("Decision: block. Do not install it."),
+            "{text}"
+        );
+        let out = &res["structuredContent"];
+        assert_eq!(out["decision"], "block");
+        assert_eq!(out["via"], "nothing to check");
+        assert_eq!(out["results"][0]["name"], "ms");
+        assert_eq!(out["results"][0]["status"], "mismatch");
+        assert!(out["results"][0].get("verdict").is_none());
+
+        let r = tool(
+            &s,
+            "audit_lockfile",
+            json!({"path": dir.path().join("none")}),
+        )
+        .await;
+        assert_eq!(r["result"]["isError"], true, "{r}");
     }
 
     #[tokio::test]

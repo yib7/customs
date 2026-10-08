@@ -99,6 +99,7 @@ client: Claude Code, Claude Desktop, Cursor, and others.
 | `check_package` | Check one package (`ecosystem`, `name`, optional `version`) |
 | `check_install_command` | Check every package a shell command would install |
 | `explain_verdict` | Reasons and code evidence for a verdict id (needs `customs serve`) |
+| `audit_lockfile` | Check every package a lockfile or project directory pins, e.g. when reviewing a change to a lockfile |
 | `scan_archive` | Scan a local archive file offline |
 
 A block is an ordinary answer; a tool reports an error only when the check itself failed.

@@ -816,6 +816,7 @@ concurrently. Stdout carries protocol messages only; logs go to stderr.
 | `check_package` | `ecosystem` (`pypi`/`npm`), `name`, `version?` | Same path as `customs check`: summary text (decision, risk, top reasons, policy hits, nearest popular name for a typosquat or nonexistent name) plus the verdict as `structuredContent` |
 | `check_install_command` | `command`, `cwd?` | Parses the command with the hook parser (section 9), checks every target, returns a per-package table and the most severe decision |
 | `explain_verdict` | `id` | `GET /api/verdicts/{id}` on the server, rendered with reasons and evidence (file, line, snippet) |
+| `audit_lockfile` | `path`, `recursive?` | Same as `customs audit` (section 11) with the default 8 concurrent checks: the overall decision, a summary, and one row per package that is not allowed (mismatched download URLs included); allowed rows are only counted so a large lockfile stays small |
 | `scan_archive` | `path`, `ecosystem?`, `name?` | Same as `customs scan`: offline, a throwaway engine, nothing stored |
 
 Checks go through the same `client::Checker` as `customs check` and the hook: the server at

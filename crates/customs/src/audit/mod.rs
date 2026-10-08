@@ -738,6 +738,33 @@ pub async fn check_all(checker: &Checker, deps: Vec<Dependency>, jobs: usize) ->
         .await
 }
 
+/// Lockfile entries that install another package than they name, as block findings.
+pub fn mismatch_findings(mismatches: Vec<Mismatch>) -> Vec<Finding> {
+    mismatches
+        .into_iter()
+        .map(|m| Finding {
+            dep: m.dep,
+            outcome: Outcome::Mismatch(m.message),
+        })
+        .collect()
+}
+
+impl Report {
+    /// The most severe finding: a mismatch counts as a block, an unavailable pin as a
+    /// warning. Failed checks do not count; see [`Report::failed`].
+    pub fn decision(&self) -> Decision {
+        self.findings
+            .iter()
+            .filter_map(Finding::level)
+            .max()
+            .unwrap_or(Decision::Allow)
+    }
+
+    pub fn failed(&self) -> usize {
+        self.count("failed")
+    }
+}
+
 pub struct AuditOptions {
     pub paths: Vec<PathBuf>,
     pub recursive: bool,
@@ -772,14 +799,7 @@ pub async fn run(opts: AuditOptions) -> i32 {
             return 2;
         }
     };
-    let mismatched: Vec<Finding> = parsed
-        .mismatches
-        .into_iter()
-        .map(|m| Finding {
-            dep: m.dep,
-            outcome: Outcome::Mismatch(m.message),
-        })
-        .collect();
+    let mismatched = mismatch_findings(parsed.mismatches);
     let (mut findings, via) = if parsed.deps.is_empty() {
         (Vec::new(), "nothing to check".to_string())
     } else {

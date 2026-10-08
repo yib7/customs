@@ -102,7 +102,8 @@ dependency added to the manifest but not locked yet. See [`hooks/README.md`](hoo
 **Agents over MCP.** `customs mcp` is a Model Context Protocol server, so any MCP client
 can ask before it installs: `claude mcp add customs -- customs mcp`. Tools:
 `check_package`, `check_install_command` (parses a whole shell command),
-`explain_verdict` and `scan_archive`. Evidence quoted from package code is marked as
+`explain_verdict`, `audit_lockfile` (every pin in a lockfile, including entries whose
+download URL serves another package) and `scan_archive`. Evidence quoted from package code is marked as
 untrusted data and cut to one bounded line, so a malicious package cannot use its own
 source to prompt-inject the agent reading the verdict. See [`hooks/README.md`](hooks/README.md).
 
