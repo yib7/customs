@@ -15,10 +15,10 @@ are stopped before anything is downloaded.
 | | Customs | GuardDog 3.2 |
 |---|---:|---:|
 | ROC AUC | **0.971** | 0.837 |
-| Malware caught at GuardDog's own false-positive rate (18%) | **96.2%** | 79.4% |
-| Malware caught at GuardDog's `high_risk` false-positive rate (5%) | **88.2%** | 49.7% |
-| Malware flagged (warn) at a 0.9% false-positive rate | **80.9%** | |
-| Malware auto-blocked at a 0.09% false-positive rate | **68.0%** | |
+| Malware caught at GuardDog's own false-positive rate (18%) | **95.9%** | 79.4% |
+| Malware caught at GuardDog's `high_risk` false-positive rate (5%) | **87.7%** | 49.7% |
+| Malware flagged (warn) at a 0.8% false-positive rate | **80.0%** | |
+| Malware auto-blocked at a 0.17% false-positive rate | **69.5%** | |
 
 The Rust binary reproduces the offline evaluation exactly: replaying 706 held-out packages
 through the live proxy gave identical decisions to the Python pipeline (largest risk
@@ -229,7 +229,8 @@ methodology, is in [`docs/EVALUATION.md`](docs/EVALUATION.md).
   validation packages, and an earlier model's threshold landed at 0.02% FPR on test with
   10 points of recall lost. The cause was a few benign packages with extreme CNN logits;
   the stacker now bounds each component's logit, with the bound chosen on validation, and
-  the realized FPR sits at 0.07% to 0.09% across recent retrains.
+  the realized FPR sits between 0.07% and 0.17% across recent retrains, inside the 0.07%
+  to 0.31% spread of a five-seed study.
 * **Red-teamed.** Held-out malware is rewritten with evasions and re-scanned; evasions used
   in augmentation are reported separately from unseen ones.
 * **Verified end to end.** `scripts/replay.py` serves held-out malware from a fake
