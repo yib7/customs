@@ -235,6 +235,7 @@ const FEATURE_NAMES: &[&str] = &[
     "meta_desc_len",
     "meta_has_homepage",
     "meta_has_repo",
+    "meta_repo_mismatch",
     "meta_has_author_email",
     "meta_has_license",
     "meta_n_deps",
@@ -985,6 +986,12 @@ impl<'a> Scanner<'a> {
         );
         set("meta_has_homepage", flag(meta.homepage));
         set("meta_has_repo", flag(meta.repo));
+        set(
+            "meta_repo_mismatch",
+            name.as_deref()
+                .and_then(|n| manifest::repo_mismatch(n, &meta.repo_urls))
+                .map_or(0.0, |m| m as u8 as f64),
+        );
         set("meta_has_author_email", flag(meta.author_email));
         set("meta_has_license", flag(meta.license));
         set("meta_n_deps", meta.n_deps.unwrap_or(0) as f64);

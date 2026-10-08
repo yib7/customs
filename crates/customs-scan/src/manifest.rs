@@ -22,6 +22,9 @@ pub struct Meta {
     pub n_keywords: Option<usize>,
     /// Long description length when no README file is present.
     pub long_description_bytes: Option<u64>,
+    /// URL fields that can name a source repository (repository, homepage, bug tracker,
+    /// project URLs), as written.
+    pub repo_urls: Vec<String>,
 }
 
 impl Meta {
@@ -52,6 +55,9 @@ impl Meta {
             &mut self.long_description_bytes,
             other.long_description_bytes,
         );
+        if self.repo_urls.is_empty() {
+            self.repo_urls = other.repo_urls;
+        }
     }
 }
 
@@ -73,6 +79,58 @@ fn is_repo_url(s: &str) -> bool {
     ]
     .iter()
     .any(|h| l.contains(h))
+}
+
+/// Owner and repository name of a URL on a public forge, lowercased.
+fn forge_repo(url: &str) -> Option<(String, String)> {
+    let l = url.to_ascii_lowercase();
+    let (_, rest) = ["github.com", "gitlab.com", "bitbucket.org", "codeberg.org"]
+        .iter()
+        .find_map(|h| l.split_once(h))?;
+    let mut parts = rest
+        .trim_start_matches([':', '/'])
+        .split(['/', '#', '?'])
+        .filter(|p| !p.is_empty());
+    let owner = parts.next()?.to_string();
+    let repo = parts.next()?.trim_end_matches(".git").to_string();
+    (!repo.is_empty()).then_some((owner, repo))
+}
+
+fn alnum(s: &str) -> String {
+    s.chars().filter(char::is_ascii_alphanumeric).collect()
+}
+
+/// Whether the package points at a forge repository that names a different project.
+///
+/// `None` when no URL names a forge repository. A repository matches when its name or
+/// owner contains the package name (or an npm scope), or the other way round, after
+/// dropping case and punctuation: `psf/requests` matches `requests`, `babel/babel`
+/// matches `@babel/helpers`, `python/typeshed` does not match `types-pyyaml`. Starjacking
+/// copies a popular project's repository link to borrow its reputation, and a placeholder
+/// such as `yourname/yourproject` is left by packages nobody maintains.
+pub fn repo_mismatch(name: &str, urls: &[String]) -> Option<bool> {
+    let lower = name.to_ascii_lowercase();
+    let (scope, base) = match lower.strip_prefix('@').and_then(|s| s.split_once('/')) {
+        Some((s, b)) => (Some(alnum(s)), alnum(b)),
+        None => (None, alnum(&lower)),
+    };
+    let names: Vec<&str> = std::iter::once(base.as_str())
+        .chain(scope.as_deref())
+        .filter(|n| n.len() >= 3)
+        .collect();
+    let close = |a: &str, n: &str| a.len() >= 3 && (a.contains(n) || n.contains(a));
+    let mut seen = false;
+    for (owner, repo) in urls.iter().filter_map(|u| forge_repo(u)) {
+        seen = true;
+        let (o, r) = (alnum(&owner), alnum(&repo));
+        if names
+            .iter()
+            .any(|n| close(&r, n) || (o.len() > 3 && close(&o, n)))
+        {
+            return Some(false);
+        }
+    }
+    seen.then_some(true)
 }
 
 fn count_keywords(s: &str) -> usize {
@@ -109,6 +167,23 @@ pub fn parse_package_json(text: &str) -> Option<Meta> {
             .and_then(Value::as_array)
             .is_some_and(|a| !a.is_empty()),
     };
+    let mut repo_urls = Vec::new();
+    for k in ["repository", "homepage", "bugs"] {
+        let u = match o.get(k) {
+            Some(Value::String(s)) => Some(s.as_str()),
+            Some(Value::Object(r)) => r.get("url").and_then(Value::as_str),
+            _ => None,
+        };
+        if let Some(u) = u {
+            // npm shorthand: "owner/repo" and "github:owner/repo" mean GitHub.
+            let u = u.strip_prefix("github:").unwrap_or(u);
+            if k == "repository" && !u.contains(':') && u.matches('/').count() == 1 {
+                repo_urls.push(format!("github.com/{u}"));
+            } else {
+                repo_urls.push(u.to_string());
+            }
+        }
+    }
     let n_deps = o
         .get("dependencies")
         .and_then(Value::as_object)
@@ -130,6 +205,7 @@ pub fn parse_package_json(text: &str) -> Option<Meta> {
         n_deps: Some(n_deps),
         n_keywords: Some(n_keywords),
         long_description_bytes: None,
+        repo_urls,
     })
 }
 
@@ -217,6 +293,12 @@ pub fn parse_core_metadata(text: &str) -> Meta {
         n_deps: Some(n_deps),
         n_keywords: Some(n_keywords),
         long_description_bytes: Some(long_desc),
+        repo_urls: home_page
+            .into_iter()
+            .chain(get("download-url"))
+            .map(str::to_string)
+            .chain(project_urls.iter().map(|(_, u)| u.clone()))
+            .collect(),
     }
 }
 
@@ -233,6 +315,13 @@ pub fn parse_pyproject(text: &str) -> Option<Meta> {
             u.keys()
                 .any(|k| matches!(k.to_ascii_lowercase().as_str(), "homepage" | "home"))
         }));
+        meta.repo_urls = urls
+            .map(|u| {
+                u.values()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
         meta.repo = Some(urls.is_some_and(|u| {
             u.iter().any(|(k, val)| {
                 let k = k.to_ascii_lowercase();
@@ -287,6 +376,10 @@ pub fn parse_pyproject(text: &str) -> Option<Meta> {
                 .and_then(|k| k.as_array())
                 .map(|a| a.len()),
             long_description_bytes: None,
+            repo_urls: ["repository", "homepage"]
+                .iter()
+                .filter_map(|k| po.get(*k).and_then(|x| x.as_str()).map(str::to_string))
+                .collect(),
         };
         meta.merge(poetry);
     }
@@ -347,6 +440,16 @@ pub fn parse_setup_cfg(text: &str) -> Meta {
         }),
         n_keywords: get("metadata", "keywords").map(count_keywords),
         long_description_bytes: None,
+        repo_urls: url
+            .into_iter()
+            .chain(
+                get("metadata", "project_urls")
+                    .into_iter()
+                    .flat_map(str::lines),
+            )
+            .map(|l| l.split_once('=').map_or(l, |(_, u)| u).trim().to_string())
+            .filter(|u| !u.is_empty())
+            .collect(),
     }
 }
 
@@ -434,6 +537,9 @@ pub fn parse_setup_py(text: &str) -> Meta {
             if t.text == "url" && lit.as_deref().is_some_and(is_repo_url) {
                 meta.repo = Some(true);
             }
+            if matches!(t.text, "url" | "download_url") {
+                meta.repo_urls.extend(lit);
+            }
         }
         i += 1;
     }
@@ -509,6 +615,76 @@ pub fn name_version_from_filename(filename: &str) -> (Option<String>, Option<Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repository_mismatch() {
+        let m = |name: &str, urls: &[&str]| {
+            let urls: Vec<String> = urls.iter().map(|u| u.to_string()).collect();
+            repo_mismatch(name, &urls)
+        };
+        assert_eq!(
+            m("requests", &["https://github.com/psf/requests"]),
+            Some(false)
+        );
+        assert_eq!(
+            m(
+                "python-dateutil",
+                &["git+https://github.com/dateutil/dateutil.git"]
+            ),
+            Some(false)
+        );
+        assert_eq!(
+            m("@babel/helpers", &["https://github.com/babel/babel.git"]),
+            Some(false)
+        );
+        assert_eq!(
+            m("dagit", &["https://github.com/dagster-io/dagster"]),
+            Some(true)
+        );
+        assert_eq!(
+            m("trustwallet", &["https://github.com/psf/requests"]),
+            Some(true)
+        );
+        assert_eq!(
+            m("web3x", &["https://github.com/yourusername/yourproject"]),
+            Some(true)
+        );
+        // Any matching URL clears it; a docs site is not a forge repository.
+        assert_eq!(
+            m(
+                "dagit",
+                &[
+                    "https://github.com/dagster-io/dagster",
+                    "https://github.com/x/dagit"
+                ]
+            ),
+            Some(false)
+        );
+        assert_eq!(m("requests", &["https://requests.readthedocs.io"]), None);
+        assert_eq!(m("requests", &[]), None);
+        assert_eq!(m("requests", &["https://github.com/psf"]), None);
+
+        let pj = parse_package_json(
+            r#"{"name":"x-tool","repository":"psf/requests","bugs":{"url":"https://github.com/psf/requests/issues"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            pj.repo_urls,
+            [
+                "github.com/psf/requests",
+                "https://github.com/psf/requests/issues"
+            ]
+        );
+        assert_eq!(repo_mismatch("x-tool", &pj.repo_urls), Some(true));
+        let core = parse_core_metadata(
+            "Name: types-pyyaml\nHome-page: https://github.com/python/typeshed\nProject-URL: Source, https://github.com/python/typeshed\n\nbody",
+        );
+        assert_eq!(core.repo_urls.len(), 2);
+        let cfg = parse_setup_cfg(
+            "[metadata]\nname = x\nproject_urls =\n    Source = https://github.com/a/b\n",
+        );
+        assert_eq!(cfg.repo_urls, ["https://github.com/a/b"]);
+    }
 
     #[test]
     fn package_json() {

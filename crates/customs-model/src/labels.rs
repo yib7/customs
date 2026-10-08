@@ -110,6 +110,10 @@ const OTHER: &[(&str, &str)] = &[
     ("meta_desc_len", "Length of the package description"),
     ("meta_has_homepage", "Declares a homepage"),
     ("meta_has_repo", "Declares a source repository"),
+    (
+        "meta_repo_mismatch",
+        "Repository link names a different project",
+    ),
     ("meta_has_author_email", "Declares an author email"),
     ("meta_has_license", "Declares a license"),
     ("meta_n_deps", "Number of dependencies"),
