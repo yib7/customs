@@ -27,14 +27,8 @@ pub fn resolve_version(meta: &PackageMeta, spec: Option<&str>) -> Result<String,
     let Some(spec) = spec else {
         return latest();
     };
-    let exact = spec.strip_prefix("==").unwrap_or(spec).trim();
-    let exact = exact.strip_prefix('=').unwrap_or(exact).trim();
-    let exact = exact
-        .strip_prefix('v')
-        .filter(|_| meta.ecosystem == Ecosystem::Npm)
-        .unwrap_or(exact);
-    if meta.version(exact).is_some() {
-        return Ok(exact.to_string());
+    if let Some(v) = exact_version(meta, Some(spec)) {
+        return Ok(v);
     }
     if let Some(v) = meta.dist_tags.get(spec) {
         return Ok(v.clone());
@@ -44,6 +38,19 @@ pub fn resolve_version(meta: &PackageMeta, spec: Option<&str>) -> Result<String,
         Ecosystem::Pypi => resolve_pypi(meta, spec),
     }
     .unwrap_or_else(|| latest().map_err(|e| e.to_string()))
+}
+
+/// The version `spec` names exactly (`1.2.3`, `==1.2.3`, `=1.2.3`, npm `v1.2.3`), when
+/// `meta` has it.
+pub fn exact_version(meta: &PackageMeta, spec: Option<&str>) -> Option<String> {
+    let spec = spec?.trim();
+    let exact = spec.strip_prefix("==").unwrap_or(spec).trim();
+    let exact = exact.strip_prefix('=').unwrap_or(exact).trim();
+    let exact = exact
+        .strip_prefix('v')
+        .filter(|_| meta.ecosystem == Ecosystem::Npm)
+        .unwrap_or(exact);
+    meta.version(exact).map(|_| exact.to_string())
 }
 
 fn newest(meta: &PackageMeta, ok: impl Fn(&str) -> bool) -> Option<String> {

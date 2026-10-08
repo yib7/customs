@@ -128,6 +128,8 @@ export interface Policy {
   warn_threshold: Threshold;
   block_threshold: Threshold;
   min_age_days: number;
+  min_age_severity: 'block' | 'warn';
+  hide_young_versions: boolean;
   block_nonexistent: boolean;
   block_install_scripts_from_new: boolean;
   provenance_dropped: RuleSeverity;

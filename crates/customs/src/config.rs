@@ -210,6 +210,11 @@ pub struct Policy {
     /// what turns a young package with install scripts into a block.
     #[serde(default)]
     pub min_age_severity: AgeSeverity,
+    /// Leave the versions `min_age_days` would block out of npm packuments and PyPI simple
+    /// pages, so an unpinned install resolves to the newest version old enough instead of
+    /// failing (enforce mode with a blocking `min_age_days` only).
+    #[serde(default = "default_true")]
+    pub hide_young_versions: bool,
     #[serde(default = "default_true")]
     pub block_nonexistent: bool,
     #[serde(default = "default_true")]
@@ -287,6 +292,7 @@ impl Default for Policy {
             block_threshold: Threshold::Model,
             min_age_days: default_min_age(),
             min_age_severity: AgeSeverity::Block,
+            hide_young_versions: true,
             block_nonexistent: true,
             block_install_scripts_from_new: true,
             provenance_dropped: default_warn(),

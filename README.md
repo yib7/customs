@@ -129,6 +129,12 @@ customs audit -r --format sarif -o customs.sarif      # see docs/github-action.m
 and a link to the verdict page. An agent retrying the same blocked install produces one
 message an hour, and bursts are rate-limited.
 
+**Release cooldown.** Compromised releases are usually found and pulled within days, so
+versions younger than `min_age_days` (3 by default) are blocked. The proxy also leaves them
+out of the package lists it serves, so `pip install foo` or `npm install foo` installs the
+newest version past the cooldown instead of failing. A pinned young version is still
+blocked.
+
 **Release history rules.** Account takeovers show up in registry metadata before anyone
 reads the code. The policy engine compares each release with the ones before it and flags
 provenance disappearing (npm and PyPI), an install script appearing or changing, a new

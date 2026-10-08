@@ -17,6 +17,40 @@ use crate::engine::{EngineError, Outcome};
 use crate::util::ecosystem_str;
 use crate::verdict::Verdict;
 
+/// Versions of `name` to leave out of the metadata served for it (see [`crate::cooldown`]).
+/// Metadata is fetched only when the policy can hide anything; a failed fetch hides
+/// nothing, and the archive request is still judged on its own.
+pub async fn young_versions(
+    state: &crate::server::AppState,
+    eco: Ecosystem,
+    name: &str,
+) -> std::collections::HashSet<String> {
+    let policy = state.engine.policy();
+    if !policy.hide_young_versions
+        || policy.mode != Mode::Enforce
+        || policy.min_age_days == 0
+        || policy.min_age_severity != crate::config::AgeSeverity::Block
+    {
+        return Default::default();
+    }
+    match state
+        .engine
+        .registry
+        .package_meta(&policy.upstream, eco, name)
+        .await
+    {
+        Ok(Some(meta)) => crate::cooldown::hidden_versions(&policy, &meta, crate::util::now()),
+        Ok(None) => Default::default(),
+        Err(e) => {
+            tracing::warn!(name, error = %e, "metadata for release-age filtering failed");
+            Default::default()
+        }
+    }
+}
+
+/// Header naming how many young versions were left out of a metadata response.
+pub const HIDDEN_HEADER: &str = "x-customs-hidden-versions";
+
 /// Base URL clients used to reach us, for absolute links in rewritten documents.
 pub fn proxy_base(headers: &HeaderMap) -> String {
     let host = headers

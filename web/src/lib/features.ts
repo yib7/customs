@@ -73,6 +73,7 @@ const FEATURES: Record<string, string> = {
 
 const POLICY_RULES: Record<string, string> = {
   min_age_days: 'Version is newer than the minimum age',
+  min_age_resolution: 'Resolved to an older version: the newest is younger than the minimum age',
   block_nonexistent: 'Package does not exist on the registry',
   block_install_scripts_from_new: 'Install scripts in a brand-new package',
   provenance_dropped: 'Release lost the provenance attestation earlier releases had',

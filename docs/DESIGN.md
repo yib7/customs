@@ -713,7 +713,9 @@ API (JSON). CORS allows only `http://localhost:5173` (the Vite dev server).
   smallest wheel), scans, and returns a verdict. Errors: 400 bad input, 404
   `{ "error", "code": "nonexistent_package", "verdict": {...} }` when the registry does not
   know the name (the verdict carries the `block_nonexistent` decision), 422 no matching
-  version, 502 upstream failure; all as `{ "error": "..." }`.
+  version, 502 upstream failure; all as `{ "error": "..." }`. Optional `"resolve"`:
+  `"served"` (default) resolves against the versions the proxy serves, `"upstream"`
+  against all of them (see "Resolving past young releases").
 - `GET /api/events?limit=&before=&decision=&ecosystem=&kind=&q=`: a JSON array of events,
   newest first. `before` is an event id (pagination), `q` a case-insensitive name substring.
   Event: `{ "id", "ts", "ecosystem", "name", "version", "client", "kind": "install" | "check" | "nonexistent_package", "decision", "risk", "verdict_id" }`.
@@ -821,6 +823,7 @@ warn_threshold = "model"    # "model" uses ensemble.json thresholds, or a number
 block_threshold = "model"
 min_age_days = 3            # versions published less recently hit min_age_days; 0 disables
 min_age_severity = "block"  # or "warn"
+hide_young_versions = true  # leave blocked young versions out of the indexes the proxy serves
 block_nonexistent = true    # requesting a name the registry does not know is recorded and denied in hooks
 block_install_scripts_from_new = true  # npm install scripts in packages younger than min_age_days
 # Release history rules: "off", "warn" or "block"
@@ -855,6 +858,25 @@ turns nonexistent names into warnings. Unknown keys and bad values are rejected 
 key that holds them. Without `--config`, the server reads `./customs.toml`, then
 `<data-dir>/policy.toml`, and `PUT /api/policy` writes to the file it read (or
 `<data-dir>/policy.toml`).
+
+**Resolving past young releases.** A minimum age that only blocks breaks every unpinned
+install for days after each upstream release: `pip install foo` and `npm install foo` pick
+the newest version, which is the one being refused. With `hide_young_versions` (the
+default), the proxy leaves versions younger than `min_age_days` out of the PyPI simple
+index (HTML and JSON) and the npm packument, moves `latest` and any dist-tag pointing at a
+hidden version to the newest visible one, and sets `x-customs-hidden-versions` to the
+count. Installers then resolve to the newest version old enough, the same cooldown that
+pip's `--uploaded-prior-to` and pnpm's `minimumReleaseAge` give one machine. Hiding applies
+only in enforce mode with `min_age_severity = "block"`: allow-listed versions stay visible
+unless also denied, a package whose versions are all young keeps them (the install then
+fails with the block reason instead of "no matching version"), and a pinned young version
+is still blocked when fetched. Metadata fetch errors fail open (nothing hidden).
+
+`POST /api/check` resolves an unpinned or ranged version the same way by default
+(`"resolve": "served"`) and adds a `min_age_resolution` hit naming the newer version it
+passed over; `"resolve": "upstream"` checks against the full list. The hooks and `customs
+check` use `served` only when the installers in their environment point at the server
+(the variables `customs env` prints), since otherwise the installer sees upstream.
 
 **Release history rules.** Account takeovers (the 2025 chalk/debug compromise, the
 Shai-Hulud worm) publish new versions of established libraries with a payload inside

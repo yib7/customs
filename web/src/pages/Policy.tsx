@@ -385,6 +385,18 @@ function PolicyForm({
         </div>
         <div className="mt-3 divide-y divide-line border-t border-line">
           <Switch
+            checked={draft.min_age_severity === 'block'}
+            onChange={(v) => set('min_age_severity', v ? 'block' : 'warn')}
+            label="Block versions younger than the minimum age"
+            description="Off: such versions are only warned about, and install scripts in them are still blocked if the next switch is on."
+          />
+          <Switch
+            checked={draft.hide_young_versions}
+            onChange={(v) => set('hide_young_versions', v)}
+            label="Resolve installs to versions old enough"
+            description="Leave blocked young versions out of the package lists the proxy serves, so an install without a pinned version gets the newest version past the minimum age instead of failing. A pinned young version is still blocked."
+          />
+          <Switch
             checked={draft.block_nonexistent}
             onChange={(v) => set('block_nonexistent', v)}
             label="Block nonexistent packages"

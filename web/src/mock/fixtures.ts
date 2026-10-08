@@ -464,6 +464,8 @@ export const INITIAL_POLICY = {
   warn_threshold: 'model',
   block_threshold: 'model',
   min_age_days: 3,
+  min_age_severity: 'block',
+  hide_young_versions: true,
   block_nonexistent: true,
   block_install_scripts_from_new: true,
   provenance_dropped: 'warn',

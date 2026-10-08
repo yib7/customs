@@ -31,6 +31,8 @@ export interface PolicyDraft {
   blockModel: boolean;
   blockValue: string;
   minAgeDays: string;
+  min_age_severity: Policy['min_age_severity'];
+  hide_young_versions: boolean;
   block_nonexistent: boolean;
   block_install_scripts_from_new: boolean;
   history: Record<HistoryRule, RuleSeverity>;
@@ -67,6 +69,8 @@ export function policyToDraft(p: Policy): PolicyDraft {
     blockModel: p.block_threshold === 'model',
     blockValue: p.block_threshold === 'model' ? '' : String(p.block_threshold),
     minAgeDays: String(p.min_age_days),
+    min_age_severity: p.min_age_severity,
+    hide_young_versions: p.hide_young_versions,
     block_nonexistent: p.block_nonexistent,
     block_install_scripts_from_new: p.block_install_scripts_from_new,
     history: {
@@ -154,6 +158,8 @@ export function validateDraft(d: PolicyDraft): DraftResult {
       warn_threshold: warn,
       block_threshold: block,
       min_age_days: age,
+      min_age_severity: d.min_age_severity,
+      hide_young_versions: d.hide_young_versions,
       block_nonexistent: d.block_nonexistent,
       block_install_scripts_from_new: d.block_install_scripts_from_new,
       ...d.history,

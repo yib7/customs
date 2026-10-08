@@ -184,6 +184,8 @@ describe('parsePolicy', () => {
       warn_threshold: 'model',
       block_threshold: 0.9,
       min_age_days: 3,
+      min_age_severity: 'block',
+      hide_young_versions: true,
       block_nonexistent: false,
       block_install_scripts_from_new: true,
       provenance_dropped: 'block',

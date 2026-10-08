@@ -74,8 +74,41 @@ impl std::fmt::Display for CheckError {
 }
 
 pub enum Checker {
-    Remote { base: String, http: reqwest::Client },
+    Remote {
+        base: String,
+        http: reqwest::Client,
+        /// Ecosystems whose installers in this environment fetch through `base`.
+        routed: Vec<Ecosystem>,
+    },
     Local(Arc<Engine>),
+}
+
+/// The variables `customs env` sets for each ecosystem.
+const ROUTING_VARS: [(Ecosystem, &str, &str); 8] = [
+    (Ecosystem::Pypi, "PIP_INDEX_URL", "/pypi/"),
+    (Ecosystem::Pypi, "UV_INDEX_URL", "/pypi/"),
+    (Ecosystem::Pypi, "UV_DEFAULT_INDEX", "/pypi/"),
+    (Ecosystem::Pypi, "PIPENV_PYPI_MIRROR", "/pypi/"),
+    (Ecosystem::Pypi, "PDM_PYPI_URL", "/pypi/"),
+    (Ecosystem::Npm, "npm_config_registry", "/npm"),
+    (Ecosystem::Npm, "NPM_CONFIG_REGISTRY", "/npm"),
+    (Ecosystem::Npm, "YARN_NPM_REGISTRY_SERVER", "/npm"),
+];
+
+/// Ecosystems whose installers, going by `env`, fetch through the server at `base`. Only
+/// for those does an unpinned check resolve the way the proxy serves the package; anywhere
+/// else the installer sees every version, so the check must too.
+pub fn routed_ecosystems(base: &str, env: impl Fn(&str) -> Option<String>) -> Vec<Ecosystem> {
+    let base = base.trim_end_matches('/');
+    let mut out = Vec::new();
+    for (eco, var, path) in ROUTING_VARS {
+        if !out.contains(&eco)
+            && env(var).is_some_and(|v| v.trim().starts_with(&format!("{base}{path}")))
+        {
+            out.push(eco);
+        }
+    }
+    out
 }
 
 /// True when `base` names this machine, which a corporate HTTP proxy must not see.
@@ -104,7 +137,8 @@ impl Checker {
             .map(|r| r.status().is_success())
             .unwrap_or(false);
         if healthy {
-            return Ok(Checker::Remote { base, http });
+            let routed = routed_ecosystems(&base, |k| std::env::var(k).ok());
+            return Ok(Checker::Remote { base, http, routed });
         }
         tracing::debug!(server = %base, "server not reachable; checking in-process");
         Ok(Checker::Local(local_engine(local)?))
@@ -132,8 +166,9 @@ impl Checker {
         client: &str,
     ) -> Result<Verdict, CheckError> {
         match self {
+            // Nothing is proxied without a server, so resolve as the registry would.
             Checker::Local(engine) => engine
-                .check(eco, name, version, Some(client.to_string()))
+                .check_resolving(eco, name, version, Some(client.to_string()), false)
                 .await
                 .map_err(|e| match e {
                     EngineError::NotFound(m)
@@ -143,7 +178,7 @@ impl Checker {
                         CheckError::Infrastructure(m)
                     }
                 }),
-            Checker::Remote { base, http } => {
+            Checker::Remote { base, http, routed } => {
                 let resp = http
                     .post(format!("{base}/api/check"))
                     .json(&json!({
@@ -151,6 +186,7 @@ impl Checker {
                         "name": name,
                         "version": version,
                         "client": client,
+                        "resolve": if routed.contains(&eco) { "served" } else { "upstream" },
                     }))
                     .send()
                     .await
@@ -184,5 +220,41 @@ impl Checker {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn routing_follows_customs_env() {
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |k: &str| {
+                pairs
+                    .iter()
+                    .find(|(n, _)| *n == k)
+                    .map(|(_, v)| v.to_string())
+            }
+        };
+        let base = "http://127.0.0.1:7878";
+        assert_eq!(
+            routed_ecosystems(
+                base,
+                env(&[
+                    ("PIP_INDEX_URL", "http://127.0.0.1:7878/pypi/simple"),
+                    ("NPM_CONFIG_REGISTRY", "https://registry.npmjs.org/"),
+                ])
+            ),
+            vec![Ecosystem::Pypi]
+        );
+        assert_eq!(
+            routed_ecosystems(
+                base,
+                env(&[("npm_config_registry", "http://127.0.0.1:7878/npm/")])
+            ),
+            vec![Ecosystem::Npm]
+        );
+        assert!(routed_ecosystems(base, env(&[])).is_empty());
     }
 }

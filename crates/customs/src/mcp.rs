@@ -516,7 +516,7 @@ impl McpServer {
                     Err(e) => ToolOutput::error(format!("reading verdict {id}: {e:#}")),
                 });
             }
-            Some(Checker::Remote { base, http }) => (base.clone(), http.clone()),
+            Some(Checker::Remote { base, http, .. }) => (base.clone(), http.clone()),
             None => {
                 let base = self.opts.server.trim_end_matches('/').to_string();
                 let mut b = reqwest::Client::builder().timeout(Duration::from_secs(10));

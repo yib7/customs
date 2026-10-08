@@ -175,9 +175,17 @@ async fn fetch_and_rewrite(
         .content_type
         .clone()
         .unwrap_or_else(|| "text/html".into());
+    let hidden = match project {
+        Some(p) => super::young_versions(state, Ecosystem::Pypi, p).await,
+        None => Default::default(),
+    };
+    let mut removed = 0;
     let body = if ct.contains("json") {
         match serde_json::from_slice::<Value>(&page.body) {
             Ok(mut v) => {
+                if let Some(p) = project {
+                    removed = crate::cooldown::filter_simple_json(&mut v, p, &hidden);
+                }
                 rw.rewrite_json(&mut v, &page_url);
                 v.to_string()
             }
@@ -187,9 +195,23 @@ async fn fetch_and_rewrite(
             }
         }
     } else {
-        rw.rewrite_html(&String::from_utf8_lossy(&page.body), &page_url)
+        let html = String::from_utf8_lossy(&page.body);
+        let html = match project {
+            Some(p) => {
+                let (h, n) = crate::cooldown::filter_simple_html(&html, p, &hidden);
+                removed = n;
+                h
+            }
+            None => html.into_owned(),
+        };
+        rw.rewrite_html(&html, &page_url)
     };
-    ([(header::CONTENT_TYPE, ct)], body).into_response()
+    let mut resp = ([(header::CONTENT_TYPE, ct)], body).into_response();
+    if removed > 0 {
+        resp.headers_mut()
+            .insert(super::HIDDEN_HEADER, header::HeaderValue::from(removed));
+    }
+    resp
 }
 
 /// `GET /pypi/simple/`

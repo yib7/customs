@@ -347,6 +347,8 @@ export function parsePolicy(v: unknown): Policy {
     warn_threshold: parseThreshold(r.warn_threshold),
     block_threshold: parseThreshold(r.block_threshold),
     min_age_days: minAge === null ? 0 : minAge,
+    min_age_severity: r.min_age_severity === 'warn' ? 'warn' : 'block',
+    hide_young_versions: asBool(r.hide_young_versions, true),
     block_nonexistent: asBool(r.block_nonexistent, true),
     block_install_scripts_from_new: asBool(r.block_install_scripts_from_new, true),
     provenance_dropped: parseRuleSeverity(r.provenance_dropped, 'warn'),

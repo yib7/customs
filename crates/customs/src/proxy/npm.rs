@@ -200,8 +200,19 @@ async fn packument(
     }
     match serde_json::from_slice::<Value>(&page.body) {
         Ok(mut v) => {
+            let hidden = if version.is_none() {
+                super::young_versions(state, Ecosystem::Npm, name).await
+            } else {
+                Default::default()
+            };
+            let n = crate::cooldown::filter_packument(&mut v, &hidden);
             rewrite_packument(&mut v, &proxy_base(headers));
-            ([(header::CONTENT_TYPE, ct)], v.to_string()).into_response()
+            let mut resp = ([(header::CONTENT_TYPE, ct)], v.to_string()).into_response();
+            if n > 0 {
+                resp.headers_mut()
+                    .insert(super::HIDDEN_HEADER, header::HeaderValue::from(n));
+            }
+            resp
         }
         Err(_) => (
             StatusCode::BAD_GATEWAY,

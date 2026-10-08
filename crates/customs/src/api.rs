@@ -58,6 +58,11 @@ pub struct CheckRequest {
     /// Who is asking (`hook`, `cli`); recorded on the event.
     #[serde(default)]
     pub client: Option<String>,
+    /// `served` (default): resolve an unpinned spec against the metadata this proxy
+    /// serves, which leaves out versions `min_age_days` would block. `upstream`: against
+    /// the registry's own, for an installer that does not use the proxy.
+    #[serde(default)]
+    pub resolve: Option<String>,
 }
 
 async fn check(
@@ -79,9 +84,19 @@ async fn check(
         return api_error(StatusCode::BAD_REQUEST, "invalid package name");
     }
     let client = req.client.or_else(|| Some("api".into()));
+    let as_served = match req.resolve.as_deref() {
+        None | Some("served") => true,
+        Some("upstream") => false,
+        Some(other) => {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                format!("resolve must be 'served' or 'upstream', not '{other}'"),
+            )
+        }
+    };
     match state
         .engine
-        .check(eco, name, req.version.as_deref(), client)
+        .check_resolving(eco, name, req.version.as_deref(), client, as_served)
         .await
     {
         // A name the registry does not know is a 404, with the verdict attached so the hook

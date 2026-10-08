@@ -23,7 +23,7 @@ use crate::history::{release_history, DependencyInfo, ReleaseHistory, MAX_ADDED_
 use crate::metrics::Metrics;
 use crate::policy::{effective_thresholds, evaluate, PolicyContext};
 use crate::registry::{FetchError, FileMeta, Registry, VersionMeta};
-use crate::resolve::resolve_version;
+use crate::resolve::{exact_version, resolve_version};
 use crate::store::{ArtifactRow, NewEvent, ScanKey, Store};
 use crate::util::{
     ecosystem_str, normalize_name, now, now_ts, parse_npm_tarball, parse_pypi_filename,
@@ -126,6 +126,8 @@ pub struct MetaFacts {
     pub install_scripts: Vec<String>,
     /// The version compared with earlier releases, when the full package metadata was read.
     pub history: Option<ReleaseHistory>,
+    /// An informational hit about how the version was chosen.
+    pub note: Option<PolicyHit>,
 }
 
 /// One artifact to evaluate.
@@ -652,6 +654,7 @@ impl Engine {
         );
         let mut hits = outcome.hits.clone();
         hits.extend(scan_hits(policy, s));
+        hits.extend(meta.note.clone());
         let decision = if outcome.denied {
             Decision::Block
         } else if outcome.allowed {
@@ -751,13 +754,27 @@ impl Engine {
         self.record(v, EventKind::NonexistentPackage, client)
     }
 
-    /// `POST /api/check`: resolve, fetch, scan, decide.
+    /// `POST /api/check`: resolve, fetch, scan, decide. An unpinned spec resolves against
+    /// the metadata the proxy serves.
     pub async fn check(
         self: &Arc<Self>,
         eco: Ecosystem,
         name: &str,
         version: Option<&str>,
         client: Option<String>,
+    ) -> Result<Verdict, EngineError> {
+        self.check_resolving(eco, name, version, client, true).await
+    }
+
+    /// [`Engine::check`]. With `as_served` false an unpinned spec resolves against the
+    /// registry's own metadata, as an installer that does not use the proxy would.
+    pub async fn check_resolving(
+        self: &Arc<Self>,
+        eco: Ecosystem,
+        name: &str,
+        version: Option<&str>,
+        client: Option<String>,
+        as_served: bool,
     ) -> Result<Verdict, EngineError> {
         let policy = self.policy();
         let name = normalize_name(eco, name);
@@ -768,7 +785,36 @@ impl Engine {
         else {
             return self.record_nonexistent(eco, &name, client);
         };
-        let version = resolve_version(&meta, version).map_err(EngineError::Unresolvable)?;
+        // Resolve an unpinned spec against the metadata the proxy serves, which leaves out
+        // versions `min_age_days` would block; a version named exactly is checked as named.
+        let hidden = if as_served {
+            crate::cooldown::hidden_versions(&policy, &meta, now())
+        } else {
+            Default::default()
+        };
+        let mut note = None;
+        let version = match exact_version(&meta, version) {
+            Some(v) => Ok(v),
+            None if hidden.is_empty() => resolve_version(&meta, version),
+            None => {
+                let served = resolve_version(&crate::cooldown::filter_meta(&meta, &hidden), version);
+                if let (Ok(s), Ok(newest)) = (&served, resolve_version(&meta, version)) {
+                    if *s != newest {
+                        note = Some(PolicyHit {
+                            rule: "min_age_resolution".into(),
+                            severity: Decision::Allow,
+                            detail: format!(
+                                "resolved to {s}: {newest} is newer but younger than {} day{}, so the proxy does not offer it",
+                                policy.min_age_days,
+                                if policy.min_age_days == 1 { "" } else { "s" }
+                            ),
+                        });
+                    }
+                }
+                served
+            }
+        }
+        .map_err(EngineError::Unresolvable)?;
         let vm = meta
             .version(&version)
             .cloned()
@@ -782,6 +828,7 @@ impl Engine {
             published: vm.published,
             install_scripts: vm.install_scripts.clone(),
             history,
+            note,
         };
         let Some(file) = choose_file(eco, &vm.files) else {
             return Err(EngineError::NotFound(format!(
