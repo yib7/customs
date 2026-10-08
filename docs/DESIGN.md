@@ -214,7 +214,11 @@ How indicators are counted (`customs-scan`, schema 1):
   list that names `sys.executable` or a `python` program is Python code: litellm 1.82.8
   shipped its payload as `Popen([sys.executable, "-c", "import base64;
   exec(base64.b64decode('...'))"])` in a `.pth` file, two layers this now reads through.
-  `builtins.exec` and `__import__('builtins').exec` count as the builtin.
+  `builtins.exec` and `__import__('builtins').exec` count as the builtin. On the 6,000
+  corpus archives these forms and string-table reads together changed 29 malicious archives
+  and no benign one, and every indicator that appeared was in malware; litellm 1.82.8 went
+  from four process launches and no download to 15 launches, a download-and-run and two
+  file writes on its install surface.
 - String-content patterns (`secret_paths`, `persistence`, `recon` command names,
   `download_exec`, `exfil_endpoint`, `ip_url`, `url`, `crypto_wallet` words, and
   `curl`/`wget` as `network`) are regexes over string literal contents. Shell files and npm
