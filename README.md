@@ -95,7 +95,10 @@ package installs in it (`pip install`, `uv add`, `npm i`, `npx`, requirement fil
 chained commands) and denies the command when a package is blocked, with the reason, so
 the agent stops and asks you. Project installs (`npm ci`, `npm install`, `uv sync`,
 `poetry install` and the rest) are checked against the project's lockfile, plus any
-dependency added to the manifest but not locked yet. See [`hooks/README.md`](hooks/README.md).
+dependency added to the manifest but not locked yet. Commands and file edits that would
+switch Customs off (a policy change, stopping the server, removing the hook from Claude
+Code's settings, pointing pip or npm back at the public registry) come back to you for
+confirmation. See [`hooks/README.md`](hooks/README.md).
 
 `scripts/demo.sh` runs the whole tour against the live registries.
 

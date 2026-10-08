@@ -109,8 +109,77 @@ pub fn inspect(inputs: &Inputs) -> Vec<Finding> {
     }
     python_project(inputs.dir, &mut out);
     lockfiles(inputs.dir, &proxy, &mut out);
+    claude_hook(inputs, &mut out);
     out.sort_by_key(|f| std::cmp::Reverse(f.level));
     out
+}
+
+/// Where the Customs hook is registered in Claude Code settings, and whether its matcher
+/// lets it see file edits (section 9.2). Says nothing when it is not registered at all:
+/// not every project uses Claude Code.
+fn claude_hook(inputs: &Inputs, out: &mut Vec<Finding>) {
+    let mut files = vec![
+        inputs.dir.join(".claude/settings.json"),
+        inputs.dir.join(".claude/settings.local.json"),
+    ];
+    files.extend(inputs.home.map(|h| h.join(".claude/settings.json")));
+    let covers = |matcher: &str, tool: &str| {
+        matcher.is_empty()
+            || matcher == "*"
+            || regex::Regex::new(&format!("^(?:{matcher})$")).is_ok_and(|r| r.is_match(tool))
+    };
+    for f in files {
+        let Some(v) = std::fs::read_to_string(&f)
+            .ok()
+            .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        else {
+            continue;
+        };
+        let entries = v["hooks"]["PreToolUse"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let matchers: Vec<String> = entries
+            .iter()
+            .filter(|e| {
+                e["hooks"].as_array().is_some_and(|hs| {
+                    hs.iter().any(|h| {
+                        h["command"]
+                            .as_str()
+                            .is_some_and(|c| c.contains("customs hook claude-code"))
+                    })
+                })
+            })
+            .map(|e| e["matcher"].as_str().unwrap_or("").to_string())
+            .collect();
+        if matchers.is_empty() {
+            continue;
+        }
+        let subject = f.display().to_string();
+        let sees = |tool: &str| matchers.iter().any(|m| covers(m, tool));
+        if !sees("Bash") {
+            out.push(finding(
+                Level::Warn,
+                &subject,
+                "the Customs hook is registered, but its matcher does not include Bash, so it checks no install".into(),
+                "set the matcher to Bash|Edit|Write|MultiEdit|NotebookEdit (hooks/claude-code-settings.json)",
+            ));
+        } else if !(sees("Edit") && sees("Write")) {
+            out.push(finding(
+                Level::Warn,
+                &subject,
+                "the Customs hook sees only shell commands: an Edit or Write call can remove it from these settings or repoint .npmrc without confirmation".into(),
+                "set the matcher to Bash|Edit|Write|MultiEdit|NotebookEdit (hooks/claude-code-settings.json)",
+            ));
+        } else {
+            out.push(finding(
+                Level::Ok,
+                &subject,
+                "the Customs hook checks shell commands and file edits".into(),
+                "",
+            ));
+        }
+    }
 }
 
 /// Installers that read each variable `customs env` sets.
@@ -763,6 +832,39 @@ mod tests {
             .filter(|f| f.level == Level::Bypass)
             .map(|f| (f.subject.clone(), f.detail.clone()))
             .collect()
+    }
+
+    #[test]
+    fn claude_hook_registration() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join(".claude")).unwrap();
+        let write = |matcher: &str| {
+            let v = json!({"hooks": {"PreToolUse": [
+                {"matcher": "Bash", "hooks": [{"type": "command", "command": "other"}]},
+                {"matcher": matcher, "hooks": [{"type": "command", "command": "customs hook claude-code"}]}
+            ]}});
+            std::fs::write(d.path().join(".claude/settings.json"), v.to_string()).unwrap();
+        };
+        let hook = |f: Vec<Finding>| {
+            f.into_iter()
+                .filter(|f| f.subject.ends_with("settings.json"))
+                .map(|f| (f.level, f.detail))
+                .collect::<Vec<_>>()
+        };
+        assert!(hook(run_with(d.path(), None, full_env())).is_empty());
+        write("Bash");
+        let f = hook(run_with(d.path(), None, full_env()));
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].0, Level::Warn);
+        assert!(f[0].1.contains("only shell commands"), "{}", f[0].1);
+        write("Bash|Edit|Write|MultiEdit|NotebookEdit");
+        assert_eq!(hook(run_with(d.path(), None, full_env()))[0].0, Level::Ok);
+        write("*");
+        assert_eq!(hook(run_with(d.path(), None, full_env()))[0].0, Level::Ok);
+        write("Edit");
+        assert!(hook(run_with(d.path(), None, full_env()))[0]
+            .1
+            .contains("does not include Bash"));
     }
 
     #[test]

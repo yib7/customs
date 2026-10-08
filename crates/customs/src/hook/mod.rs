@@ -11,6 +11,7 @@
 pub mod parse;
 pub mod project;
 pub mod shell;
+pub mod tamper;
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -273,17 +274,23 @@ pub async fn evaluate(input: &str, opts: &HookOptions) -> anyhow::Result<Option<
     {
         return Ok(None);
     }
-    if input.tool_name.as_deref() != Some("Bash") {
-        return Ok(None);
+    let tool_input = input.tool_input.clone().unwrap_or(Value::Null);
+    match input.tool_name.as_deref() {
+        Some("Bash") => {}
+        Some("Edit" | "Write" | "MultiEdit" | "NotebookEdit") => {
+            let path = ["file_path", "notebook_path"]
+                .iter()
+                .find_map(|k| tool_input.get(k).and_then(Value::as_str))
+                .unwrap_or("");
+            return Ok(tamper::edit_reason(path, &tool_input, &opts.server)
+                .map(|r| tamper_decision(None, &[r])));
+        }
+        _ => return Ok(None),
     }
-    let Some(command) = input
-        .tool_input
-        .as_ref()
-        .and_then(|t| t.get("command"))
-        .and_then(Value::as_str)
-    else {
+    let Some(command) = tool_input.get("command").and_then(Value::as_str) else {
         return Ok(None);
     };
+    let tampering = tamper::command_reasons(command, &opts.server);
     let cwd = input
         .cwd
         .map(PathBuf::from)
@@ -294,7 +301,7 @@ pub async fn evaluate(input: &str, opts: &HookOptions) -> anyhow::Result<Option<
     let expanded = expand_projects(targets);
     let targets = &expanded.targets;
     if targets.is_empty() && expanded.mismatches.is_empty() {
-        return Ok(None);
+        return Ok((!tampering.is_empty()).then(|| tamper_decision(None, &tampering)));
     }
     let needs_checker = targets.iter().any(|t| matches!(t, Target::Package { .. }));
     let checker = if needs_checker {
@@ -321,7 +328,37 @@ pub async fn evaluate(input: &str, opts: &HookOptions) -> anyhow::Result<Option<
             eprintln!("customs hook: checking {label} failed: {message}");
         }
     }
-    Ok(decide(&results, opts.fail_closed))
+    let decision = decide(&results, opts.fail_closed);
+    if tampering.is_empty() {
+        return Ok(decision);
+    }
+    Ok(Some(tamper_decision(decision, &tampering)))
+}
+
+/// Merge tampering reasons into the install decision: a deny stays a deny, and anything
+/// else becomes `ask`, since the person should see the change before it runs.
+fn tamper_decision(install: Option<HookDecision>, reasons: &[String]) -> HookDecision {
+    let mut text = String::from(
+        "This would disable or bypass Customs, the package firewall guarding this session:\n",
+    );
+    for r in reasons {
+        text.push_str(&format!("- it {r}\n"));
+    }
+    text.push_str("Confirm only if you asked for this change yourself.");
+    match install {
+        Some(d) if d.decision == "deny" => HookDecision {
+            decision: "deny",
+            reason: format!("{}\n\n{text}", d.reason),
+        },
+        Some(d) => HookDecision {
+            decision: "ask",
+            reason: format!("{}\n\n{text}", d.reason),
+        },
+        None => HookDecision {
+            decision: "ask",
+            reason: text,
+        },
+    }
 }
 
 /// How long the hook spends checking before it stops; Claude Code's hook timeout in
@@ -541,5 +578,32 @@ mod tests {
         let git = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"pip install git+https://github.com/a/b"},"cwd":"/tmp"}"#;
         assert_eq!(evaluate(git, &opts).await.unwrap().unwrap().decision, "ask");
         assert!(evaluate("not json", &opts).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn tampering_needs_confirmation() {
+        let opts = HookOptions {
+            server: "http://127.0.0.1:1".into(),
+            fail_closed: false,
+            local: LocalOptions::default(),
+        };
+        let edit = r#"{"hook_event_name":"PreToolUse","tool_name":"Edit","tool_input":{"file_path":"/repo/.claude/settings.json","old_string":"customs hook","new_string":""}}"#;
+        let d = evaluate(edit, &opts).await.unwrap().unwrap();
+        assert_eq!(d.decision, "ask");
+        assert!(d.reason.contains("Claude Code settings"), "{}", d.reason);
+        let stop = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"pkill -f 'customs serve'"},"cwd":"/tmp"}"#;
+        let d = evaluate(stop, &opts).await.unwrap().unwrap();
+        assert_eq!(d.decision, "ask");
+        assert!(
+            d.reason.contains("stops the Customs server"),
+            "{}",
+            d.reason
+        );
+        // An install that also bypasses the proxy keeps its own findings and adds this one.
+        let git = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"PIP_INDEX_URL=https://pypi.org/simple pip install git+https://github.com/a/b"},"cwd":"/tmp"}"#;
+        let d = evaluate(git, &opts).await.unwrap().unwrap();
+        assert_eq!(d.decision, "ask");
+        assert!(d.reason.contains("not checked"), "{}", d.reason);
+        assert!(d.reason.contains("PIP_INDEX_URL"), "{}", d.reason);
     }
 }

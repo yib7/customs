@@ -776,7 +776,9 @@ resolved again through the proxy and `uv sync --locked` refused to run. `customs
 [DIR]` checks a project and the current environment for each of these (unset or
 different variables, scoped registries, extra indexes and find-links in pip and uv
 settings or requirements files, non-PyPI Pipfile sources, Poetry, lockfile URLs off the
-proxy) and exits 1 when it finds a way around the proxy. Packages that bypass the proxy
+proxy) and exits 1 when it finds a way around the proxy. It also reports where the
+Claude Code hook is registered and warns when its matcher covers only `Bash`, which
+leaves the file edits of section 9.2 unchecked. Packages that bypass the proxy
 are still checked by the Claude Code hook and `customs audit`, which read the lockfile
 itself.
 
@@ -997,6 +999,30 @@ result (`isError: false`); `isError: true` means the check itself failed (regist
 server unreachable, unreadable archive, unknown version). Evidence snippets are quoted
 from untrusted package code, so the text marks them as data and keeps each to one bounded
 line. Setup: `hooks/README.md`.
+
+### 9.2 Tampering
+
+The agent the hook guards can run any shell command, so the cheapest way for a prompt
+injection to get a package installed is to switch the firewall off first. The hook
+returns `ask` for the obvious routes (`crates/customs/src/hook/tamper.rs`): a write to
+`/api/policy` (a `PUT`, `PATCH` or `POST`, a request body, `requests.put`), a command that
+writes `customs.toml` (a redirection, `sed -i`, `tee`, `cp`, `mv`, `rm`, a script
+interpreter), stopping the server (`pkill` or `killall` naming customs, `kill` on a line
+that mentions it, `systemctl`, `service`, `launchctl`, `docker` or `podman` stopping it),
+writes to `.claude/settings*.json`, and pointing installers away from the proxy: an
+assignment, `export`, `unset` or `env -u` of a variable `customs env` sets, `npm|pnpm|yarn|
+bun config set|delete registry`, `pip config set|unset *index*`, or a registry or index
+line written into `.npmrc`, `pip.conf`, `pip.ini`, `.yarnrc(.yml)`, `bunfig.toml` or
+`uv.toml`. A value that points at the Customs server (its authority, or the same port on
+a loopback name) is not flagged. The Edit, Write, MultiEdit and NotebookEdit tools get the
+same check on those files when the hook's matcher includes them, which the shipped
+settings do.
+
+When the same command also installs packages, the install findings come first and a
+deny stays a deny. The tests include everyday commands that must pass untouched (builds,
+`npm run build > log`, `sed -i` on source files, `kill <pid>`, `systemctl status customs`,
+`curl -X POST` to another `/policy` endpoint). A command assembled at run time defeats
+any static reading, so this is a tripwire, not a sandbox.
 
 ## 10. Evaluation protocol (python/customs_ml)
 
