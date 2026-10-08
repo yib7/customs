@@ -17,6 +17,7 @@ export type PolicyField =
   | 'block_threshold'
   | 'min_age_days'
   | 'dormant_days'
+  | 'history_window_days'
   | 'young_dependency_days'
   | 'allow'
   | 'deny';
@@ -37,6 +38,7 @@ export interface PolicyDraft {
   block_install_scripts_from_new: boolean;
   history: Record<HistoryRule, RuleSeverity>;
   dormantDays: string;
+  historyWindowDays: string;
   youngDependencyDays: string;
   unread_code: RuleSeverity;
   startup_hook: RuleSeverity;
@@ -83,6 +85,7 @@ export function policyToDraft(p: Policy): PolicyDraft {
       young_dependency_added: p.young_dependency_added,
     },
     dormantDays: String(p.dormant_days),
+    historyWindowDays: String(p.history_window_days),
     youngDependencyDays: String(p.young_dependency_days),
     unread_code: p.unread_code,
     startup_hook: p.startup_hook,
@@ -134,6 +137,12 @@ export function validateDraft(d: PolicyDraft): DraftResult {
     errors.dormant_days = 'Enter a whole number of days from 1 to 3650.';
   }
 
+  const windowText = d.historyWindowDays.trim();
+  const historyWindow = Number(windowText);
+  if (!/^\d+$/.test(windowText) || historyWindow > 3650) {
+    errors.history_window_days = 'Enter a whole number of days up to 3650 (0 applies the rules at any age).';
+  }
+
   const youngText = d.youngDependencyDays.trim();
   const young = Number(youngText);
   if (!/^\d+$/.test(youngText) || young < 1 || young > 365) {
@@ -164,6 +173,7 @@ export function validateDraft(d: PolicyDraft): DraftResult {
       block_install_scripts_from_new: d.block_install_scripts_from_new,
       ...d.history,
       dormant_days: dormant,
+      history_window_days: historyWindow,
       young_dependency_days: young,
       unread_code: d.unread_code,
       startup_hook: d.startup_hook,

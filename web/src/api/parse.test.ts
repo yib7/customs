@@ -194,6 +194,7 @@ describe('parsePolicy', () => {
       publisher_changed: 'warn',
       dormant_revival: 'warn',
       dormant_days: 730,
+      history_window_days: 90,
       version_anomaly: 'off',
       nonregistry_dependency_added: 'block',
       young_dependency_added: 'block',

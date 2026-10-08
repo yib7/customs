@@ -889,6 +889,7 @@ publisher_changed = "warn"     # npm: publisher of none of the previous 5 releas
 dormant_revival = "warn"       # previous release is more than dormant_days older
 dormant_days = 365
 version_anomaly = "off"        # major version jump, or a release on a long-quiet old major
+history_window_days = 90       # the four rules above apply to releases this recent; 0: any age
 nonregistry_dependency_added = "block"  # npm: new git/URL/file dependency since the previous release
 young_dependency_added = "block"        # npm: new dependency first published days before, by strangers
 young_dependency_days = 7
@@ -957,6 +958,17 @@ itself a prerelease. A version without a publish time gets no history rules.
 | `version_anomaly` | npm, PyPI | the major version is more than one above the highest earlier version, or the release extends an older major line while a newer major exists and that line had no release for `dormant_days` (or never had one) |
 | `nonregistry_dependency_added` | npm | a `dependencies` or `optionalDependencies` entry whose spec fetches code outside the registry (`git+`, `github:`, `owner/repo`, `http(s):`, `file:`, `link:` and the like) is new or changed since the previous release, or since the newest release at least 24 hours older |
 | `young_dependency_added` | npm | a dependency new since the previous release (or since the newest release at least 24 hours older) does not exist on the registry, or was first published less than `young_dependency_days` (1 to 365) before this release, and shares no maintainer or publisher with the package |
+
+`provenance_dropped`, `publisher_changed`, `dormant_revival` and `version_anomaly` apply
+only to releases published within `history_window_days` (90 by default, 0 for any age).
+They are circumstantial signs of a takeover, and hijacked releases are found and pulled
+within days, so a release that has stayed on the registry for months is the package's
+accepted history; without the window, every install of six 1.17.0 or PyYAML 6.0.3 (each
+the latest release, each published more than a year after the one before, each out for
+about a year) would warn for as long as it stays the latest. The rules about code that runs at
+install (`install_script_added` and the two dependency rules) apply at any age. The
+measurements below replay every rule at each release's publication (window 0), where the
+window changes nothing.
 
 These are heuristics with known false positives: maintainers move publishing on or off CI
 (provenance comes and goes), add native builds (`install: node-gyp rebuild`), hand packages

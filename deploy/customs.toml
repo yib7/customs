@@ -14,6 +14,8 @@ publisher_changed = "warn"
 dormant_revival = "warn"
 dormant_days = 365
 version_anomaly = "off"
+# The four rules above apply to releases published within this many days (0: any age).
+history_window_days = 90
 nonregistry_dependency_added = "block"
 young_dependency_added = "block"
 young_dependency_days = 7

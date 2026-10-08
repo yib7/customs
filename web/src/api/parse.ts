@@ -349,6 +349,7 @@ export function parsePolicy(v: unknown): Policy {
   }
   const minAge = asNumber(r.min_age_days);
   const dormantDays = asNumber(r.dormant_days);
+  const historyWindow = asNumber(r.history_window_days);
   const youngDays = asNumber(r.young_dependency_days);
   return {
     mode: parseMode(r.mode),
@@ -364,6 +365,7 @@ export function parsePolicy(v: unknown): Policy {
     publisher_changed: parseRuleSeverity(r.publisher_changed, 'warn'),
     dormant_revival: parseRuleSeverity(r.dormant_revival, 'warn'),
     dormant_days: dormantDays === null ? 365 : dormantDays,
+    history_window_days: historyWindow === null ? 90 : historyWindow,
     version_anomaly: parseRuleSeverity(r.version_anomaly, 'off'),
     nonregistry_dependency_added: parseRuleSeverity(r.nonregistry_dependency_added, 'block'),
     young_dependency_added: parseRuleSeverity(r.young_dependency_added, 'block'),

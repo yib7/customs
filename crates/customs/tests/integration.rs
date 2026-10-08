@@ -67,7 +67,13 @@ fn pypi_packages() -> Vec<(&'static str, &'static str, &'static [u8], String)> {
             b"benign revived",
             "2015-01-01T00:00:00.000000Z".into(),
         ),
-        ("revived", "1.1.0", b"benign revived again", old.clone()),
+        // Inside the history rules' 90-day window.
+        (
+            "revived",
+            "1.1.0",
+            b"benign revived again",
+            (Utc::now() - chrono::Duration::days(10)).to_rfc3339(),
+        ),
         // An established project with a release from an hour ago.
         ("rolling", "1.0.0", b"benign rolling", old.clone()),
         (
@@ -77,12 +83,17 @@ fn pypi_packages() -> Vec<(&'static str, &'static str, &'static [u8], String)> {
             (Utc::now() - chrono::Duration::hours(1)).to_rfc3339(),
         ),
         // 1.0.0 carries PEP 740 provenance in the JSON simple index, 1.1.0 does not.
-        ("unsigned", "1.0.0", b"benign attested", old.clone()),
+        (
+            "unsigned",
+            "1.0.0",
+            b"benign attested",
+            (Utc::now() - chrono::Duration::days(100)).to_rfc3339(),
+        ),
         (
             "unsigned",
             "1.1.0",
             b"benign unattested",
-            "2020-06-01T00:00:00.000000Z".into(),
+            (Utc::now() - chrono::Duration::days(10)).to_rfc3339(),
         ),
     ]
 }
@@ -271,7 +282,7 @@ fn npm_packages() -> Vec<(&'static str, &'static str, &'static [u8], String, Val
             "hijacked",
             "1.1.1",
             b"benign hijacked 1.1.1",
-            "2024-01-01T00:00:00.000Z".into(),
+            (Utc::now() - chrono::Duration::days(10)).to_rfc3339(),
             json!({"_npmUser": {"name": "attacker"}, "scripts": {"postinstall": "node bundle.js"}}),
         ),
         // A takeover that hides its payload in dependencies: a brand-new package from a

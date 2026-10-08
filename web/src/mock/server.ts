@@ -251,6 +251,10 @@ export class MockServer {
     if (dormant !== undefined && (typeof dormant !== 'number' || !Number.isInteger(dormant) || dormant < 1 || dormant > 3650)) {
       errors.push({ field: 'dormant_days', message: 'dormant_days must be between 1 and 3650' });
     }
+    const win = body.history_window_days;
+    if (win !== undefined && (typeof win !== 'number' || !Number.isInteger(win) || win < 0 || win > 3650)) {
+      errors.push({ field: 'history_window_days', message: 'history_window_days must be at most 3650' });
+    }
     const young = body.young_dependency_days;
     if (young !== undefined && (typeof young !== 'number' || !Number.isInteger(young) || young < 1 || young > 365)) {
       errors.push({ field: 'young_dependency_days', message: 'young_dependency_days must be between 1 and 365' });

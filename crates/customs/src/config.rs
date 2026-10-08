@@ -189,6 +189,9 @@ fn default_off() -> RuleSeverity {
 fn default_dormant_days() -> u32 {
     365
 }
+fn default_history_window_days() -> u32 {
+    90
+}
 fn default_young_dependency_days() -> u32 {
     7
 }
@@ -242,6 +245,14 @@ pub struct Policy {
     pub dormant_revival: RuleSeverity,
     #[serde(default = "default_dormant_days")]
     pub dormant_days: u32,
+    /// `provenance_dropped`, `publisher_changed`, `dormant_revival` and `version_anomaly`
+    /// apply to releases published within this many days (0: any age). They are
+    /// circumstantial signs of a takeover, and a hijacked release is found and pulled
+    /// within days; one that has stayed on the registry past the window is the package's
+    /// accepted history. The rules about code that runs at install (install scripts,
+    /// dependencies) apply at any age.
+    #[serde(default = "default_history_window_days")]
+    pub history_window_days: u32,
     /// Jumps of more than one major version, and releases on an old major line that had
     /// been quiet for `dormant_days` while a newer major exists.
     #[serde(default = "default_off")]
@@ -301,6 +312,7 @@ impl Default for Policy {
             publisher_changed: default_warn(),
             dormant_revival: default_warn(),
             dormant_days: default_dormant_days(),
+            history_window_days: default_history_window_days(),
             version_anomaly: default_off(),
             nonregistry_dependency_added: default_block(),
             young_dependency_added: default_block(),
@@ -445,6 +457,12 @@ impl Policy {
             return Err(ConfigError::new(
                 "dormant_days",
                 "must be between 1 and 3650 (set dormant_revival = \"off\" to disable)",
+            ));
+        }
+        if self.history_window_days > 3650 {
+            return Err(ConfigError::new(
+                "history_window_days",
+                "must be at most 3650 (0 applies the rules at any age)",
             ));
         }
         if !(1..=365).contains(&self.young_dependency_days) {

@@ -137,6 +137,8 @@ export interface Policy {
   publisher_changed: RuleSeverity;
   dormant_revival: RuleSeverity;
   dormant_days: number;
+  /** Age limit for the circumstantial history rules; 0 applies them at any age. */
+  history_window_days: number;
   version_anomaly: RuleSeverity;
   nonregistry_dependency_added: RuleSeverity;
   young_dependency_added: RuleSeverity;

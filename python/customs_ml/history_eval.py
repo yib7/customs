@@ -721,6 +721,8 @@ def parity(binary: Path, models: Path, per_rule: int = 20, quiet: int = 30, seed
         'min_age_days = 0\nprovenance_dropped = "warn"\ninstall_script_added = "warn"\n'
         'publisher_changed = "warn"\ndormant_revival = "warn"\nversion_anomaly = "warn"\n'
         'nonregistry_dependency_added = "warn"\nyoung_dependency_added = "warn"\n'
+        # Historical releases: replay the rules as they applied at publication.
+        "history_window_days = 0\n"
     )
 
     def check(r) -> list[str] | None:

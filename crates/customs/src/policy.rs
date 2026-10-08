@@ -137,7 +137,7 @@ pub fn evaluate(policy: &Policy, ctx: &PolicyContext<'_>) -> PolicyOutcome {
         }
     }
     if let Some(h) = ctx.history {
-        hits.extend(history_hits(policy, ctx.ecosystem, h));
+        hits.extend(history_hits(policy, ctx.ecosystem, h, ctx.now));
     }
     PolicyOutcome {
         hits,
@@ -193,9 +193,26 @@ fn shown_command(cmd: &str) -> String {
 /// build steps, hand packages over, and revive old projects. That is why most warn by
 /// default (`install_script_added`, rare in legitimate releases, blocks); the model still
 /// judges the archive's content.
-pub fn history_hits(policy: &Policy, eco: Ecosystem, h: &ReleaseHistory) -> Vec<PolicyHit> {
+pub fn history_hits(
+    policy: &Policy,
+    eco: Ecosystem,
+    h: &ReleaseHistory,
+    now: DateTime<Utc>,
+) -> Vec<PolicyHit> {
     let mut hits = Vec::new();
+    // The circumstantial rules look only at releases inside the window; a release with no
+    // known publication time is treated as new.
+    let window = chrono::Duration::days(policy.history_window_days as i64);
+    let recent =
+        policy.history_window_days == 0 || h.current.published.is_none_or(|p| now - p <= window);
     let mut hit = |rule: &str, severity: RuleSeverity, detail: String| {
+        let circumstantial = matches!(
+            rule,
+            "provenance_dropped" | "publisher_changed" | "dormant_revival" | "version_anomaly"
+        );
+        if circumstantial && !recent {
+            return;
+        }
         if let Some(severity) = severity.decision() {
             hits.push(PolicyHit {
                 rule: rule.into(),
@@ -547,8 +564,11 @@ mod tests {
             .unwrap()
     }
 
+    /// The rules as they apply on the day `v` is published.
     fn history_for(p: &Policy, m: &PackageMeta, v: &str) -> Vec<PolicyHit> {
-        history_hits(p, m.ecosystem, &release_history(m, v).unwrap())
+        let h = release_history(m, v).unwrap();
+        let now = h.current.published.unwrap_or_else(Utc::now);
+        history_hits(p, m.ecosystem, &h, now)
     }
 
     fn rules(hits: &[PolicyHit]) -> Vec<&str> {
@@ -842,6 +862,19 @@ mod tests {
         .unwrap();
         let hits = history_for(&Policy::default(), &m, "2.0");
         assert_eq!(rules(&hits), vec!["dormant_revival"]);
+
+        // Past the window the revival is the package's accepted history.
+        let h = release_history(&m, "2.0").unwrap();
+        let at = |s: &str| s.parse::<DateTime<Utc>>().unwrap();
+        let p = Policy::default();
+        let fired = |p: &Policy, now: &str| !history_hits(p, m.ecosystem, &h, at(now)).is_empty();
+        assert!(fired(&p, "2024-03-30T00:00:00Z"));
+        assert!(!fired(&p, "2024-04-01T00:00:00Z"));
+        let always = Policy {
+            history_window_days: 0,
+            ..Policy::default()
+        };
+        assert!(fired(&always, "2030-01-01T00:00:00Z"));
     }
 
     #[test]
@@ -976,7 +1009,7 @@ mod tests {
         let t = |s: &str| s.parse::<DateTime<Utc>>().unwrap();
         let p = Policy::default();
         // Not looked up yet: nothing to judge.
-        assert!(history_hits(&p, Ecosystem::Npm, &h).is_empty());
+        assert!(history_hits(&p, Ecosystem::Npm, &h, Utc::now()).is_empty());
         for d in h.added_dependencies.iter_mut() {
             d.info = Some(match d.name.as_str() {
                 "lure" => DependencyInfo {
@@ -997,7 +1030,7 @@ mod tests {
                 },
             });
         }
-        let hits = history_hits(&p, Ecosystem::Npm, &h);
+        let hits = history_hits(&p, Ecosystem::Npm, &h, Utc::now());
         assert_eq!(rules(&hits), vec!["young_dependency_added"]);
         assert_eq!(
             hits[0].detail,
@@ -1005,7 +1038,7 @@ mod tests {
         );
         // A dependency the registry does not know.
         h.added_dependencies[0].info = Some(DependencyInfo::default());
-        let hits = history_hits(&p, Ecosystem::Npm, &h);
+        let hits = history_hits(&p, Ecosystem::Npm, &h, Utc::now());
         assert!(
             hits[0].detail.contains("lure is not on the registry"),
             "{}",
@@ -1017,13 +1050,13 @@ mod tests {
             created: Some(t("2025-02-20T00:00:00Z")),
             people: vec![],
         });
-        assert!(history_hits(&p, Ecosystem::Npm, &h).is_empty());
+        assert!(history_hits(&p, Ecosystem::Npm, &h, Utc::now()).is_empty());
         let wide = Policy {
             young_dependency_days: 30,
             ..Policy::default()
         };
         assert_eq!(
-            rules(&history_hits(&wide, Ecosystem::Npm, &h)),
+            rules(&history_hits(&wide, Ecosystem::Npm, &h, Utc::now())),
             vec!["young_dependency_added"]
         );
     }
@@ -1045,6 +1078,7 @@ mod tests {
         let h = release_history(&m, "1.0.1").unwrap();
         let mut c = ctx(Ecosystem::Npm, "@acme/widget", Some("1.0.1"));
         c.history = Some(&h);
+        c.now = "2025-02-01T00:00:00Z".parse().unwrap();
         let o = evaluate(&policy(), &c);
         assert_eq!(
             rules(&o.hits),

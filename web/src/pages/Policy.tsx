@@ -256,7 +256,7 @@ function PolicyForm({
   }
   const unknownServerErrors = Object.entries(serverErrors).filter(
     ([f]) =>
-      !['mode', 'warn_threshold', 'block_threshold', 'min_age_days', 'dormant_days', 'young_dependency_days', 'allow', 'deny'].includes(f),
+      !['mode', 'warn_threshold', 'block_threshold', 'min_age_days', 'dormant_days', 'history_window_days', 'young_dependency_days', 'allow', 'deny'].includes(f),
   );
 
   const set = <K extends keyof PolicyDraft>(k: K, v: PolicyDraft[K], field?: PolicyField) => {
@@ -504,6 +504,26 @@ function PolicyForm({
             aria-describedby={errors.dormant_days ? 'dormant-days-error' : undefined}
           />
           <FieldError id="dormant-days-error">{errors.dormant_days}</FieldError>
+        </div>
+        <div className="mt-3 max-w-xs border-t border-line pt-3">
+          <label htmlFor="history-window-days" className="text-sm font-medium text-ink">
+            History window (days)
+          </label>
+          <p className="text-xs text-muted">
+            Provenance, publisher, revival and version rules apply to releases this recent. Install scripts and dependencies
+            are checked at any age. 0 applies all rules at any age.
+          </p>
+          <input
+            id="history-window-days"
+            type="text"
+            inputMode="numeric"
+            className={`${inputCls} mt-2 w-28 font-mono`}
+            value={draft.historyWindowDays}
+            onChange={(e) => set('historyWindowDays', e.target.value, 'history_window_days')}
+            aria-invalid={errors.history_window_days ? true : undefined}
+            aria-describedby={errors.history_window_days ? 'history-window-days-error' : undefined}
+          />
+          <FieldError id="history-window-days-error">{errors.history_window_days}</FieldError>
         </div>
         <div className="mt-3 max-w-xs border-t border-line pt-3">
           <label htmlFor="young-dependency-days" className="text-sm font-medium text-ink">

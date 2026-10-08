@@ -16,6 +16,7 @@ const POLICY: Policy = {
   publisher_changed: 'warn',
   dormant_revival: 'warn',
   dormant_days: 365,
+  history_window_days: 90,
   version_anomaly: 'off',
   nonregistry_dependency_added: 'block',
   young_dependency_added: 'block',
@@ -62,6 +63,7 @@ describe('validateDraft', () => {
       publisher_changed: 'warn',
       dormant_revival: 'warn',
       dormant_days: 365,
+      history_window_days: 90,
       version_anomaly: 'off',
       nonregistry_dependency_added: 'block',
       young_dependency_added: 'block',
@@ -103,6 +105,14 @@ describe('validateDraft', () => {
       history: { ...d.history, provenance_dropped: 'block', version_anomaly: 'warn' },
     });
     expect(r.policy).toMatchObject({ dormant_days: 730, provenance_dropped: 'block', version_anomaly: 'warn', publisher_changed: 'warn' });
+  });
+
+  it('validates the history window, where 0 means any age', () => {
+    const d = policyToDraft(POLICY);
+    expect(validateDraft({ ...d, historyWindowDays: '3651' }).errors.history_window_days).toMatch(/up to 3650/);
+    expect(validateDraft({ ...d, historyWindowDays: '-1' }).errors.history_window_days).toBeDefined();
+    expect(validateDraft({ ...d, historyWindowDays: '0' }).policy).toMatchObject({ history_window_days: 0 });
+    expect(validateDraft(d).policy).toMatchObject({ history_window_days: 90 });
   });
 
   it('validates the new dependency window', () => {

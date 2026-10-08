@@ -160,7 +160,9 @@ with the one before it and with the newest release at least a day older, so a bu
 malicious versions published within hours cannot hide the change. Together they fired on 5
 of 14,897 legitimate releases and lift the share of test-period compromised npm releases
 blocked from 44% to at least 96%: of 17 groups of three or more releases (one npm scope or
-name prefix each), 15 are blocked in full. The rest warn.
+name prefix each), 15 are blocked in full. The rest warn. The provenance, publisher and revival rules look only at
+releases from the last 90 days, since a hijacked release is pulled within days; the rules
+about install scripts and dependencies apply at any age.
 
 ## Results
 
