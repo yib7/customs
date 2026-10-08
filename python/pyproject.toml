@@ -1,6 +1,6 @@
 [project]
 name = "customs-ml"
-version = "0.1.0"
+version = "0.9.0"
 description = "Dataset pipeline, training, and evaluation for the Customs package malware classifier"
 requires-python = ">=3.11"
 license = { text = "MIT" }
