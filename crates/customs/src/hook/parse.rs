@@ -1904,6 +1904,9 @@ const DENO_VALUE: &[&str] = &[
     "--arch",
     "-p",
     "--package",
+    // `deno serve`
+    "--port",
+    "--host",
 ];
 
 /// Positional arguments of a Deno subcommand, up to `--`.
@@ -1988,6 +1991,16 @@ fn deno(args: &[String], cwd: &Path, out: &mut Vec<Install>) {
             .take_while(|a| *a != "--")
             .any(|a| names.contains(&a.as_str()))
     };
+    // Local code that runs imports `npm:` packages, which Deno fetches on the spot.
+    let local = |files: &[&str]| -> Vec<Target> {
+        let paths: Vec<PathBuf> = files
+            .iter()
+            .filter(|f| !f.contains(':'))
+            .map(|f| cwd.join(f))
+            .collect();
+        deno_imports(&paths, None)
+    };
+    let mut tool = format!("deno {sub}");
     let targets: Vec<Target> = match sub {
         "add" => pos.iter().filter_map(|p| deno_spec(p, true)).collect(),
         "install" | "i" if flag(&["-g", "--global"]) => pos
@@ -2002,11 +2015,21 @@ fn deno(args: &[String], cwd: &Path, out: &mut Vec<Install>) {
         }
         "install" | "i" | "ci" => vec![project(Manager::Deno, cwd, None)],
         // The script is the first positional; the rest are its arguments.
-        "run" | "serve" | "compile" => pos
+        "run" | "serve" | "compile" => match pos.first() {
+            Some(p) => match deno_spec(p, false) {
+                Some(t) => vec![t],
+                None => {
+                    tool = format!("deno {sub} {p}");
+                    local(&pos[..1])
+                }
+            },
+            None => Vec::new(),
+        },
+        "test" | "bench" => local(&pos),
+        "eval" => pos
             .first()
-            .and_then(|p| deno_spec(p, false))
-            .into_iter()
-            .collect(),
+            .map(|code| deno_imports(&[], Some(code)))
+            .unwrap_or_default(),
         "cache" => pos.iter().filter_map(|p| deno_spec(p, false)).collect(),
         "x" => return deno_x(rest, out, "deno x"),
         "create" => {
@@ -2024,11 +2047,63 @@ fn deno(args: &[String], cwd: &Path, out: &mut Vec<Install>) {
         _ => Vec::new(),
     };
     if !targets.is_empty() {
-        out.push(Install {
-            tool: format!("deno {sub}"),
-            targets,
-        });
+        out.push(Install { tool, targets });
     }
+}
+
+/// The most local modules [`deno_imports`] reads.
+const MAX_DENO_MODULES: usize = 200;
+
+fn deno_import_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r#"(?:\bfrom|\bimport)\s*\(?\s*["']([^"'\n]+)["']"#).unwrap())
+}
+
+/// The `npm:` packages that `entries` (local modules) and `code` import, following
+/// relative imports through local files. JSR and URL imports are left out: Customs cannot
+/// check them, and nearly every Deno program has some, so asking on each would be noise.
+fn deno_imports(entries: &[PathBuf], code: Option<&str>) -> Vec<Target> {
+    use std::io::Read;
+    let mut targets = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut queue: std::collections::VecDeque<PathBuf> = entries.iter().cloned().collect();
+    let mut scan =
+        |text: &str, dir: Option<&Path>, queue: &mut std::collections::VecDeque<PathBuf>| {
+            for c in deno_import_re().captures_iter(text) {
+                let spec = &c[1];
+                if spec.starts_with("npm:") {
+                    if let Some(t) = deno_spec(spec, false) {
+                        if !targets.contains(&t) {
+                            targets.push(t);
+                        }
+                    }
+                } else if let Some(dir) =
+                    dir.filter(|_| spec.starts_with("./") || spec.starts_with("../"))
+                {
+                    queue.push_back(dir.join(spec));
+                }
+            }
+        };
+    if let Some(code) = code {
+        scan(code, None, &mut queue);
+    }
+    let mut read = 0;
+    while let Some(path) = queue.pop_front() {
+        let key = path.canonicalize().unwrap_or_else(|_| path.clone());
+        if read >= MAX_DENO_MODULES || !seen.insert(key) {
+            continue;
+        }
+        let mut text = String::new();
+        let Ok(f) = std::fs::File::open(&path) else {
+            continue;
+        };
+        if f.take(MAX_SCRIPT_BYTES).read_to_string(&mut text).is_err() {
+            continue;
+        }
+        read += 1;
+        scan(&text, path.parent(), &mut queue);
+    }
+    targets
 }
 
 /// `deno x` and `dx`, Deno's `npx`: `--package` names the package, otherwise the first
@@ -3108,6 +3183,55 @@ mod tests {
         assert_eq!(targets("deno create vite"), vec![]);
         assert_eq!(targets("deno fmt && deno test -A"), vec![]);
         assert_eq!(tools("deno add npm:a; dx b"), ["deno add", "dx"]);
+    }
+
+    #[test]
+    fn deno_checks_npm_imports_of_the_code_it_runs() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir(d.path().join("lib")).unwrap();
+        std::fs::write(
+            d.path().join("main.ts"),
+            concat!(
+                "import chalk from \"npm:chalk@5\";\n",
+                "import { join } from \"jsr:@std/path\";\n",
+                "import { x } from './lib/util.ts';\n",
+                "const ms = await import('npm:ms@2/index.js');\n",
+                "export * from \"npm:@scope/pkg@1\";\n",
+                "import \"npm:chalk@5\";\n",
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            d.path().join("lib/util.ts"),
+            "import pad from \"npm:left-pad-xyz\";\nimport { y } from \"../main.ts\";\nexport const x = 1;\n",
+        )
+        .unwrap();
+        std::fs::write(d.path().join("plain.ts"), "console.log(1);\n").unwrap();
+        let at = |cmd: &str| -> Vec<Target> {
+            parse_command(cmd, d.path())
+                .into_iter()
+                .flat_map(|i| i.targets)
+                .collect()
+        };
+        let imported = vec![
+            js("chalk", Some("5")),
+            js("ms", Some("2")),
+            js("@scope/pkg", Some("1")),
+            js("left-pad-xyz", None),
+        ];
+        assert_eq!(at("deno run -A main.ts --port 80"), imported);
+        assert_eq!(at("deno serve --port 8000 main.ts"), imported);
+        assert_eq!(at("deno test -A main.ts"), imported);
+        assert_eq!(at("deno run plain.ts"), vec![]);
+        assert_eq!(at("deno run missing.ts"), vec![]);
+        assert_eq!(
+            at("deno eval \"const m = await import('npm:cowsay@1'); m.say()\""),
+            vec![js("cowsay", Some("1"))]
+        );
+        assert_eq!(
+            parse_command("deno run -A main.ts", d.path())[0].tool,
+            "deno run main.ts"
+        );
     }
 
     #[test]

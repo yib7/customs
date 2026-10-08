@@ -50,7 +50,9 @@ Scaffolding commands run a package too: `npm create vite` and `npm init vite` ru
 `@scope/create-app`); `bun create` from a GitHub repository comes back for review.
 Deno: `deno add` and `deno install` with `npm:` packages, `deno install -g`, `deno run`,
 `deno x` and `dx` with an npm package, and `deno create npm:<x>`. JSR packages and remote
-`https:` modules cannot be checked and come back for review.
+`https:` modules cannot be checked and come back for review. `deno run`, `serve`, `test`,
+`bench` and `eval` fetch the `npm:` packages the code imports, so the hook reads the local
+files they run (following relative imports) and checks those packages.
 Scripts with inline metadata: `uv run script.py` and `pipx run script.py` install the
 dependencies a PEP 723 `# /// script` block lists, so the hook reads the block and checks
 each one; a `[tool.uv]` index or a `[tool.uv.sources]` entry comes back for review, and

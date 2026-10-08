@@ -1073,7 +1073,11 @@ commands `npm init|create <x>`, `pnpm|yarn|bun create <x>`, which run `create-<x
 `@scope/create-<x>` for `@scope/<x>`; and Deno: `deno add|install npm:<x>` (a name without
 a prefix is an npm package there), `deno install -g`, `deno run|serve|compile|cache
 npm:<x>`, `deno x|dx <x>` and `deno create npm:<x>`, which maps initializers the way npm
-does; `jsr:` packages and remote `https:` modules cannot be checked and produce `ask`), resolves each requirement, calls the
+does; `jsr:` packages and remote `https:` modules cannot be checked and produce `ask`; and
+the `npm:` imports of the local code `deno run|serve|compile|test|bench` runs, following
+relative imports through up to 200 files, or of the code `deno eval` is given, since Deno
+fetches them on the spot; `jsr:` and URL imports there are left out, as nearly every Deno
+program has some), resolves each requirement, calls the
 running server's `/api/check` (or scans in-process when no server is running), and returns
 a PreToolUse decision: `deny` with an explanation when any package is blocked, `ask` when
 any is warned, nothing otherwise. Local paths, URLs, `-r requirements.txt` and editable
