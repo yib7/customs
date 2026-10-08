@@ -43,7 +43,7 @@ Run `/hooks` in Claude Code to confirm it is registered.
 
 `pip`/`pip3`/`python -m pip` `install` (also `download` and `wheel`, which run `setup.py`),
 `uv pip install`, `uv add`, `uv tool install`, `uv run --with`, `uvx`, `poetry add`,
-`pdm add`, `pipx install|run|inject`, `npm install|i|add` (and npm's aliases),
+`pdm add`, `pixi add --pypi`, `pipx install|run|inject`, `npm install|i|add` (and npm's aliases),
 `npm exec`, `pnpm add`, `pnpm dlx`, `yarn add`, `yarn dlx`, `bun add`, `bunx`, and `npx`.
 Scaffolding commands run a package too: `npm create vite` and `npm init vite` run
 `create-vite`, and so do `pnpm create`, `yarn create` and `bun create` (`@scope/app` is
@@ -51,6 +51,10 @@ Scaffolding commands run a package too: `npm create vite` and `npm init vite` ru
 Deno: `deno add` and `deno install` with `npm:` packages, `deno install -g`, `deno run`,
 `deno x` and `dx` with an npm package, and `deno create npm:<x>`. JSR packages and remote
 `https:` modules cannot be checked and come back for review.
+Scripts with inline metadata: `uv run script.py` and `pipx run script.py` install the
+dependencies a PEP 723 `# /// script` block lists, so the hook reads the block and checks
+each one; a `[tool.uv]` index or a `[tool.uv.sources]` entry comes back for review, and
+`uv run URL` or `pipx run URL` is a downloaded script.
 
 Project installs too: `npm install` and `npm ci` with no package, `pnpm install`, `yarn`,
 `bun install`, `deno install`, `deno ci`, `uv sync`, `poetry install`, `pipenv install`, `pipenv sync`, and

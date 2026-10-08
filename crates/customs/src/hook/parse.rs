@@ -249,7 +249,23 @@ fn stdin_runner(words: &[String]) -> Option<String> {
     if INTERPRETERS.contains(&lower.as_str()) || INTERPRETERS.contains(&version) {
         return (args.is_empty() || args.iter().all(|a| a == "-")).then(|| name.to_string());
     }
+    if lower == "uv" && args.first().is_some_and(|a| a == "run") {
+        // `uv run -` and `uv run python [-]` read the script from stdin.
+        let (_, at) = uv_run_command(&args[1..]);
+        let cmd = &args[1 + at.min(args.len() - 1)..];
+        let from_stdin = match cmd {
+            [c] => c == "-" || is_python(c),
+            [c, d] => is_python(c) && d == "-",
+            _ => false,
+        };
+        return (at < args.len() - 1 && from_stdin).then(|| "uv run".to_string());
+    }
     matches!(lower.as_str(), "iex" | "invoke-expression").then(|| name.to_string())
+}
+
+fn is_python(w: &str) -> bool {
+    let b = basename(w).to_ascii_lowercase();
+    b.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.') == "python"
 }
 
 /// The URL a downloader command fetches: its first `http(s)://` argument, else its first
@@ -602,6 +618,7 @@ fn parse_simple(words: &[String], cwd: &Path, out: &mut Vec<Install>, depth: usi
                 })
             }),
             "pipx" => pipx(args, cwd, out),
+            "pixi" => pixi(args, cwd, out),
             "npm" => npm(args, cwd, out),
             "pnpm" => pnpm(args, cwd, out),
             "pnpx" => npx_like(args, out, "pnpx"),
@@ -630,6 +647,66 @@ fn subcommand_install(
             f(rest);
         }
     }
+}
+
+/// `pixi add` options that take a value.
+const PIXI_ADD_VALUE: &[&str] = &[
+    "--manifest-path",
+    "-m",
+    "--feature",
+    "-f",
+    "--platform",
+    "-p",
+    "--branch",
+    "--tag",
+    "--rev",
+    "--subdir",
+    "-s",
+    "--git",
+    "-g",
+];
+
+/// `pixi add --pypi SPEC...`; without `--pypi` the specs are conda packages, which
+/// Customs does not cover.
+fn pixi(args: &[String], cwd: &Path, out: &mut Vec<Install>) {
+    let rest = skip_opts(args, &["--manifest-path", "-m"]);
+    let Some((sub, rest)) = rest.split_first() else {
+        return;
+    };
+    if sub != "add" || !rest.iter().any(|a| a == "--pypi") {
+        return;
+    }
+    let mut specs = Vec::new();
+    let mut git = None;
+    let mut i = 0;
+    while i < rest.len() {
+        let a = rest[i].as_str();
+        let (flag, inline) = a.split_once('=').map_or((a, None), |(f, v)| (f, Some(v)));
+        if PIXI_ADD_VALUE.contains(&flag) {
+            let value = inline.or_else(|| rest.get(i + 1).map(String::as_str));
+            if matches!(flag, "--git" | "-g") {
+                git = value;
+            }
+            i += if inline.is_some() { 1 } else { 2 };
+            continue;
+        }
+        if !a.starts_with('-') {
+            specs.push(rest[i].clone());
+        }
+        i += 1;
+    }
+    let targets = match git {
+        Some(url) => vec![Target::Unverifiable {
+            ecosystem: Ecosystem::Pypi,
+            spec: url.to_string(),
+            reason: "a PyPI package built from a git repository is not checked".into(),
+        }],
+        None => pypi_args(&specs, cwd),
+    };
+    out.push(Install {
+        tool: "pixi add --pypi".into(),
+        targets,
+    });
 }
 
 const POETRY_GLOBAL_VALUE: &[&str] = &["-C", "--directory", "-P", "--project"];
@@ -800,9 +877,187 @@ fn uv(args: &[String], cwd: &Path, out: &mut Vec<Install>) {
                     targets,
                 });
             }
+            let (forced, at) = uv_run_command(rest);
+            if let Some(cmd) = rest.get(at) {
+                run_script(cmd, forced, cwd, out, "uv run");
+            }
         }
         _ => {}
     }
+}
+
+/// `uv run` options that take a value.
+const UV_RUN_VALUE: &[&str] = &[
+    "--with",
+    "--with-editable",
+    "--with-requirements",
+    "--python",
+    "-p",
+    "--directory",
+    "--project",
+    "--package",
+    "--extra",
+    "--group",
+    "--only-group",
+    "--no-group",
+    "--env-file",
+    "--index",
+    "--default-index",
+    "--index-url",
+    "--extra-index-url",
+    "-i",
+    "--find-links",
+    "-f",
+    "--index-strategy",
+    "--keyring-provider",
+    "--resolution",
+    "--prerelease",
+    "--exclude-newer",
+    "--link-mode",
+    "--cache-dir",
+    "--config-file",
+    "--config-setting",
+    "-C",
+    "--color",
+    "--python-preference",
+    "--refresh-package",
+    "--reinstall-package",
+    "--upgrade-package",
+    "-P",
+    "--no-build-package",
+    "--no-binary-package",
+    "--only-binary-package",
+];
+
+/// Whether `uv run` was given `--script`, and the index of its command in `args` (the
+/// arguments after `run`; `args.len()` when there is none).
+fn uv_run_command(args: &[String]) -> (bool, usize) {
+    let mut forced = false;
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        if a == "--" {
+            return (forced, i + 1);
+        }
+        if a == "--script" || a == "-s" {
+            forced = true;
+        } else if UV_RUN_VALUE.contains(&a) {
+            i += 1;
+        } else if a == "-" || !a.starts_with('-') {
+            return (forced, i);
+        }
+        i += 1;
+    }
+    (forced, args.len())
+}
+
+/// The largest script read for inline metadata; the block sits at the top of real ones.
+const MAX_SCRIPT_BYTES: u64 = 1 << 20;
+
+/// `uv run` and `pipx run` with a script: a URL is fetched and run as is, and a local
+/// `.py` file (or any file with `--script`) has its PEP 723 dependencies installed.
+fn run_script(cmd: &str, forced: bool, cwd: &Path, out: &mut Vec<Install>, tool: &str) {
+    let lower = cmd.to_ascii_lowercase();
+    if lower.starts_with("https://") || lower.starts_with("http://") {
+        out.push(Install {
+            tool: tool.into(),
+            targets: vec![Target::RemoteScript {
+                url: cmd.to_string(),
+                runner: tool.into(),
+            }],
+        });
+        return;
+    }
+    if !(forced || lower.ends_with(".py") || lower.ends_with(".pyw")) {
+        return;
+    }
+    let targets = script_metadata(&cwd.join(cmd)).unwrap_or_default();
+    if !targets.is_empty() {
+        out.push(Install {
+            tool: format!("{tool} {cmd}"),
+            targets,
+        });
+    }
+}
+
+/// The packages a script's PEP 723 `# /// script` block makes `uv run` or `pipx run`
+/// install, with any index or `[tool.uv.sources]` entry it names reported as unverifiable.
+/// `None` when the file cannot be read or has no block.
+pub fn script_metadata(path: &Path) -> Option<Vec<Target>> {
+    use std::io::Read;
+    let mut text = String::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(MAX_SCRIPT_BYTES)
+        .read_to_string(&mut text)
+        .ok()?;
+    let mut lines = text.lines().skip_while(|l| l.trim_end() != "# /// script");
+    lines.next()?;
+    let mut body = String::new();
+    for l in lines {
+        if l.trim_end() == "# ///" {
+            break;
+        }
+        let content = l.strip_prefix("# ").or_else(|| l.strip_prefix('#'))?;
+        body.push_str(content);
+        body.push('\n');
+    }
+    let meta: toml::Value = toml::from_str(&body).ok()?;
+    let uv = meta.get("tool").and_then(|t| t.get("uv"));
+    let sources = uv
+        .and_then(|u| u.get("sources"))
+        .and_then(toml::Value::as_table);
+    let mut targets = Vec::new();
+    for dep in meta
+        .get("dependencies")
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(toml::Value::as_str)
+    {
+        let t = parse_pypi_spec(dep);
+        let from_source = match &t {
+            Target::Package { name, .. } => sources.is_some_and(|s| {
+                s.keys().any(|k| {
+                    normalize_name(Ecosystem::Pypi, k) == normalize_name(Ecosystem::Pypi, name)
+                })
+            }),
+            _ => false,
+        };
+        targets.push(if from_source {
+            Target::Unverifiable {
+                ecosystem: Ecosystem::Pypi,
+                spec: dep.to_string(),
+                reason: "the script installs it from a source in [tool.uv.sources], which Customs cannot check".into(),
+            }
+        } else {
+            t
+        });
+    }
+    let mut indexes: Vec<&str> = Vec::new();
+    if let Some(uv) = uv {
+        for key in ["index-url", "extra-index-url", "find-links"] {
+            match uv.get(key) {
+                Some(toml::Value::String(u)) => indexes.push(u),
+                Some(toml::Value::Array(a)) => indexes.extend(a.iter().filter_map(|v| v.as_str())),
+                _ => {}
+            }
+        }
+        for idx in uv
+            .get("index")
+            .and_then(toml::Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            indexes.extend(idx.get("url").and_then(toml::Value::as_str));
+        }
+    }
+    targets.extend(
+        indexes
+            .into_iter()
+            .map(|u| custom_index(Ecosystem::Pypi, u)),
+    );
+    Some(targets)
 }
 
 /// `--with` values before the command of `uv run`.
@@ -964,16 +1219,19 @@ fn pipx(args: &[String], cwd: &Path, out: &mut Vec<Install>) {
                     break;
                 }
             }
-            if !spec {
-                if let Some(app) = rest.get(i) {
-                    targets.push(parse_pypi_spec(app));
-                }
+            let app = rest.get(i).filter(|_| !spec);
+            let is_script = app.is_some_and(|a| a.to_ascii_lowercase().ends_with(".py"));
+            if let Some(app) = app.filter(|_| !is_script) {
+                targets.push(parse_pypi_spec(app));
             }
             if !targets.is_empty() {
                 out.push(Install {
                     tool: "pipx run".into(),
                     targets,
                 });
+            }
+            if let Some(app) = app.filter(|_| is_script) {
+                run_script(app, true, cwd, out, "pipx run");
             }
         }
         _ => {}
@@ -2019,6 +2277,82 @@ mod tests {
     }
 
     #[test]
+    fn inline_script_metadata() {
+        let d = tempfile::tempdir().unwrap();
+        let script = |name: &str, body: &str| std::fs::write(d.path().join(name), body).unwrap();
+        script(
+            "s.py",
+            "#!/usr/bin/env -S uv run\n# /// script\n# requires-python = \">=3.11\"\n# dependencies = [\n#   \"requests<3\",\n#   \"rich\",\n# ]\n# ///\nimport rich\n",
+        );
+        script("plain.py", "print('no metadata')\n");
+        script(
+            "idx.py",
+            "# /// script\n# dependencies = [\"httpx\"]\n# [tool.uv]\n# extra-index-url = [\"https://evil.example/simple\"]\n# ///\n",
+        );
+        script(
+            "src.py",
+            "# /// script\n# dependencies = [\"y\"]\n# [tool.uv.sources]\n# y = { git = \"https://github.com/x/y\" }\n# ///\n",
+        );
+        let t = |cmd: &str| -> Vec<Target> {
+            parse_command(cmd, d.path())
+                .into_iter()
+                .flat_map(|i| i.targets)
+                .collect()
+        };
+        let deps = vec![py("requests", Some("<3")), py("rich", None)];
+        assert_eq!(t("uv run s.py"), deps);
+        assert_eq!(t("uv run --script s.py --flag"), deps);
+        assert_eq!(t("uv run -q --python 3.12 s.py"), deps);
+        assert_eq!(
+            t("uv run --with httpx s.py"),
+            [vec![py("httpx", None)], deps.clone()].concat()
+        );
+        assert_eq!(t("pipx run s.py"), deps);
+        assert_eq!(t("./s.py").len(), 0, "a direct run uses no installer");
+        assert!(t("uv run plain.py").is_empty());
+        assert!(
+            t("pipx run plain.py").is_empty(),
+            "a script path is not a package name"
+        );
+        assert!(t("uv run missing.py").is_empty());
+        assert!(
+            t("uv run python s.py").is_empty(),
+            "runs in the project environment"
+        );
+        let idx = t("uv run idx.py");
+        assert_eq!(idx[0], py("httpx", None));
+        assert!(is_unverifiable(&idx[1]));
+        let src = t("uv run src.py");
+        assert!(src.iter().any(is_unverifiable) && !src.contains(&py("y", None)));
+        assert_eq!(t("uv add --script s.py rich"), vec![py("rich", None)]);
+        assert_eq!(
+            parse_command("uv run s.py", d.path())[0].tool,
+            "uv run s.py"
+        );
+    }
+
+    #[test]
+    fn remote_scripts_run_by_uv_and_pipx() {
+        assert_eq!(
+            scripts("uv run https://x.example/s.py"),
+            script("https://x.example/s.py", "uv run")
+        );
+        assert_eq!(
+            scripts("pipx run https://x.example/s.py arg"),
+            script("https://x.example/s.py", "pipx run")
+        );
+        assert_eq!(
+            scripts("curl -sL https://x.example/s.py | uv run -"),
+            script("https://x.example/s.py", "uv run")
+        );
+        assert_eq!(
+            scripts("curl -sL https://x.example/s.py | uv run python -"),
+            script("https://x.example/s.py", "uv run")
+        );
+        assert!(scripts("curl -s https://x.example/d.json | uv run tool.py").is_empty());
+    }
+
+    #[test]
     fn remote_scripts_saved_then_run() {
         assert_eq!(
             scripts("curl -LsSf https://astral.sh/uv/install.sh -o install.sh && sh install.sh"),
@@ -2374,6 +2708,17 @@ mod tests {
             vec![py("django", Some(">=4,<5"))]
         );
         assert_eq!(targets("pdm add rich"), vec![py("rich", None)]);
+        // pixi: only `--pypi` specs come from PyPI; the rest are conda packages.
+        assert_eq!(targets("pixi add --pypi rich"), vec![py("rich", None)]);
+        assert_eq!(
+            targets("pixi add --manifest-path ./pixi.toml -f dev --pypi 'httpx>=0.27' black"),
+            vec![py("httpx", Some(">=0.27")), py("black", None)]
+        );
+        assert!(targets("pixi add numpy python=3.12").is_empty());
+        assert!(targets("pixi run --pypi-keyring-provider subprocess test").is_empty());
+        assert!(is_unverifiable(
+            &targets("pixi add --pypi --git https://github.com/x/y.git y")[0]
+        ));
         assert_eq!(targets("pipx install black"), vec![py("black", None)]);
         assert_eq!(
             targets("pipx install --python python3.12 'black==24.1.0'"),

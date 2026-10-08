@@ -1066,7 +1066,8 @@ both to proxied downloads and to `POST /api/check`.
 
 `customs hook claude-code` is a PreToolUse command hook for the `Bash` tool. It parses the
 command for package installs (`pip install`, `pip3 install`, `python -m pip install`,
-`uv pip install`, `uv add`, `poetry add`, `pipx install`, `npm install|i|add`,
+`uv pip install`, `uv add`, `poetry add`, `pixi add --pypi`, `pipx install`, the PEP 723
+inline dependencies of a script run by `uv run` or `pipx run`, `npm install|i|add`,
 `pnpm add|install`, `yarn add`, `bun add`, `npx <pkg>`, `uvx <pkg>`, and the scaffolding
 commands `npm init|create <x>`, `pnpm|yarn|bun create <x>`, which run `create-<x>`, or
 `@scope/create-<x>` for `@scope/<x>`; and Deno: `deno add|install npm:<x>` (a name without
@@ -1087,7 +1088,8 @@ message on stderr) unless run with `--fail-closed`, which denies. Setup: `hooks/
 **Downloaded scripts.** A script fetched and run in one step never reaches the registry
 proxy: `curl -fsSL URL | sh`, `wget -qO- URL | sudo bash`, `curl URL | python3 -`,
 `bash <(curl URL)`, `source <(wget -qO- URL)`, `/bin/bash -c "$(curl -fsSL URL)"`, `eval
-"$(curl URL)"`, and PowerShell's `irm URL | iex`. These are how agents install toolchains
+"$(curl URL)"`, `uv run URL`, `curl URL | uv run -`, `pipx run URL`, and PowerShell's `irm
+URL | iex`. These are how agents install toolchains
 (rustup, uv, Homebrew, nvm) and how a prompt-injected agent would fetch a payload, so the
 hook reports each one as `script <URL>` and asks, like any other spec it cannot check. A
 downloader counts when its output reaches, through any filters in the pipeline, a shell
