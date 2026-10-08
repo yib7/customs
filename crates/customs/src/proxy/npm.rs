@@ -4,7 +4,7 @@
 
 use axum::body::Bytes;
 use axum::extract::{Path, State};
-use axum::http::{header, HeaderMap, Method, StatusCode};
+use axum::http::{header, HeaderMap, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use customs_scan::Ecosystem;
 use serde_json::Value;
@@ -122,6 +122,7 @@ pub fn rewrite_packument(v: &mut Value, proxy_base: &str) {
 pub async fn npm_any(
     State(state): State<AppState>,
     method: Method,
+    uri: Uri,
     Path(rest): Path<String>,
     headers: HeaderMap,
     body: Bytes,
@@ -130,7 +131,7 @@ pub async fn npm_any(
         return (StatusCode::NOT_FOUND, r#"{"error":"Not found"}"#).into_response();
     };
     match parsed {
-        NpmPath::Special(p) => passthrough(&state, method, &p, &headers, body).await,
+        NpmPath::Special(p) => passthrough(&state, method, &p, uri.query(), &headers, body).await,
         _ if method != Method::GET && method != Method::HEAD => (
             StatusCode::METHOD_NOT_ALLOWED,
             r#"{"error":"customs is a read-only registry proxy"}"#,
@@ -230,16 +231,21 @@ async fn tarball(state: &AppState, headers: &HeaderMap, name: &str, file: &str) 
     }
 }
 
-/// Forward registry service endpoints (audit, search) unchanged.
+/// Forward registry service endpoints (audit, search) unchanged, query string included
+/// (`npm search` sends its terms as `?text=`).
 async fn passthrough(
     state: &AppState,
     method: Method,
     path: &str,
+    query: Option<&str>,
     headers: &HeaderMap,
     body: Bytes,
 ) -> Response {
     let policy = state.engine.policy();
-    let url = format!("{}/{}", policy.upstream.npm, path);
+    let url = match query {
+        Some(q) => format!("{}/{path}?{q}", policy.upstream.npm),
+        None => format!("{}/{path}", policy.upstream.npm),
+    };
     let Ok(m) = reqwest::Method::from_bytes(method.as_str().as_bytes()) else {
         return StatusCode::METHOD_NOT_ALLOWED.into_response();
     };

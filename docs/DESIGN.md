@@ -694,7 +694,8 @@ Registry proxy:
   also proxied. A 404 is recorded as `nonexistent_package`.
 - `GET /npm/{package}/-/{file}.tgz`: fetch, scan, decide, stream or 403 with
   `{"error": "<explanation>"}` (npm prints `error`).
-- `/npm/-/...` (audit and other registry endpoints) passes through unchanged.
+- `/npm/-/...` (audit, search and other registry endpoints) passes through unchanged,
+  query string included.
 - Artifact responses carry `x-customs-decision` and `x-customs-verdict` (verdict id).
 - Every path that ends up in an upstream URL is checked after the router has
   percent-decoded it once: a `?`, `#`, `\`, `%`, whitespace or control character, or an

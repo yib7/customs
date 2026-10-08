@@ -278,6 +278,11 @@ fn npm_packages() -> Vec<(&'static str, &'static str, &'static [u8], String, Val
     ]
 }
 
+/// Echoes the query, so a test can see what reached the registry.
+async fn npm_search(uri: axum::http::Uri) -> Response {
+    Json(json!({"objects": [], "query": uri.query()})).into_response()
+}
+
 async fn npm_doc(State(m): State<Mock>, Path(rest): Path<String>) -> Response {
     if let Some((name, file)) = rest.split_once("/-/") {
         m.hit(&format!("npm:{file}"));
@@ -331,6 +336,7 @@ async fn start_mock() -> Mock {
         .route("/pypi/{name}/json", get(pypi_json))
         .route("/pypi/{name}/{version}/json", get(pypi_version_json))
         .route("/files/{*path}", get(files))
+        .route("/npm/-/v1/search", get(npm_search))
         .route("/npm/{*rest}", get(npm_doc))
         .with_state(state.clone());
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -715,6 +721,14 @@ async fn upstream_urls_cannot_be_redirected_by_escaped_paths() {
 #[tokio::test(flavor = "multi_thread")]
 async fn npm_packument_rewrite_and_tarballs() {
     let h = Harness::start(|_| {}).await;
+    // Registry service endpoints pass through with their query (`npm search`).
+    let r: Value = h
+        .get("/npm/-/v1/search?text=left-pad&size=20")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(r["query"], "text=left-pad&size=20");
     for path in ["/npm/@scope%2flib", "/npm/@scope/lib", "/npm/@scope%2Flib"] {
         let r = h.get(path).await;
         assert_eq!(r.status(), 200, "{path}");
