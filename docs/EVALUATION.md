@@ -299,7 +299,7 @@ Window: 2026-10-07T07:56:21Z to 2026-10-08T01:05:27Z (UTC, models 2026.10.07).
 
 | Decision | Releases | Later removed from PyPI | OpenSSF report |
 |---|---:|---:|---:|
-| allow | 8,415 | 9 | 0 |
+| allow | 8,415 | 8 | 0 |
 | warn | 7 | 0 | 0 |
 
 8,422 of 8,425 releases were scanned (995 from projects created during the window).
