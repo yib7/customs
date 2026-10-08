@@ -138,6 +138,13 @@ pub struct ScanReport {
     /// switch on a feature from an environment variable.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub startup_hooks: Vec<String>,
+    /// Flags that switch off an AI coding CLI's permission checks
+    /// (`--dangerously-skip-permissions`, `--yolo`, `--trust-all-tools`, ...) in code on the
+    /// install surface, each as `file:line: flag`. A package that drives a coding agent at
+    /// run time may pass them; one that does so while it is being installed is using the
+    /// developer's own agent as its payload (the s1ngularity compromise of Nx).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agent_bypass: Vec<String>,
 }
 
 /// Indicators that make a `.pth` file a startup hook worth blocking. Across the corpus none
@@ -1055,6 +1062,19 @@ impl<'a> Scanner<'a> {
                 (!found.is_empty()).then(|| format!("{}: {}", u.label, found.join(", ")))
             })
             .collect();
+        let agent_bypass = self
+            .units
+            .iter()
+            .zip(&analyses)
+            .filter(|(u, _)| u.inst)
+            .flat_map(|(u, a)| {
+                let mut found = a.agent_bypass.clone();
+                found.sort_by_key(|(_, line)| *line);
+                found
+                    .into_iter()
+                    .map(move |(flag, line)| format!("{}:{line}: {flag}", u.label))
+            })
+            .collect();
         let tokens = self.opts.tokens.then(|| {
             let mut out = Vec::new();
             for u in self.units.iter().filter(|u| u.inst) {
@@ -1100,6 +1120,7 @@ impl<'a> Scanner<'a> {
             errors,
             unread_code,
             startup_hooks,
+            agent_bypass,
         }
     }
 

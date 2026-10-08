@@ -60,6 +60,9 @@ fn pypi_packages() -> Vec<(&'static str, &'static str, &'static [u8], String)> {
         ("newpkg", "1.0.0", b"benign but new", fresh),
         // The stand-in scanner reports a `setup.py` too large to read.
         ("paddedpkg", "1.0.0", b"benign but padded", old.clone()),
+        // The stand-in scanner reports install-time code that runs an AI coding CLI with
+        // its permission checks off.
+        ("agentic", "1.0.0", b"benign but agentic", old.clone()),
         // A release after five quiet years.
         (
             "revived",
@@ -479,6 +482,11 @@ fn fake_scanner(calls: Arc<AtomicUsize>) -> ScanFn {
                 vec![]
             },
             startup_hooks: vec![],
+            agent_bypass: if bytes.ends_with(b"agentic") {
+                vec!["telemetry.js:4: --dangerously-skip-permissions".into()]
+            } else {
+                vec![]
+            },
         })
     })
 }
@@ -710,6 +718,29 @@ async fn code_too_large_to_scan_is_blocked() {
     let h = Harness::start(|p| p.unread_code = RuleSeverity::Off).await;
     let r = h.get(&pypi_file_path("paddedpkg", "1.0.0")).await;
     assert_eq!(r.status(), 200);
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn install_time_agent_with_checks_off_is_blocked() {
+    let h = Harness::start(|_| {}).await;
+    let r = h.get(&pypi_file_path("agentic", "1.0.0")).await;
+    assert_eq!(r.status(), 403);
+    let body = r.text().await.unwrap();
+    assert!(
+        body.contains("runs an AI coding agent with its permission checks off"),
+        "{body}"
+    );
+    let (_, v) = h.check("pypi", "agentic", None).await;
+    assert_eq!(v["decision"], "block");
+    assert_eq!(v["model_decision"], "allow");
+    assert_eq!(v["policy_hits"][0]["rule"], "agent_bypass");
+    h.stop().await;
+
+    let h = Harness::start(|p| p.agent_bypass = RuleSeverity::Warn).await;
+    let r = h.get(&pypi_file_path("agentic", "1.0.0")).await;
+    assert_eq!(r.status(), 200);
+    assert_eq!(r.headers()["x-customs-decision"], "warn");
     h.stop().await;
 }
 

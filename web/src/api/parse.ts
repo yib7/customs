@@ -372,6 +372,7 @@ export function parsePolicy(v: unknown): Policy {
     young_dependency_days: youngDays === null ? 7 : youngDays,
     unread_code: parseRuleSeverity(r.unread_code, 'block'),
     startup_hook: parseRuleSeverity(r.startup_hook, 'block'),
+    agent_bypass: parseRuleSeverity(r.agent_bypass, 'block'),
     scan_error: parseRuleSeverity(r.scan_error, 'block'),
     allow: asStringArray(r.allow),
     deny: asStringArray(r.deny),

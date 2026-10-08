@@ -562,6 +562,7 @@ pub fn rule_label(rule: &str) -> String {
         "young_dependency_added" => "Release added a brand-new dependency".into(),
         "unread_code" => "Code the scanner could not read".into(),
         "startup_hook" => ".pth file runs code at every Python start".into(),
+        "agent_bypass" => "Install-time code runs an AI agent without permission checks".into(),
         other => other.to_string(),
     }
 }

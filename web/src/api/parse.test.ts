@@ -175,6 +175,7 @@ describe('parsePolicy', () => {
       publisher_changed: 'sometimes',
       dormant_days: 730,
       startup_hook: 'warn',
+      agent_bypass: 'warn',
       scan_error: 'warn',
       allow: ['pypi:requests', 5],
       deny: ['npm:event-stream@3.3.6'],
@@ -201,6 +202,7 @@ describe('parsePolicy', () => {
       young_dependency_days: 7,
       unread_code: 'block',
       startup_hook: 'warn',
+      agent_bypass: 'warn',
       scan_error: 'warn',
       allow: ['pypi:requests'],
       deny: ['npm:event-stream@3.3.6'],
@@ -221,6 +223,7 @@ describe('parsePolicy', () => {
     expect(p.young_dependency_days).toBe(7);
     expect(p.unread_code).toBe('block');
     expect(p.startup_hook).toBe('block');
+    expect(p.agent_bypass).toBe('block');
     expect(p.scan_error).toBe('block');
   });
 });

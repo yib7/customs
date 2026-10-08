@@ -453,6 +453,15 @@ function PolicyForm({
         />
         <div className="border-t border-line">
           <SeverityField
+            id="rule-agent_bypass"
+            label="AI coding agent run with its checks off at install"
+            description="Code that runs during install passes a flag such as --dangerously-skip-permissions, --yolo or --trust-all-tools to an AI coding CLI, so the agent on this machine follows the package's prompt without asking. The s1ngularity compromise of Nx did this to have developers' own agents search their disks for secrets. Packages that drive an agent when you run them are not affected: only install-time code counts."
+            value={draft.agent_bypass}
+            onChange={(v) => set('agent_bypass', v)}
+          />
+        </div>
+        <div className="border-t border-line">
+          <SeverityField
             id="rule-unread_code"
             label="Code the scanner could not read"
             description="The package ships code the scanner could not read: a code file or manifest over the 32 MiB per-file limit, an encrypted entry or one with an unsupported compression method, or an install hook in an archive above the scan size limit. The installer still runs it, and hiding a payload this way keeps it from every rule and the model. No benign package in the training corpus has any, so it blocks by default."

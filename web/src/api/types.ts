@@ -145,6 +145,7 @@ export interface Policy {
   young_dependency_days: number;
   unread_code: RuleSeverity;
   startup_hook: RuleSeverity;
+  agent_bypass: RuleSeverity;
   scan_error: RuleSeverity;
   allow: string[];
   deny: string[];

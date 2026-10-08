@@ -103,6 +103,12 @@ fn rule(id: &str) -> Rule {
             "A .pth file in the package launches a process, opens a connection, downloads, or reads secrets. Python executes its import lines whenever any interpreter starts, so the code keeps running long after the install.",
             "error",
         ),
+        "customs/agent-bypass" => (
+            "AgentPermissionBypass",
+            "Install-time code runs an AI coding agent with its permission checks off",
+            "Code that runs during install passes a flag such as --dangerously-skip-permissions, --yolo or --trust-all-tools to an AI coding CLI, so the agent on the developer's machine acts on the package's prompt without asking. The s1ngularity compromise of Nx used this to have the developer's own agents search the disk for secrets.",
+            "error",
+        ),
         "customs/unpinned-mcp-server" => (
             "UnpinnedMcpServer",
             "MCP server starts a package without a pinned version",
@@ -175,6 +181,7 @@ fn primary_rule(v: &Verdict) -> String {
         };
     }
     let order = [
+        "agent_bypass",
         "startup_hook",
         "unread_code",
         "block_install_scripts_from_new",
@@ -482,6 +489,7 @@ mod tests {
             ("install_script_added", "InstallScriptAdded"),
             ("nonregistry_dependency_added", "NonRegistryDependencyAdded"),
             ("young_dependency_added", "YoungDependencyAdded"),
+            ("agent_bypass", "AgentPermissionBypass"),
         ] {
             let r = rule(&policy_rule_id(policy));
             assert_eq!(r.name, name);
@@ -498,6 +506,12 @@ mod tests {
             detail: "runs install scripts".into(),
         });
         assert_eq!(primary_rule(&v), "customs/install-scripts-from-new-package");
+        v.policy_hits.push(crate::verdict::PolicyHit {
+            rule: "agent_bypass".into(),
+            severity: Decision::Block,
+            detail: "telemetry.js:4: --yolo".into(),
+        });
+        assert_eq!(primary_rule(&v), "customs/agent-bypass");
         v.policy_hits.push(crate::verdict::PolicyHit {
             rule: "deny".into(),
             severity: Decision::Block,

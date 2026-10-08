@@ -115,6 +115,10 @@ pub struct FileAnalysis {
     pub hidden_ws_lines: u64,
     /// Lines holding both a dynamic-code call and a decode call (`exec(b64decode(..))`).
     pub exec_decoded_lines: u64,
+    /// `(flag, line)` for each AI coding CLI flag that turns off its permission checks
+    /// (see [`AGENT_BYPASS`]). Not a model feature: the engine's `agent_bypass` rule reads
+    /// it for install-surface files.
+    pub agent_bypass: Vec<(String, u32)>,
 }
 
 impl FileAnalysis {
@@ -148,6 +152,47 @@ impl FileAnalysis {
         self.n_idents += inner.n_idents;
         self.n_obf_idents += inner.n_obf_idents;
         self.relative_imports.extend(inner.relative_imports);
+        for (flag, l) in inner.agent_bypass {
+            self.bypass(flag, if spans_lines { line + l - 1 } else { line });
+        }
+    }
+
+    fn bypass(&mut self, flag: String, line: u32) {
+        if self.agent_bypass.len() < MAX_AGENT_BYPASS
+            && !self.agent_bypass.contains(&(flag.clone(), line))
+        {
+            self.agent_bypass.push((flag, line));
+        }
+    }
+}
+
+const MAX_AGENT_BYPASS: usize = 20;
+
+/// Flags that make an AI coding CLI act without asking: Claude Code
+/// (`--dangerously-skip-permissions`, `--permission-mode bypassPermissions`), Codex
+/// (`--dangerously-bypass-approvals-and-sandbox`), Gemini CLI (`--yolo`,
+/// `--approval-mode yolo`), Amazon Q (`--trust-all-tools`) and GitHub Copilot CLI
+/// (`--allow-all-tools`). The s1ngularity compromise of Nx (August 2025) ran the first,
+/// the Gemini and the Q forms from a postinstall script with a prompt to search the disk
+/// for secrets, turning the developer's own agent into the payload.
+static AGENT_BYPASS: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"--(?:dangerously-skip-permissions|dangerously-bypass-approvals-and-sandbox|trust-all-tools|allow-all-tools|yolo|approval-mode[= ]+yolo|permission-mode[= ]+bypassPermissions)",
+    )
+    .unwrap()
+});
+
+/// Record each [`AGENT_BYPASS`] flag in `text` that is a whole flag (not the start of a
+/// longer one such as `--yolo-mode`).
+fn agent_flags(text: &str, fa: &mut FileAnalysis, line_of: &dyn Fn(usize) -> u32) {
+    for m in AGENT_BYPASS.find_iter(text) {
+        let whole = text[m.end()..]
+            .chars()
+            .next()
+            .is_none_or(|c| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+        if whole {
+            fa.bypass(m.as_str().to_string(), line_of(m.start()));
+        }
     }
 }
 
@@ -888,6 +933,7 @@ fn analyze_shell(text: &str, fa: &mut FileAnalysis) {
     let line_of = |off: usize| idx.line(off);
     STRING_RULES.apply(&clean, fa, &line_of);
     SHELL_RULES.apply(&clean, fa, &line_of);
+    agent_flags(&clean, fa, &line_of);
     for tok in lex(text, Lang::Shell) {
         if tok.kind == TokKind::Str {
             string_stats(fa, tok.text);
@@ -937,6 +983,7 @@ fn analyze_code(
                     }
                 };
                 STRING_RULES.apply(t.text, fa, &line_of);
+                agent_flags(t.text, fa, &line_of);
                 if WALLET_ADDRESS.is_match(t.text.trim()) {
                     fa.hit(CRYPTO_WALLET, t.line);
                 }

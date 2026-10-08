@@ -470,6 +470,26 @@ archives, such a `.pth` file appears in 19 malicious archives and no benign one.
 test split it adds 5 blocks at no benign cost, among them litellm 1.82.8, whose 52 MB of
 legitimate library code holds the model's risk at 0.09.
 
+A fourth, `agent_bypass`, looks for the developer's own coding agent used as the payload.
+The s1ngularity compromise of Nx (August 2025) shipped a postinstall script that ran
+`claude --dangerously-skip-permissions`, `gemini --yolo` and `q chat --trust-all-tools`
+with a prompt to search the disk for wallets and keys; the agent did the reconnaissance,
+so the script itself held no file-walking code for a classifier to see. The scanner lists
+each flag that turns off an AI coding CLI's permission checks
+(`--dangerously-skip-permissions` and `--permission-mode bypassPermissions` for Claude
+Code, `--dangerously-bypass-approvals-and-sandbox` for Codex, `--yolo` and
+`--approval-mode yolo` for Gemini CLI, `--trust-all-tools` for Amazon Q,
+`--allow-all-tools` for GitHub Copilot CLI) in string literals and shell text of
+install-surface files, after the same decoding and folding as the indicator rules, so
+`'--dangerously-skip-' + 'permissions'` is read whole. The rule blocks by default. Code
+outside the install surface does not count: orchestrators that drive an agent when they
+are run pass these flags as a matter of course. Of 14 such npm packages (Claude Code,
+Gemini CLI, Codex, Copilot CLI, Qwen Code, claude-flow, task-master-ai,
+claude-code-router, happy-coder and others, latest releases on 2026-10-08), 7 carry 83
+of these flags between them and none on the install surface, including happy-coder,
+whose postinstall script unpacks tools. The rule has not been measured on the training
+corpus.
+
 Root normalization: top-level directories are stripped while the current level holds
 exactly one directory and nothing besides sidecar `*.json` files (other than
 `package.json`), stopping at a level that has `package.json`, `PKG-INFO`, `setup.py`,
@@ -663,7 +683,9 @@ rules of section 8 (`provenance_dropped`, `install_script_added`, `publisher_cha
 `dormant_revival`, `version_anomaly`, `nonregistry_dependency_added`,
 `young_dependency_added`), `scan_error` (scanner rejected the archive, block by default),
 `unread_code` (code the scanner could not read, block by default), `startup_hook`
-(a `.pth` file that launches, connects, downloads or reads secrets, block by default), `not_scanned`
+(a `.pth` file that launches, connects, downloads or reads secrets, block by default),
+`agent_bypass` (install-time code runs an AI coding CLI with its permission checks off,
+block by default), `not_scanned`
 (archive above the scan size limit).
 `reasons` mix model features (positive contributions to the stacked logit, largest first)
 and name signals (`name_dist1`, `name_contains_popular_token`, ...). In `monitor` mode the
@@ -896,6 +918,7 @@ young_dependency_days = 7
 # Scanner rules: "off", "warn" or "block"
 unread_code = "block"       # code the scanner could not read (size cap, encryption, compression)
 startup_hook = "block"      # a .pth file that runs a process, network or secret access at startup
+agent_bypass = "block"      # install-time code runs an AI coding CLI with permission checks off
 scan_error = "block"        # the scanner rejected the archive (limits, bomb, corrupt)
 allow = ["pypi:requests", "npm:react"]  # always allow (exact names)
 deny  = ["npm:event-stream@3.3.6"]

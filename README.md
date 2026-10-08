@@ -366,6 +366,13 @@ launches a process, connects out, downloads or reads secrets blocks on its own
 benign one; it catches litellm 1.82.8, whose 52 MB of real library code drowns the model's
 score.
 
+Install-time code that runs an AI coding CLI with its permission checks off
+(`--dangerously-skip-permissions`, `--yolo`, `--trust-all-tools` and the like) blocks on its
+own (`agent_bypass`). The s1ngularity compromise of Nx did this from a postinstall script,
+so the developer's own agent searched the disk for secrets. Packages that drive an agent
+when they run are not affected: the 14 agent CLIs and orchestrators checked carry 83 such
+flags, none in install-time code.
+
 ## License
 
 MIT

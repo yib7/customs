@@ -23,5 +23,6 @@ young_dependency_days = 7
 unread_code = "block"
 scan_error = "block"
 startup_hook = "block"
+agent_bypass = "block"
 allow = []
 deny = []

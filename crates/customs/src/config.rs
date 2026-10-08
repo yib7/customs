@@ -290,6 +290,13 @@ pub struct Policy {
     /// benign archive does: benign `.pth` files extend `sys.path` or switch on a feature.
     #[serde(default = "default_block")]
     pub startup_hook: RuleSeverity,
+    /// Code on the install surface passes a flag that turns off an AI coding CLI's
+    /// permission checks (`--dangerously-skip-permissions`, `--yolo`, `--trust-all-tools`,
+    /// ...). The s1ngularity compromise of Nx ran the developer's own agents this way from a
+    /// postinstall script to search the disk for secrets. Packages that drive an agent at
+    /// run time do not trigger it: only install-time code counts.
+    #[serde(default = "default_block")]
+    pub agent_bypass: RuleSeverity,
     #[serde(default)]
     pub allow: Vec<String>,
     #[serde(default)]
@@ -322,6 +329,7 @@ impl Default for Policy {
             unread_code: default_block(),
             scan_error: default_block(),
             startup_hook: default_block(),
+            agent_bypass: default_block(),
             allow: Vec::new(),
             deny: Vec::new(),
             upstream: Upstream::default(),
@@ -660,6 +668,7 @@ npm = "https://registry.npmjs.org"
         assert_eq!(p.unread_code, RuleSeverity::Block);
         assert_eq!(p.scan_error, RuleSeverity::Block);
         assert_eq!(p.startup_hook, RuleSeverity::Block);
+        assert_eq!(p.agent_bypass, RuleSeverity::Block);
         assert_eq!(Policy::default().young_dependency_days, 7);
         let e = Policy::from_toml("young_dependency_days = 0").unwrap_err();
         assert_eq!(e.key, "young_dependency_days");

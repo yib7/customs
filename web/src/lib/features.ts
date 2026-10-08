@@ -85,6 +85,7 @@ const POLICY_RULES: Record<string, string> = {
   young_dependency_added: 'Release added a brand-new dependency from outside the maintainers',
   unread_code: 'Ships code the scanner could not read',
   startup_hook: 'Installs a .pth file that runs code at every Python start',
+  agent_bypass: 'Install-time code runs an AI coding agent with its permission checks off',
   scan_error: 'Archive could not be scanned',
   deny: 'Matches the deny list',
   allow: 'Matches the allow list',

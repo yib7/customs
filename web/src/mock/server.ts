@@ -240,6 +240,7 @@ export class MockServer {
       'young_dependency_added',
       'unread_code',
       'startup_hook',
+      'agent_bypass',
       'scan_error',
     ] as const) {
       const v = body[f];
