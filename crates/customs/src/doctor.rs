@@ -112,6 +112,7 @@ pub fn inspect(inputs: &Inputs) -> Vec<Finding> {
     claude_hook(inputs, &mut out);
     other_agent_hooks(inputs, &mut out);
     codex_hooks(inputs, &mut out);
+    mcp_servers(inputs, &mut out);
     out.sort_by_key(|f| std::cmp::Reverse(f.level));
     out
 }
@@ -264,6 +265,67 @@ fn codex_hooks(inputs: &Inputs, out: &mut Vec<Finding>) {
                     "",
                 ));
             }
+        }
+    }
+}
+
+/// MCP servers that agents start without a pinned version: each start runs the newest
+/// release, outside the hook and often outside the proxy (DESIGN.md section 11).
+fn mcp_servers(inputs: &Inputs, out: &mut Vec<Finding>) {
+    use crate::audit::mcp;
+    let mut files: Vec<PathBuf> = mcp::PROJECT_CONFIGS
+        .iter()
+        .map(|r| inputs.dir.join(r))
+        .collect();
+    if let Some(h) = inputs.home {
+        files.extend(
+            [
+                ".claude.json",
+                ".cursor/mcp.json",
+                ".gemini/settings.json",
+                ".codex/config.toml",
+                ".codeium/windsurf/mcp_config.json",
+            ]
+            .iter()
+            .map(|r| h.join(r)),
+        );
+    }
+    for f in files {
+        let Ok(text) = std::fs::read_to_string(&f) else {
+            continue;
+        };
+        let mut parsed = crate::audit::Parsed::default();
+        if mcp::parse(&text, &f, &mut parsed).is_err() || parsed.deps.is_empty() {
+            continue;
+        }
+        let subject = f.display().to_string();
+        let loose: Vec<String> = parsed
+            .deps
+            .iter()
+            .filter(|d| !d.pinned)
+            .map(|d| format!("{} ({}, line {})", d.name, d.version, d.line))
+            .collect();
+        if loose.is_empty() {
+            out.push(finding(
+                Level::Ok,
+                &subject,
+                format!(
+                    "{} MCP server package{} pinned to exact versions",
+                    parsed.deps.len(),
+                    if parsed.deps.len() == 1 { "" } else { "s" }
+                ),
+                "",
+            ));
+        } else {
+            out.push(finding(
+                Level::Warn,
+                &subject,
+                format!(
+                    "MCP servers start without a pinned version, so each start runs the newest release: {}",
+                    loose.join(", ")
+                ),
+                "pin each package to an exact version (name@1.2.3, name==1.2.3), and check the configuration with customs audit",
+            ));
         }
     }
 }
@@ -1080,6 +1142,30 @@ mod tests {
         assert!(found("settings.json")[0]
             .1
             .contains("does not include run_shell_command"));
+    }
+
+    #[test]
+    fn unpinned_mcp_servers() {
+        let d = tempfile::tempdir().unwrap();
+        let found = || {
+            run_with(d.path(), None, full_env())
+                .into_iter()
+                .filter(|f| f.subject.ends_with(".mcp.json"))
+                .map(|f| (f.level, f.detail))
+                .collect::<Vec<_>>()
+        };
+        let write = |args: &str| {
+            let v = format!(r#"{{"mcpServers": {{"x": {{"command": "npx", "args": {args}}}}}}}"#);
+            std::fs::write(d.path().join(".mcp.json"), v).unwrap();
+        };
+        write(r#"["-y", "mcp-x"]"#);
+        let f = found();
+        assert_eq!(f[0].0, Level::Warn);
+        assert!(f[0].1.ends_with("mcp-x (latest, line 1)"), "{}", f[0].1);
+        write(r#"["-y", "mcp-x@1.4.0"]"#);
+        assert_eq!(found()[0].0, Level::Ok);
+        write(r#"["./local.js"]"#);
+        assert!(found().is_empty());
     }
 
     #[test]

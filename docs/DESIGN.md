@@ -805,7 +805,9 @@ different variables, scoped registries, extra indexes and find-links in pip and 
 settings or requirements files, non-PyPI Pipfile sources, Poetry, lockfile URLs off the
 proxy) and exits 1 when it finds a way around the proxy. It also reports where the
 Claude Code hook is registered and warns when its matcher covers only `Bash`, which
-leaves the file edits of section 9.2 unchecked. Packages that bypass the proxy
+leaves the file edits of section 9.2 unchecked (likewise for the Cursor, Gemini CLI and
+Codex hooks), and warns about MCP servers in the project's or the user's agent
+configurations that start a package without an exact version (section 11). Packages that bypass the proxy
 are still checked by the Claude Code hook and `customs audit`, which read the lockfile
 itself.
 
