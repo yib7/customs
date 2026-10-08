@@ -58,7 +58,7 @@ function Switch({
 const HISTORY_RULE_TEXT: Record<HistoryRule, { label: string; description: string }> = {
   provenance_dropped: {
     label: 'Provenance dropped',
-    description: 'npm: this version has no provenance attestation, but the previous release had one.',
+    description: 'npm and PyPI: this version has no provenance attestation, but the previous release had one.',
   },
   install_script_added: {
     label: 'Install script added',

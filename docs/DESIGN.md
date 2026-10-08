@@ -742,7 +742,7 @@ min_age_severity = "block"  # or "warn"
 block_nonexistent = true    # requesting a name the registry does not know is recorded and denied in hooks
 block_install_scripts_from_new = true  # npm install scripts in packages younger than min_age_days
 # Release history rules: "off", "warn" or "block"
-provenance_dropped = "warn"    # npm: no provenance attestation, the previous release had one
+provenance_dropped = "warn"    # no provenance attestation, the previous release had one
 install_script_added = "block" # npm: install script added or its command changed
 publisher_changed = "warn"     # npm: publisher of none of the previous 5 releases
 dormant_revival = "warn"       # previous release is more than dormant_days older
@@ -784,7 +784,7 @@ itself a prerelease. A version without a publish time gets no history rules.
 
 | Rule | Ecosystems | Fires when |
 |---|---|---|
-| `provenance_dropped` | npm | `dist.attestations` is absent but the previous release had it |
+| `provenance_dropped` | npm, PyPI | the release carries no provenance attestation (npm `dist.attestations`; on PyPI, a PEP 740 `provenance` entry on any of its files in the JSON simple index) but the previous release did |
 | `install_script_added` | npm | a `preinstall`/`install`/`postinstall` script is new or its command changed since the previous release, or since the newest release at least 24 hours older (the detail shows the command, cut at 120 characters) |
 | `publisher_changed` | npm | `_npmUser.name` differs from every known publisher of the previous 5 releases |
 | `dormant_revival` | npm, PyPI | the previous release is more than `dormant_days` (1 to 3650) older |
@@ -802,7 +802,7 @@ packages:
 | Rule | Default | Compromised releases | Benign releases |
 |---|---|---:|---:|
 | `install_script_added` | block | 69% to 72% | 0.03% |
-| `provenance_dropped` | warn | unknown (most malicious versions were unpublished) | 0.19% |
+| `provenance_dropped` | warn | unknown (most malicious versions were unpublished) | 0.19% (PyPI: 0.20%) |
 | `publisher_changed` | warn | unknown (same) | 1.06% |
 | `dormant_revival` | warn | 16% | 0.50% |
 | `version_anomaly` | off | 3% | 0.09% |
@@ -838,11 +838,22 @@ maintainers routinely publish new platform or sibling packages alongside a relea
 proxy fetches the packuments of at most 20 added dependencies per release, concurrently and
 through its metadata cache, and only while the rule is on; a failed lookup skips that
 dependency. The npm rules
-read the full packument; PyPI's JSON API names neither uploaders nor attestations, so
-`provenance_dropped` and `publisher_changed` are npm only (PEP 740 attestations through
-PyPI's Integrity API are future work, since they cost a request per file). For PyPI
-downloads through the proxy, the project document `/pypi/<name>/json` is read instead of
-the per-release one while `dormant_revival` or `version_anomaly` is on. The rules apply
+read the full packument. PyPI's JSON API names no uploaders, so `publisher_changed` is npm
+only. It does not report PEP 740 attestations either, but the JSON simple index (PEP 691,
+`Accept: application/vnd.pypi.simple.v1+json`) lists a `provenance` URL for every attested
+file, so one more request per project, cached with the project document, covers every
+release; an index that answers only in HTML (some mirrors) leaves every release
+unattested, and the rule stays silent. Replayed on every release of the last year of the
+5,000 most downloaded PyPI projects (`python -m customs_ml.pypi_provenance`; 62K releases,
+1,506 of the projects attest), it fires on 0.20% of releases and on 109 projects, the same
+rate as on npm, so it warns there too. Most hits are projects moving their publishing on
+or off a trusted publisher, and backports published from an older branch. No compromised
+PyPI release can be measured the same way, since PyPI removes them from the index; PyPI's
+own report on the December 2024 ultralytics compromise describes two malicious releases
+built by the hijacked CI, which carry provenance, and two uploaded with a stolen API token,
+which do not. For PyPI downloads through the proxy, the project document
+`/pypi/<name>/json` is read instead of the per-release one while `provenance_dropped`,
+`dormant_revival` or `version_anomaly` is on. The rules apply
 both to proxied downloads and to `POST /api/check`.
 
 ## 9. Claude Code integration

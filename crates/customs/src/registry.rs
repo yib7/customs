@@ -85,8 +85,9 @@ pub struct VersionMeta {
     /// The same scripts with their commands, `(script, command)`. The command is empty when
     /// only `hasInstallScript` is known, and capped at [`MAX_SCRIPT_CHARS`] characters.
     pub install_commands: Vec<(String, String)>,
-    /// npm: the version carries a provenance attestation (`dist.attestations`). PyPI's JSON
-    /// API does not report attestations, so this is always false there.
+    /// The version carries a provenance attestation: npm `dist.attestations`, or on PyPI a
+    /// PEP 740 provenance object on at least one of its files (from the JSON simple index,
+    /// see [`parse_pypi_simple_provenance`]).
     pub attested: bool,
     /// npm: the account that published the version (`_npmUser.name`). PyPI's JSON API does
     /// not name uploaders.
@@ -268,11 +269,15 @@ impl Registry {
         let parsed = match eco {
             Ecosystem::Pypi => {
                 let url = format!("{}/{}/json", upstream.pypi_json, normalize_name(eco, name));
-                match self.get_json(&url, "pypi_json").await {
+                let mut meta = match self.get_json(&url, "pypi_json").await {
                     Ok(v) => parse_pypi_project(&v),
                     Err(FetchError::NotFound) => return Ok(None),
                     Err(e) => return Err(e),
+                };
+                if let Some(m) = meta.as_mut() {
+                    self.add_pypi_provenance(upstream, m).await;
                 }
+                meta
             }
             Ecosystem::Npm => {
                 let url = format!("{}/{}", upstream.npm, npm_escape(name));
@@ -290,6 +295,43 @@ impl Registry {
             .unwrap_or_else(|e| e.into_inner())
             .insert(key, (Instant::now(), m.clone()));
         Ok(Some(m))
+    }
+
+    /// Mark the releases that carry PEP 740 provenance. The project JSON API does not report
+    /// it, but the JSON simple index (PEP 691) lists a `provenance` URL for every attested
+    /// file, so one request covers the whole project. A failed or non-JSON response (an
+    /// index mirror that serves only HTML) leaves every release unattested, which keeps
+    /// `provenance_dropped` silent.
+    async fn add_pypi_provenance(&self, upstream: &Upstream, meta: &mut PackageMeta) {
+        let url = format!(
+            "{}/{}/",
+            upstream.pypi_simple.trim_end_matches('/'),
+            normalize_name(Ecosystem::Pypi, &meta.name)
+        );
+        let page = match self
+            .get(&url, Some(PYPI_SIMPLE_JSON), "pypi_simple_json")
+            .await
+        {
+            Ok(p) if p.status == 200 => p,
+            Ok(p) => {
+                tracing::debug!(url, status = p.status, "no JSON simple index");
+                return;
+            }
+            Err(e) => {
+                tracing::debug!(url, error = %e, "JSON simple index lookup failed");
+                return;
+            }
+        };
+        let Ok(doc) = serde_json::from_slice::<Value>(&page.body) else {
+            return;
+        };
+        let attested = parse_pypi_simple_provenance(&doc);
+        for v in &mut meta.versions {
+            v.attested = v
+                .files
+                .iter()
+                .any(|f| attested.contains(f.filename.as_str()));
+        }
     }
 
     /// Metadata of one PyPI release from the per-version endpoint, which is far smaller
@@ -365,6 +407,23 @@ impl Registry {
         self.metrics.upstream_latency("artifact", start.elapsed());
         result
     }
+}
+
+/// Media type of the JSON simple index (PEP 691).
+pub const PYPI_SIMPLE_JSON: &str = "application/vnd.pypi.simple.v1+json";
+
+/// Filenames that carry a PEP 740 provenance object in a JSON simple index document.
+pub fn parse_pypi_simple_provenance(v: &Value) -> std::collections::HashSet<String> {
+    v.get("files")
+        .and_then(Value::as_array)
+        .map(|files| {
+            files
+                .iter()
+                .filter(|f| f.get("provenance").is_some_and(|p| !p.is_null()))
+                .filter_map(|f| f.get("filename")?.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn parse_pypi_file(f: &Value) -> Option<FileMeta> {
@@ -595,6 +654,21 @@ mod tests {
         let v11 = m.version("1.1").unwrap();
         assert!(v11.yanked);
         assert!(v11.published.is_some());
+    }
+
+    #[test]
+    fn reads_pypi_provenance_from_the_json_index() {
+        let v: Value = serde_json::from_str(
+            r#"{"meta": {"api-version": "1.1"}, "name": "demo", "files": [
+                 {"filename": "demo-1.0.tar.gz", "provenance": "https://pypi.org/integrity/demo/1.0/demo-1.0.tar.gz/provenance"},
+                 {"filename": "demo-1.1.tar.gz", "provenance": null},
+                 {"filename": "demo-1.2.tar.gz"}]}"#,
+        )
+        .unwrap();
+        let a = parse_pypi_simple_provenance(&v);
+        assert_eq!(a.len(), 1);
+        assert!(a.contains("demo-1.0.tar.gz"));
+        assert!(parse_pypi_simple_provenance(&serde_json::json!({"files": "x"})).is_empty());
     }
 
     #[test]

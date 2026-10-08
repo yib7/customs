@@ -66,7 +66,15 @@ fn pypi_packages() -> Vec<(&'static str, &'static str, &'static [u8], String)> {
             b"benign revived",
             "2015-01-01T00:00:00.000000Z".into(),
         ),
-        ("revived", "1.1.0", b"benign revived again", old),
+        ("revived", "1.1.0", b"benign revived again", old.clone()),
+        // 1.0.0 carries PEP 740 provenance in the JSON simple index, 1.1.0 does not.
+        ("unsigned", "1.0.0", b"benign attested", old.clone()),
+        (
+            "unsigned",
+            "1.1.0",
+            b"benign unattested",
+            "2020-06-01T00:00:00.000000Z".into(),
+        ),
     ]
 }
 
@@ -74,7 +82,38 @@ fn file_name(name: &str, version: &str) -> String {
     format!("{name}-{version}.tar.gz")
 }
 
-async fn simple_page(State(m): State<Mock>, Path(project): Path<String>) -> Response {
+/// Files of the mock that carry a PEP 740 provenance object.
+const ATTESTED: [(&str, &str); 1] = [("unsigned", "1.0.0")];
+
+async fn simple_page(
+    State(m): State<Mock>,
+    Path(project): Path<String>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    // Customs asks for exactly the JSON index when it reads provenance; the proxy's
+    // pass-through requests (which list several types) keep getting HTML.
+    if headers.get("accept").and_then(|a| a.to_str().ok())
+        == Some("application/vnd.pypi.simple.v1+json")
+    {
+        let files: Vec<Value> = pypi_packages()
+            .into_iter()
+            .filter(|p| p.0 == project)
+            .map(|(n, v, _, t)| {
+                let prov = ATTESTED
+                    .contains(&(n, v))
+                    .then(|| format!("{}/integrity/{n}/{v}/provenance", m.base));
+                json!({"filename": file_name(n, v), "upload-time": t, "provenance": prov})
+            })
+            .collect();
+        if files.is_empty() {
+            return (StatusCode::NOT_FOUND, "Not Found").into_response();
+        }
+        return (
+            [("content-type", "application/vnd.pypi.simple.v1+json")],
+            json!({"meta": {"api-version": "1.1"}, "name": project, "files": files}).to_string(),
+        )
+            .into_response();
+    }
     let links: Vec<String> = pypi_packages()
         .into_iter()
         .filter(|p| p.0 == project)
@@ -797,6 +836,16 @@ async fn release_history_rules() {
         .await
         .unwrap();
     assert_eq!(rules_of(&verdict), vec!["dormant_revival"]);
+    // PyPI provenance comes from the JSON simple index.
+    let (_, v) = h.check("pypi", "unsigned", None).await;
+    assert_eq!(v["version"], "1.1.0");
+    assert_eq!(rules_of(&v), vec!["provenance_dropped"]);
+    assert!(v["policy_hits"][0]["detail"]
+        .as_str()
+        .unwrap()
+        .contains("previous release 1.0.0 had one"));
+    let (_, v) = h.check("pypi", "unsigned", Some("1.0.0")).await;
+    assert!(rules_of(&v).is_empty(), "{v}");
     h.stop().await;
 
     // Severities are configurable, and `off` keeps a rule quiet.

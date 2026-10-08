@@ -220,7 +220,8 @@ pub struct Policy {
     // warn by default and the model still judges the archive itself. `install_script_added`
     // blocks: it fired on 0.02% of legitimate npm releases and on at least 37% of
     // compromised ones (DESIGN.md section 8).
-    /// npm: this version has no provenance attestation but the previous release had one.
+    /// npm and PyPI: this version has no provenance attestation but the previous release had
+    /// one.
     #[serde(default = "default_warn")]
     pub provenance_dropped: RuleSeverity,
     /// npm: this version adds an install script or changes its command.
@@ -466,7 +467,9 @@ impl Policy {
     /// Whether a release history rule that applies to PyPI is on. Those rules need the
     /// project document, which the proxy otherwise does not read.
     pub fn pypi_history_rules_enabled(&self) -> bool {
-        self.dormant_revival != RuleSeverity::Off || self.version_anomaly != RuleSeverity::Off
+        self.dormant_revival != RuleSeverity::Off
+            || self.version_anomaly != RuleSeverity::Off
+            || self.provenance_dropped != RuleSeverity::Off
     }
 
     pub fn allow_rules(&self) -> Vec<PackageRule> {
@@ -611,7 +614,11 @@ npm = "https://registry.npmjs.org"
         assert_eq!(p.provenance_dropped.decision(), Some(Decision::Block));
         assert_eq!(p.install_script_added.decision(), None);
         assert_eq!(p.dormant_days, 730);
-        assert!(!p.pypi_history_rules_enabled());
+        // provenance_dropped applies to PyPI too.
+        assert!(p.pypi_history_rules_enabled());
+        let mut q = p.clone();
+        q.provenance_dropped = RuleSeverity::Off;
+        assert!(!q.pypi_history_rules_enabled());
         assert_eq!(Policy::from_toml(&p.to_toml()).unwrap(), p);
         let json = serde_json::to_value(&p).unwrap();
         assert_eq!(json["provenance_dropped"], "block");

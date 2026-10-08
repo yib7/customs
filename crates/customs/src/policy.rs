@@ -209,9 +209,10 @@ pub fn history_hits(policy: &Policy, eco: Ecosystem, h: &ReleaseHistory) -> Vec<
     let dormant = chrono::Duration::days(policy.dormant_days as i64);
 
     if let Some(prev) = &h.previous {
-        // npm only: PyPI's JSON API reports neither attestations nor uploaders, and PyPI
-        // packages have no install scripts in their metadata.
-        if npm && !cur.attested && prev.attested {
+        // Both registries report attestations (PyPI through the JSON simple index). The
+        // other rules here are npm only: PyPI names no uploaders and lists neither install
+        // scripts nor per-release dependencies.
+        if !cur.attested && prev.attested {
             hit(
                 "provenance_dropped",
                 policy.provenance_dropped,
