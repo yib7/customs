@@ -22,7 +22,7 @@
 //! 8. The stream is truncated at `max_tokens` (default 4096) tokens in total.
 
 use crate::indicators::fold_runs;
-use crate::lexer::{lex, Lang, TokKind};
+use crate::lexer::{decoded_strings, lex, with_decoded, Lang, TokKind};
 
 pub const FILE_MARKER: &str = "<file>";
 pub const STR_TOKEN: &str = "<str>";
@@ -50,7 +50,9 @@ pub fn push_unit_tokens(out: &mut Vec<String>, text: &str, lang: Lang, max_token
         return;
     }
     out.push(FILE_MARKER.to_string());
-    let toks = lex(text, lang);
+    let raw = lex(text, lang);
+    let decoded = decoded_strings(text, &raw, lang);
+    let toks = with_decoded(&raw, &decoded);
     let runs = match lang {
         Lang::Shell => Vec::new(),
         _ => fold_runs(&toks, lang),

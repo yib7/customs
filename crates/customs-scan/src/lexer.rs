@@ -543,8 +543,142 @@ fn shell_comment_start(line: &str) -> Option<usize> {
     None
 }
 
+/// Decode the escapes that spell characters by number (`\\x63`, `\\u0063`, `\\u{63}`,
+/// Python's `\\U00000063`) in a string literal; `None` when there are none. Malware writes
+/// module names, hosts and commands this way so that literal matching misses them.
+/// Control characters stay escaped, so line numbers inside the literal do not move, and an
+/// escaped backslash is never the start of an escape.
+pub fn decode_escapes(s: &str) -> Option<String> {
+    if !s.contains('\\') {
+        return None;
+    }
+    let b = s.as_bytes();
+    let hex = |from: usize, n: usize| -> Option<u32> {
+        let h = s.get(from..from + n)?;
+        h.bytes()
+            .all(|c| c.is_ascii_hexdigit())
+            .then(|| u32::from_str_radix(h, 16).ok())
+            .flatten()
+    };
+    let mut out = String::with_capacity(s.len());
+    let mut changed = false;
+    let mut i = 0;
+    let mut copied = 0;
+    while i < b.len() {
+        if b[i] != b'\\' || i + 1 >= b.len() {
+            i += 1;
+            continue;
+        }
+        let (code, len) = match b[i + 1] {
+            b'x' => (hex(i + 2, 2), 4),
+            b'u' if b.get(i + 2) == Some(&b'{') => match s[i + 3..].find('}') {
+                Some(n) if (1..=6).contains(&n) => (hex(i + 3, n), n + 4),
+                _ => (None, 2),
+            },
+            b'u' => (hex(i + 2, 4), 6),
+            b'U' => (hex(i + 2, 8), 10),
+            _ => (None, 2),
+        };
+        match code.and_then(char::from_u32).filter(|c| !c.is_control()) {
+            Some(c) => {
+                out.push_str(&s[copied..i]);
+                out.push(c);
+                i += len;
+                copied = i;
+                changed = true;
+            }
+            // Skip the escaped character too, so `\\\\x41` stays a backslash and text.
+            None => i += 2,
+        }
+    }
+    if !changed {
+        return None;
+    }
+    out.push_str(&s[copied..]);
+    Some(out)
+}
+
+/// Decoded text for each string token (`None` where nothing changed); see
+/// [`decode_escapes`]. Shell strings and Python raw strings are left alone. `src` is the
+/// text `toks` were lexed from.
+pub fn decoded_strings(src: &str, toks: &[Token<'_>], lang: Lang) -> Vec<Option<String>> {
+    toks.iter()
+        .map(|t| {
+            let raw = lang == Lang::Python && py_raw(src, t);
+            (lang != Lang::Shell && t.kind == TokKind::Str && !raw)
+                .then(|| decode_escapes(t.text))
+                .flatten()
+        })
+        .collect()
+}
+
+/// Whether a Python string token carries an `r` prefix. The lexer drops the prefix, so it
+/// is read back from the source in front of the opening quotes.
+fn py_raw(src: &str, t: &Token<'_>) -> bool {
+    let b = src.as_bytes();
+    let Some(mut k) = (t.text.as_ptr() as usize).checked_sub(src.as_ptr() as usize) else {
+        return false;
+    };
+    if k > b.len() {
+        return false;
+    }
+    let mut quotes = 0;
+    while quotes < 3 && k > 0 && matches!(b[k - 1], b'\'' | b'"') {
+        k -= 1;
+        quotes += 1;
+    }
+    let end = k;
+    while k > 0 && end - k < 2 && b[k - 1].is_ascii_alphabetic() {
+        k -= 1;
+    }
+    let glued = k > 0 && (b[k - 1].is_ascii_alphanumeric() || b[k - 1] == b'_');
+    quotes > 0 && !glued && b[k..end].iter().any(|c| c.eq_ignore_ascii_case(&b'r'))
+}
+
+/// `toks` with each decoded string from [`decoded_strings`] in place of its source text.
+pub fn with_decoded<'a>(toks: &[Token<'a>], decoded: &'a [Option<String>]) -> Vec<Token<'a>> {
+    toks.iter()
+        .zip(decoded)
+        .map(|(t, d)| match d {
+            Some(text) => Token { text, ..*t },
+            None => *t,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn escapes_decode() {
+        let d = |s: &str| decode_escapes(s);
+        assert_eq!(
+            d(r"\x63hild_\u0070rocess").as_deref(),
+            Some("child_process")
+        );
+        assert_eq!(d(r"\u{68}ttp://x").as_deref(), Some("http://x"));
+        assert_eq!(d(r"\U00000068i").as_deref(), Some("hi"));
+        assert_eq!(d(r"a\nb\x0a"), None, "control characters stay escaped");
+        assert_eq!(d(r"\\x41"), None, "an escaped backslash is not an escape");
+        assert_eq!(d(r"\\\x41").as_deref(), Some(r"\\A"));
+        assert_eq!(d(r"\xZZ \u12 \u{} \u{1234567}"), None);
+        assert_eq!(d(r"\ud83d"), None, "lone surrogates are not characters");
+        assert_eq!(d("plain"), None);
+
+        // Raw prefixes are read back from the source; bytes literals still decode.
+        let src = r#"a = r'\x41' + rb"\x41" + b'\x41' + R'''\x41''' + bar'\x41' + '\x41'"#;
+        let toks = lex(src, Lang::Python);
+        let dec: Vec<Option<String>> = decoded_strings(src, &toks, Lang::Python)
+            .into_iter()
+            .zip(&toks)
+            .filter(|(_, t)| t.kind == TokKind::Str)
+            .map(|(d, _)| d)
+            .collect();
+        let a = Some("A".to_string());
+        assert_eq!(dec, vec![None, None, a.clone(), None, a.clone(), a]);
+        assert_eq!(d(r"tail\").as_deref(), None);
+        assert_eq!(d(r"\xe9t\xe9").as_deref(), Some("\u{e9}t\u{e9}"));
+    }
+
     use super::*;
 
     fn kinds<'a>(toks: &[Token<'a>]) -> Vec<(TokKind, &'a str)> {

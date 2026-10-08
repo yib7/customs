@@ -6,6 +6,8 @@ and the rewritten archive is re-scanned and re-scored with the exported models:
 
 ``string_split``      split string literals into concatenations, defeating literal matching
                       of hosts, paths, and commands.
+``hex_escape``        write every string literal as ``\\xNN`` escapes, which Python and
+                      JavaScript decode to the same string at run time.
 ``base64_wrap``       replace each install-time script with a stub that base64-decodes and
                       executes the original (the most common real-world wrapper).
 ``trojan_padding``    bury the payload inside a large benign codebase by adding the source of
@@ -58,6 +60,25 @@ def string_split(files: Files, eco: str) -> Files:
             return f"({q}{body[:mid]}{q} + {q}{body[mid:]}{q})"
 
         out[p] = STR_RE.sub(split, text).encode()
+    return out
+
+
+def hex_escape(files: Files, eco: str) -> Files:
+    out = {}
+    for p, data in files.items():
+        if not _is_code(p):
+            out[p] = data
+            continue
+        text = data.decode("utf-8", "replace")
+
+        def escape(m: re.Match) -> str:
+            # A prefix letter makes it a raw, bytes or f-string, where escapes differ.
+            if m.start() > 0 and m.string[m.start() - 1].isalpha():
+                return m[0]
+            q, body = m["q"], m["body"]
+            return q + "".join(f"\\x{ord(c):02x}" for c in body) + q
+
+        out[p] = STR_RE.sub(escape, text).encode()
     return out
 
 
@@ -174,7 +195,9 @@ def _readme(donor: Files) -> bytes:
     return b"# Utilities\n\n" + b"A small, dependable toolkit. " * 200
 
 
-def run(n: int = 600, scheme: str = SCHEME, seed: int = 0) -> dict:
+def run(n: int = 600, scheme: str = SCHEME, seed: int = 0, only: list[str] | None = None) -> dict:
+    """Score every transform; ``only`` restricts the run to some transforms and leaves the
+    saved report alone."""
     df = load_table()
     split = df[f"split_{scheme}"]
     ens = json.loads((work() / f"ensemble_{scheme}.json").read_text())
@@ -197,12 +220,15 @@ def run(n: int = 600, scheme: str = SCHEME, seed: int = 0) -> dict:
     transforms = {
         "none": lambda f, e: f,
         "string_split": string_split,
+        "hex_escape": hex_escape,
         "base64_wrap": base64_wrap,
         "trojan_padding": make_trojan_padding(donor),
         "indirection": indirection,
         "metadata_mimicry": make_metadata_mimicry(_readme(donor)),
         "starjack": lambda f, e: _starjack(f, e, donors),
     }
+    if only:
+        transforms = {k: v for k, v in transforms.items() if k in only}
     scorer = Scorer(scheme)
     tmp = config.sub("robustness")
     results = {}
@@ -232,6 +258,8 @@ def run(n: int = 600, scheme: str = SCHEME, seed: int = 0) -> dict:
         log("robustness", tname, results[tname])
         for p in paths:
             Path(p).unlink(missing_ok=True)
+    if only:
+        return results
     results["donor"] = {"name": donor_row["name"], "ecosystem": donor_row.ecosystem}
     results["seen_in_training"] = sorted(SEEN_IN_TRAINING)
     (work() / f"robustness_{scheme}.json").write_text(json.dumps(results, indent=1))

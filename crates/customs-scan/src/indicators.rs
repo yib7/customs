@@ -6,7 +6,9 @@
 //! commands) are regexes run over string literal contents, or over whole comment-stripped
 //! text for shell scripts and npm script commands.
 
-use crate::lexer::{lex, strip_shell_comments, Lang, TokKind, Token};
+use crate::lexer::{
+    decoded_strings, lex, strip_shell_comments, with_decoded, Lang, TokKind, Token,
+};
 use regex::{Regex, RegexSet};
 use std::cell::OnceCell;
 use std::sync::LazyLock;
@@ -514,7 +516,9 @@ pub fn analyze(text: &str, lang: Lang) -> FileAnalysis {
     match lang {
         Lang::Shell => analyze_shell(text, &mut fa),
         Lang::Python | Lang::Js => {
-            let toks = lex(text, lang);
+            let raw = lex(text, lang);
+            let decoded = decoded_strings(text, &raw, lang);
+            let toks = with_decoded(&raw, &decoded);
             let runs = fold_runs(&toks, lang);
             if runs.is_empty() {
                 analyze_code(&toks, &[], lang, &mut fa);
@@ -1178,6 +1182,23 @@ mod tests {
         let chunks: Vec<String> = (0..8).map(|_| format!("'{}'", "QUFB".repeat(10))).collect();
         let fa = analyze(&format!("p = ({})\n", chunks.join(" +\n  ")), Lang::Python);
         assert_eq!(fa.longest_b64_run, 320);
+    }
+
+    #[test]
+    fn escaped_literals_are_decoded() {
+        // The red team's hex_escape evasion: every string literal spelled as escapes.
+        let c = js("const cp = require('\\x63\\x68\\x69\\x6c\\x64\\x5f\\x70\\x72\\x6f\\x63\\x65\\x73\\x73');\ncp.exec('ls');\n");
+        assert_eq!(c[PROC_EXEC], 2);
+        assert_eq!(js("fetch('\\u0068ttps://evil.example/x');\n")[URL], 1);
+        let fa = analyze(
+            "import os\nk = open(os.path.expanduser('~/.ss\\x68/id_rsa'))\n",
+            Lang::Python,
+        );
+        assert_eq!(fa.counts[SECRET_PATHS], 2);
+        // Raw strings keep their backslashes.
+        let url = |src: &str| analyze(src, Lang::Python).counts[URL];
+        assert_eq!(url("u = '\\x68ttps://evil.example/x'\n"), 1);
+        assert_eq!(url("u = r'\\x68ttps://evil.example/x'\n"), 0);
     }
 
     #[test]
