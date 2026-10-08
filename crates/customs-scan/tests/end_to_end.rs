@@ -299,6 +299,30 @@ fn pth_file_in_wheel_is_install_surface() {
 }
 
 #[test]
+fn top_level_sitecustomize_is_install_surface() {
+    let bytes = zip_files(&[
+        ("demo/__init__.py", b""),
+        (
+            "sitecustomize.py",
+            b"import subprocess\nsubprocess.Popen(['sh', '-c', 'id'])\n",
+        ),
+        // A copy in a test folder is never installed where Python looks for it.
+        ("tests/sitecustomize.py", b"import socket\n"),
+        (
+            "demo-1.0.dist-info/METADATA",
+            b"Metadata-Version: 2.1\nName: demo\nVersion: 1.0\n",
+        ),
+    ]);
+    let r = scan(&bytes, "demo-1.0-py3-none-any.whl");
+    assert!(r.install_surface.contains(&"sitecustomize.py".to_string()));
+    assert!(!r
+        .install_surface
+        .contains(&"tests/sitecustomize.py".to_string()));
+    assert!(r.features["inst_proc_exec"] >= 1.0);
+    assert_eq!(r.features["inst_network"], 0.0);
+}
+
+#[test]
 fn src_layout_and_cmdclass_targets() {
     let bytes = tar_gz_files(&[
         ("lay-1.0/setup.cfg", "[metadata]\nname = lay\n[options]\ncmdclass =\n    install = lay_build.hooks.Install\n"),

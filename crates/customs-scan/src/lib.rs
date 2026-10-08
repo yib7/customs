@@ -735,11 +735,18 @@ impl<'a> Scanner<'a> {
         ns_inits.truncate(MAX_NAMESPACE_INITS);
         inits.extend(ns_inits);
         inits.sort_unstable();
+        // Python runs `.pth` lines and a top-level `sitecustomize.py` or `usercustomize.py`
+        // in site-packages at every interpreter start. Benign packages keep the latter in
+        // test or bootstrap folders that are never installed at the top level.
         let mut pths: Vec<&str> = self
             .index
             .keys()
             .copied()
-            .filter(|p| p.to_ascii_lowercase().ends_with(".pth"))
+            .filter(|p| {
+                let p = p.to_ascii_lowercase();
+                let top = p.strip_prefix("src/").unwrap_or(&p);
+                p.ends_with(".pth") || matches!(top, "sitecustomize.py" | "usercustomize.py")
+            })
             .collect();
         pths.sort_unstable();
         let inits: Vec<String> = inits.into_iter().map(str::to_string).collect();
