@@ -104,7 +104,7 @@ pub fn target_label(t: &Target) -> String {
         Target::Unverifiable {
             ecosystem, spec, ..
         } => format!("{}:{spec}", ecosystem_str(*ecosystem)),
-        Target::Project { manager, dir } => {
+        Target::Project { manager, dir, .. } => {
             format!("{} project in {}", manager.as_str(), dir.display())
         }
     }
@@ -133,12 +133,17 @@ impl Expanded {
 pub fn expand_projects(targets: Vec<Target>) -> Expanded {
     let mut out = Expanded::default();
     for t in targets {
-        let Target::Project { manager, dir } = t else {
+        let Target::Project {
+            manager,
+            dir,
+            extras,
+        } = t
+        else {
             out.targets.push(t);
             out.locked.push(false);
             continue;
         };
-        let e = project::expand(manager, &dir);
+        let e = project::expand(manager, &dir, &extras);
         for (label, message) in e.mismatches {
             let placeholder = Target::Unverifiable {
                 ecosystem: manager.ecosystem(),

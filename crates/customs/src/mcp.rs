@@ -823,7 +823,9 @@ fn command_report(
             Target::Unverifiable {
                 ecosystem, spec, ..
             } => (*ecosystem, spec.clone()),
-            Target::Project { manager, dir } => (manager.ecosystem(), dir.display().to_string()),
+            Target::Project { manager, dir, .. } => {
+                (manager.ecosystem(), dir.display().to_string())
+            }
         };
         let (label, decision, status, why, verdict) = match r {
             TargetResult::Verdict { verdict, .. } => (

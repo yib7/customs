@@ -768,7 +768,11 @@ lockfile does not pin yet are checked too, as the ranges they name: `package.jso
 `file:`, `link:` and `portal:`), `pyproject.toml` `[project].dependencies` (plus
 `[dependency-groups].dev` for uv and the Poetry dependency tables for Poetry), and
 Pipfile `[packages]`. This is the case where an agent adds a dependency to `package.json`
-and then runs `npm install`. Without a lockfile, the manifest's git and URL dependencies
+and then runs `npm install`. `pip install .`, `pip install -e .` and `uv pip install -e
+'.[dev]'` (also `-e` lines in requirements files) are treated the same way when the
+directory has a `pyproject.toml`: there is no lockfile, so the hook checks
+`[project].dependencies` plus the optional-dependency groups named as extras. The local
+project itself is not scanned; a non-editable `pip install .` still asks for that reason. Without a lockfile, the manifest's git and URL dependencies
 produce `ask` like any other unverifiable spec.
 
 For packages a lockfile already pins, only a block counts. On this repository's

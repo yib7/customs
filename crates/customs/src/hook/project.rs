@@ -40,11 +40,13 @@ impl Manager {
             Manager::Uv => &["uv.lock"],
             Manager::Poetry => &["poetry.lock"],
             Manager::Pipenv => &["Pipfile.lock"],
+            Manager::Pip => &[],
         }
     }
 }
 
-pub fn expand(manager: Manager, dir: &Path) -> Expanded {
+/// `extras` are the optional-dependency groups of a `pip install .[extras]`.
+pub fn expand(manager: Manager, dir: &Path, extras: &[String]) -> Expanded {
     let eco = manager.ecosystem();
     let mut out = Expanded::default();
     let mut pinned = HashSet::new();
@@ -85,7 +87,7 @@ pub fn expand(manager: Manager, dir: &Path) -> Expanded {
         }
         out.lockfile = Some(lock.clone());
     }
-    for t in manifest_targets(manager, dir) {
+    for t in manifest_targets(manager, dir, extras) {
         match &t {
             Target::Package { name, .. } if pinned.contains(name) => continue,
             // With a lockfile, git and URL dependencies are pinned there under their own
@@ -98,12 +100,14 @@ pub fn expand(manager: Manager, dir: &Path) -> Expanded {
 }
 
 /// Direct dependencies the manifest lists, as install specs.
-fn manifest_targets(manager: Manager, dir: &Path) -> Vec<Target> {
+fn manifest_targets(manager: Manager, dir: &Path, extras: &[String]) -> Vec<Target> {
     match manager {
         Manager::Npm | Manager::Pnpm | Manager::Yarn | Manager::Bun => {
             package_json(&dir.join("package.json"))
         }
-        Manager::Uv | Manager::Poetry => pyproject(&dir.join("pyproject.toml"), manager),
+        Manager::Uv | Manager::Poetry | Manager::Pip => {
+            pyproject(&dir.join("pyproject.toml"), manager, extras)
+        }
         Manager::Pipenv => pipfile(&dir.join("Pipfile")),
     }
 }
@@ -171,7 +175,7 @@ fn toml_requirement(name: &str, v: &toml::Value) -> Option<String> {
     })
 }
 
-fn pyproject(path: &Path, manager: Manager) -> Vec<Target> {
+fn pyproject(path: &Path, manager: Manager, extras: &[String]) -> Vec<Target> {
     let Some(doc) = read_toml(path) else {
         return vec![];
     };
@@ -189,6 +193,13 @@ fn pyproject(path: &Path, manager: Manager) -> Vec<Target> {
     reqs.extend(strings(
         doc.get("project").and_then(|p| p.get("dependencies")),
     ));
+    for extra in extras {
+        reqs.extend(strings(
+            doc.get("project")
+                .and_then(|p| p.get("optional-dependencies"))
+                .and_then(|o| o.get(extra.as_str())),
+        ));
+    }
     if manager == Manager::Uv {
         // `uv sync` installs the dev group by default.
         reqs.extend(strings(
@@ -276,7 +287,7 @@ mod tests {
   "node_modules/ms": {"version": "2.1.2", "resolved": "https://registry.npmjs.org/is-number/-/is-number-7.0.0.tgz"}
 }}"#,
         );
-        let e = expand(Manager::Npm, d.path());
+        let e = expand(Manager::Npm, d.path(), &[]);
         assert_eq!(
             names(&e),
             vec![
@@ -303,13 +314,16 @@ mod tests {
             r#"{"dependencies": {"debug": "^4", "fork": "github:x/fork", "local": "file:../x"}}"#,
         );
         assert_eq!(
-            names(&expand(Manager::Npm, d.path())),
+            names(&expand(Manager::Npm, d.path(), &[])),
             vec!["debug ^4", "? fork@github:x/fork"]
         );
         // Another manager's lockfile is not this one's.
         write(d.path(), "yarn.lock", "debug@^4:\n  version \"4.3.4\"\n");
-        assert!(expand(Manager::Npm, d.path()).lockfile.is_none());
-        assert_eq!(names(&expand(Manager::Yarn, d.path())), vec!["debug 4.3.4"]);
+        assert!(expand(Manager::Npm, d.path(), &[]).lockfile.is_none());
+        assert_eq!(
+            names(&expand(Manager::Yarn, d.path(), &[])),
+            vec!["debug 4.3.4"]
+        );
     }
 
     #[test]
@@ -340,11 +354,11 @@ httpx = {version = ">=0.27", extras = ["http2"]}
             "version = 1\n\n[[package]]\nname = \"requests\"\nversion = \"2.32.3\"\nsource = { registry = \"https://pypi.org/simple\" }\n",
         );
         assert_eq!(
-            names(&expand(Manager::Uv, d.path())),
+            names(&expand(Manager::Uv, d.path(), &[])),
             vec!["requests 2.32.3", "flask 3.0.0", "pytest -"]
         );
         assert_eq!(
-            names(&expand(Manager::Poetry, d.path())),
+            names(&expand(Manager::Poetry, d.path(), &[])),
             vec![
                 "requests >=2",
                 "flask 3.0.0",
@@ -359,19 +373,46 @@ httpx = {version = ">=0.27", extras = ["http2"]}
             "[packages]\nrequests = \"*\"\ndjango = {version = \"==5.0\"}\nlocal = {path = \".\", editable = true}\n",
         );
         assert_eq!(
-            names(&expand(Manager::Pipenv, d.path())),
+            names(&expand(Manager::Pipenv, d.path(), &[])),
             vec!["django 5.0", "requests -"]
         );
-        let e = expand(Manager::Pipenv, Path::new("/nonexistent"));
+        let e = expand(Manager::Pipenv, Path::new("/nonexistent"), &[]);
         assert!(e.targets.is_empty() && e.lockfile.is_none());
         assert_eq!(Manager::Pipenv.ecosystem(), Ecosystem::Pypi);
+    }
+
+    #[test]
+    fn pip_installs_what_pyproject_declares() {
+        let d = tempfile::tempdir().unwrap();
+        write(
+            d.path(),
+            "pyproject.toml",
+            r#"
+[project]
+name = "app"
+dependencies = ["requests>=2"]
+[project.optional-dependencies]
+dev = ["pytest==8.2.0"]
+docs = ["sphinx"]
+[dependency-groups]
+dev = ["ruff"]
+"#,
+        );
+        assert_eq!(
+            names(&expand(Manager::Pip, d.path(), &[])),
+            vec!["requests >=2"]
+        );
+        assert_eq!(
+            names(&expand(Manager::Pip, d.path(), &["dev".into()])),
+            vec!["requests >=2", "pytest 8.2.0"]
+        );
     }
 
     #[test]
     fn unreadable_lockfile_needs_a_look() {
         let d = tempfile::tempdir().unwrap();
         write(d.path(), "bun.lock", "{ not json");
-        let e = expand(Manager::Bun, d.path());
+        let e = expand(Manager::Bun, d.path(), &[]);
         assert_eq!(e.targets.len(), 1);
         assert!(matches!(
             &e.targets[0],

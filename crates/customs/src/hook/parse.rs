@@ -30,8 +30,13 @@ pub enum Target {
         reason: String,
     },
     /// Every package of the project in `dir`: what `npm install`, `npm ci` or `uv sync`
-    /// fetch from its lockfile and manifest. See [`super::project`].
-    Project { manager: Manager, dir: PathBuf },
+    /// fetch from its lockfile and manifest, or `pip install -e .[extras]` from its
+    /// `pyproject.toml`. See [`super::project`].
+    Project {
+        manager: Manager,
+        dir: PathBuf,
+        extras: Vec<String>,
+    },
 }
 
 /// A package manager that installs whole projects.
@@ -44,13 +49,15 @@ pub enum Manager {
     Uv,
     Poetry,
     Pipenv,
+    /// `pip install .` and `-e .`: no lockfile, the dependencies `pyproject.toml` declares.
+    Pip,
 }
 
 impl Manager {
     pub fn ecosystem(self) -> Ecosystem {
         match self {
             Manager::Npm | Manager::Pnpm | Manager::Yarn | Manager::Bun => Ecosystem::Npm,
-            Manager::Uv | Manager::Poetry | Manager::Pipenv => Ecosystem::Pypi,
+            Manager::Uv | Manager::Poetry | Manager::Pipenv | Manager::Pip => Ecosystem::Pypi,
         }
     }
 
@@ -63,6 +70,7 @@ impl Manager {
             Manager::Uv => "uv",
             Manager::Poetry => "poetry",
             Manager::Pipenv => "pipenv",
+            Manager::Pip => "pip",
         }
     }
 }
@@ -71,7 +79,29 @@ fn project(manager: Manager, cwd: &Path, dir: Option<String>) -> Target {
     Target::Project {
         manager,
         dir: dir.map_or_else(|| cwd.to_path_buf(), |d| cwd.join(d)),
+        extras: Vec::new(),
     }
+}
+
+/// A local directory spec (`.`, `./lib`, `.[dev]`) that holds a `pyproject.toml`: pip
+/// installs the dependencies it declares from the index.
+fn local_project(cwd: &Path, spec: &str) -> Option<Target> {
+    let (path, extras) = match spec.split_once('[') {
+        Some((p, e)) => (p, e.trim_end_matches(']')),
+        None => (spec, ""),
+    };
+    let dir = cwd.join(path.trim());
+    dir.join("pyproject.toml")
+        .is_file()
+        .then(|| Target::Project {
+            manager: Manager::Pip,
+            dir,
+            extras: extras
+                .split(',')
+                .map(|e| e.trim().to_string())
+                .filter(|e| !e.is_empty())
+                .collect(),
+        })
 }
 
 /// The value of the first option in `names` (`--cwd dir` or `--cwd=dir`).
@@ -767,6 +797,7 @@ pub fn pypi_args(args: &[String], cwd: &Path) -> Vec<Target> {
         let a = args[i].as_str();
         if positional_only || !a.starts_with('-') || a == "-" {
             targets.push(parse_pypi_spec(a));
+            targets.extend(local_project(cwd, a));
             i += 1;
             continue;
         }
@@ -806,9 +837,7 @@ pub fn pypi_args(args: &[String], cwd: &Path) -> Vec<Target> {
             }
             "-e" | "--editable" => {
                 if let Some(v) = value(&mut i) {
-                    if let Some(t) = editable(&v) {
-                        targets.push(t);
-                    }
+                    targets.extend(editable(&v).or_else(|| local_project(cwd, &v)));
                 }
             }
             k if INDEX_OPTS.contains(&k) => {
@@ -985,7 +1014,9 @@ fn requirements_file(path: &Path, shown: &str, depth: usize) -> Vec<Target> {
                 "-r" | "--requirement" => {
                     targets.extend(requirements_file(&dir.join(value), value, depth + 1))
                 }
-                "-e" | "--editable" => targets.extend(editable(value)),
+                "-e" | "--editable" => {
+                    targets.extend(editable(value).or_else(|| local_project(&dir, value)))
+                }
                 f if INDEX_OPTS.contains(&f) => targets.push(custom_index(Ecosystem::Pypi, value)),
                 _ => {}
             }
@@ -1390,6 +1421,7 @@ mod tests {
         Target::Project {
             manager,
             dir: PathBuf::from(dir),
+            extras: vec![],
         }
     }
 
@@ -1816,6 +1848,38 @@ mod tests {
         assert_eq!(at("pnpm add zod"), vec![js("zod", None)]);
         assert_eq!(at("bun add zod"), vec![js("zod", None)]);
         assert!(parse_command("npm run build", Path::new("/w")).is_empty());
+    }
+
+    #[test]
+    fn pip_local_projects() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir(d.path().join("lib")).unwrap();
+        std::fs::write(d.path().join("pyproject.toml"), "[project]\nname = \"a\"\n").unwrap();
+        std::fs::write(d.path().join("reqs.txt"), "-e .[dev]\n").unwrap();
+        let at = |cmd: &str| -> Vec<Target> {
+            parse_command(cmd, d.path())
+                .into_iter()
+                .flat_map(|i| i.targets)
+                .collect()
+        };
+        let here = |extras: &[&str]| Target::Project {
+            manager: Manager::Pip,
+            dir: d.path().join("."),
+            extras: extras.iter().map(|e| e.to_string()).collect(),
+        };
+        assert_eq!(at("pip install -e ."), vec![here(&[])]);
+        assert_eq!(
+            at("uv pip install -e '.[dev, test]'"),
+            vec![here(&["dev", "test"])]
+        );
+        assert_eq!(at("pip install -r reqs.txt"), vec![here(&["dev"])]);
+        // A non-editable local install also builds the project itself, which is not checked.
+        assert!(matches!(
+            at("pip install .").as_slice(),
+            [Target::Unverifiable { .. }, Target::Project { .. }]
+        ));
+        // No pyproject.toml, nothing to expand.
+        assert!(at("pip install -e ./lib").is_empty());
     }
 
     #[test]

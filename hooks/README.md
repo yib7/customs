@@ -47,7 +47,8 @@ Run `/hooks` in Claude Code to confirm it is registered.
 `npm exec`, `pnpm add`, `pnpm dlx`, `yarn add`, `yarn dlx`, `bun add`, `bunx`, and `npx`.
 
 Project installs too: `npm install` and `npm ci` with no package, `pnpm install`, `yarn`,
-`bun install`, `uv sync`, `poetry install`, `pipenv install` and `pipenv sync`. The hook
+`bun install`, `uv sync`, `poetry install`, `pipenv install`, `pipenv sync`, and
+`pip install -e .` (with extras such as `.[dev]`) for a directory with a `pyproject.toml`. The hook
 reads the project's lockfile, checks every pinned package, and denies the command when one
 is blocked or when a lockfile entry's tarball URL serves a different package than it
 names. Dependencies in `package.json`, `pyproject.toml` or `Pipfile` that the lockfile does
