@@ -151,6 +151,10 @@ pub fn command_reasons(command: &str, server: &str) -> Vec<String> {
             out.push(format!(
                 "edits {agent}, where the Customs hook is registered"
             ));
+        } else if lower.contains(CODEX_CONFIG) && lower.contains("hook") {
+            out.push(
+                "edits the hooks in Codex settings, where the Customs hook is registered".into(),
+            );
         }
     }
     if writes
@@ -258,15 +262,20 @@ pub fn command_reasons(command: &str, server: &str) -> Vec<String> {
     out
 }
 
-/// Reason an Edit, Write or MultiEdit call on `path` would disable or bypass Customs.
 /// Files where an agent registers the Customs hook (project, user and system scopes).
-const AGENT_SETTINGS: [(&str, &str); 4] = [
+const AGENT_SETTINGS: [(&str, &str); 5] = [
     (".claude/settings", "Claude Code settings"),
     ("cursor/hooks.json", "Cursor hooks"),
     (".gemini/settings.json", "Gemini CLI settings"),
     ("gemini-cli/settings.json", "Gemini CLI settings"),
+    (".codex/hooks.json", "Codex hooks"),
 ];
 
+/// Codex settings, which may hold hooks (`[hooks]`) among much else, so only edits that
+/// mention hooks count.
+const CODEX_CONFIG: &str = ".codex/config.toml";
+
+/// Reason an Edit, Write or MultiEdit call on `path` would disable or bypass Customs.
 pub fn edit_reason(path: &str, tool_input: &Value, server: &str) -> Option<String> {
     let lower = path.replace('\\', "/").to_ascii_lowercase();
     let name = lower.rsplit('/').next().unwrap_or(&lower);
@@ -279,6 +288,13 @@ pub fn edit_reason(path: &str, tool_input: &Value, server: &str) -> Option<Strin
                 "edits {agent}, where the Customs hook is registered"
             ));
         }
+    }
+    let text = tool_input.to_string().to_ascii_lowercase();
+    if lower.ends_with(CODEX_CONFIG) && (text.contains("hook") || text.contains("*** delete file"))
+    {
+        return Some(
+            "edits the hooks in Codex settings, where the Customs hook is registered".into(),
+        );
     }
     if REGISTRY_FILES.contains(&name) {
         let text = tool_input.to_string().to_ascii_lowercase();

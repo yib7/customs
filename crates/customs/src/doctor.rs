@@ -111,6 +111,7 @@ pub fn inspect(inputs: &Inputs) -> Vec<Finding> {
     lockfiles(inputs.dir, &proxy, &mut out);
     claude_hook(inputs, &mut out);
     other_agent_hooks(inputs, &mut out);
+    codex_hooks(inputs, &mut out);
     out.sort_by_key(|f| std::cmp::Reverse(f.level));
     out
 }
@@ -195,6 +196,76 @@ fn customs_matchers(v: &Value, event: &str, agent: &str, nested: bool) -> Vec<St
         })
         .map(|e| e["matcher"].as_str().unwrap_or("").to_string())
         .collect()
+}
+
+/// Whether a Codex hook matcher selects `tool` (or one of its aliases): empty or `*` is
+/// every tool, a `|`-list of plain names is exact, anything else an unanchored regex.
+fn codex_matches(matcher: &str, tool: &str, aliases: &[&str]) -> bool {
+    let m = matcher.trim();
+    if m.is_empty() || m == "*" {
+        return true;
+    }
+    let names = std::iter::once(tool).chain(aliases.iter().copied());
+    if m.chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '|')
+    {
+        let alts: Vec<&str> = m.split('|').collect();
+        return names.into_iter().any(|n| alts.contains(&n));
+    }
+    regex::Regex::new(m).is_ok_and(|r| names.into_iter().any(|n| r.is_match(n)))
+}
+
+/// Codex registrations: `hooks.json` and the `[hooks]` table of `config.toml`, in the
+/// project's and the user's `.codex` folder.
+fn codex_hooks(inputs: &Inputs, out: &mut Vec<Finding>) {
+    let mut dirs = vec![inputs.dir.join(".codex")];
+    dirs.extend(inputs.home.map(|h| h.join(".codex")));
+    for dir in dirs {
+        for f in [dir.join("hooks.json"), dir.join("config.toml")] {
+            let Ok(text) = std::fs::read_to_string(&f) else {
+                continue;
+            };
+            let v: Option<Value> = if f.extension().is_some_and(|e| e == "toml") {
+                toml::from_str::<toml::Value>(&text)
+                    .ok()
+                    .and_then(|t| serde_json::to_value(t).ok())
+            } else {
+                serde_json::from_str(&text).ok()
+            };
+            let Some(v) = v else { continue };
+            let matchers = customs_matchers(&v, "PreToolUse", "codex", true);
+            if matchers.is_empty() {
+                continue;
+            }
+            let sees = |tool: &str, aliases: &[&str]| {
+                matchers.iter().any(|m| codex_matches(m, tool, aliases))
+            };
+            let fix = "set the matcher to Bash|apply_patch (hooks/codex-hooks.json)";
+            let subject = f.display().to_string();
+            if !sees("Bash", &[]) {
+                out.push(finding(
+                    Level::Warn,
+                    &subject,
+                    "the Customs hook is registered, but its matcher does not include Bash, so it checks no install".into(),
+                    fix,
+                ));
+            } else if !sees("apply_patch", &["Write", "Edit"]) {
+                out.push(finding(
+                    Level::Warn,
+                    &subject,
+                    "the Customs hook sees only shell commands: an apply_patch edit can remove it from these settings or repoint .npmrc without confirmation".into(),
+                    fix,
+                ));
+            } else {
+                out.push(finding(
+                    Level::Ok,
+                    &subject,
+                    "the Customs hook checks shell commands and file edits (if Codex lists it as untrusted, trust it in /hooks)".into(),
+                    "",
+                ));
+            }
+        }
+    }
 }
 
 /// Cursor (`.cursor/hooks.json`) and Gemini CLI (`.gemini/settings.json`) registrations.
@@ -1009,6 +1080,55 @@ mod tests {
         assert!(found("settings.json")[0]
             .1
             .contains("does not include run_shell_command"));
+    }
+
+    #[test]
+    fn codex_hook_registration() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join(".codex")).unwrap();
+        let found = |name: &str| {
+            run_with(d.path(), None, full_env())
+                .into_iter()
+                .filter(|f| f.subject.ends_with(name))
+                .map(|f| (f.level, f.detail))
+                .collect::<Vec<_>>()
+        };
+        let hooks = |matcher: &str| {
+            let v = json!({"hooks": {"PreToolUse": [
+                {"matcher": matcher, "hooks": [{"type": "command", "command": "customs hook codex"}]}
+            ]}});
+            std::fs::write(d.path().join(".codex/hooks.json"), v.to_string()).unwrap();
+        };
+        hooks("Bash|apply_patch");
+        assert_eq!(found("hooks.json")[0].0, Level::Ok);
+        hooks("*");
+        assert_eq!(found("hooks.json")[0].0, Level::Ok);
+        hooks("Bash|Edit");
+        assert_eq!(found("hooks.json")[0].0, Level::Ok);
+        hooks("Bash");
+        assert!(found("hooks.json")[0].1.contains("only shell commands"));
+        hooks("Bas");
+        assert!(found("hooks.json")[0].1.contains("does not include Bash"));
+        hooks("^(Bash|apply_patch)$");
+        assert_eq!(found("hooks.json")[0].0, Level::Ok);
+        std::fs::remove_file(d.path().join(".codex/hooks.json")).unwrap();
+
+        let toml = r#"
+model = "o4"
+
+[[hooks.PreToolUse]]
+matcher = "Bash"
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "customs hook codex"
+"#;
+        std::fs::write(d.path().join(".codex/config.toml"), toml).unwrap();
+        let f = found("config.toml");
+        assert_eq!(f[0].0, Level::Warn);
+        assert!(f[0].1.contains("only shell commands"), "{}", f[0].1);
+        std::fs::write(d.path().join(".codex/config.toml"), "model = \"o4\"\n").unwrap();
+        assert!(found("config.toml").is_empty());
     }
 
     #[test]

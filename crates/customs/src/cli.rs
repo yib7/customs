@@ -266,6 +266,11 @@ pub enum HookTarget {
         #[command(flatten)]
         args: AgentHookArgs,
     },
+    /// Codex CLI PreToolUse hook (register in ~/.codex/hooks.json).
+    Codex {
+        #[command(flatten)]
+        args: AgentHookArgs,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -362,6 +367,9 @@ pub async fn run(cli: Cli) -> i32 {
         Command::Hook {
             target: HookTarget::Gemini { args },
         } => Ok(run_agent(args.options(), Agent::Gemini).await),
+        Command::Hook {
+            target: HookTarget::Codex { args },
+        } => Ok(run_agent(args.options(), Agent::Codex).await),
     };
     match result {
         Ok(code) => code,
@@ -820,7 +828,7 @@ mod tests {
             "y"
         ])
         .is_err());
-        for agent in ["cursor", "gemini"] {
+        for agent in ["cursor", "gemini", "codex"] {
             let c = Cli::try_parse_from(["customs", "hook", agent, "--fail-closed"]).unwrap();
             assert!(matches!(
                 c.command,
@@ -831,6 +839,11 @@ mod tests {
                             ..
                         }
                     } | HookTarget::Gemini {
+                        args: AgentHookArgs {
+                            fail_closed: true,
+                            ..
+                        }
+                    } | HookTarget::Codex {
                         args: AgentHookArgs {
                             fail_closed: true,
                             ..

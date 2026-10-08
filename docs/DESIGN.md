@@ -1034,15 +1034,23 @@ packages it did not reach as one `ask` line that points to `customs audit`.
 `check_install_command` over MCP (section 9.1) expands project installs the same way and,
 above 40 packages, lists only the ones that are not allowed.
 
-The same evaluation backs two more agents. `customs hook cursor` answers Cursor's
+The same evaluation backs three more agents. `customs hook cursor` answers Cursor's
 `beforeShellExecution` (input `command`, `cwd`; output `permission` `allow`, `ask` or
 `deny` with `userMessage` and `agentMessage`). Cursor reports file edits only after they
 happen (`afterFileEdit`), so there only shell commands are checked for tampering.
 `customs hook gemini` answers Gemini CLI's `BeforeTool` for `run_shell_command` (its
 `dir_path` is joined to `cwd`), `write_file` and `replace` (output `decision` and
 `reason`). Gemini CLI parses stderr when stdout is empty and reads plain text at exit 0 as
-`allow`, so the Gemini hook prints `{}` when it has no objection. Each check records the
-agent as its client (`claude-code-hook`, `cursor-hook`, `gemini-hook`).
+`allow`, so the Gemini hook prints `{}` when it has no objection. `customs hook codex`
+answers Codex CLI's `PreToolUse`, whose input has Claude Code's shape: `Bash` carries
+`command` (a string, or an argument list that the hook quotes and joins), and
+`apply_patch` carries the patch text. The hook splits the patch on its `*** Add File`,
+`*** Update File` and `*** Delete File` headers and runs the edit check on each file, so a
+patch that deletes `.codex/hooks.json` or removes the hook lines from `.codex/config.toml`
+is caught. Codex rejects `ask` as unsupported and treats an output it rejects as a failed
+hook, which lets the tool run, so the Codex hook turns `ask` into `deny` and tells the
+agent to check with the user. Each check records the agent as its client
+(`claude-code-hook`, `cursor-hook`, `gemini-hook`, `codex-hook`).
 
 ### 9.1 MCP server
 

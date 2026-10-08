@@ -116,15 +116,16 @@ By default the hook fails open: if it cannot check a package it writes the reaso
 stderr and returns no decision, so a broken Customs setup does not stop your work. Use
 `--fail-closed` where an unchecked install is worse than a blocked command.
 
-# Cursor and Gemini CLI hooks
+# Cursor, Gemini CLI and Codex hooks
 
-The same checks run for two more agents, with the same options as above. Each agent
+The same checks run for three more agents, with the same options as above. Each agent
 gets the decision in its own format.
 
 | Agent | Command | Register in | Sees | Answer |
 |---|---|---|---|---|
 | Cursor | `customs hook cursor` | `.cursor/hooks.json` or `~/.cursor/hooks.json` ([`cursor-hooks.json`](cursor-hooks.json)) | `beforeShellExecution` | `{"permission": "deny" \| "ask" \| "allow", "userMessage", "agentMessage"}` |
 | Gemini CLI | `customs hook gemini` | `.gemini/settings.json` or `~/.gemini/settings.json` ([`gemini-settings.json`](gemini-settings.json)) | `BeforeTool` for `run_shell_command`, `write_file`, `replace` | `{"decision": "deny" \| "ask", "reason"}`, or `{}` |
+| Codex CLI | `customs hook codex` | `.codex/hooks.json` or `~/.codex/hooks.json` ([`codex-hooks.json`](codex-hooks.json)), or `[hooks]` in `config.toml` | `PreToolUse` for `Bash` and `apply_patch` | `hookSpecificOutput` with `permissionDecision` `deny`, or nothing |
 
 Notes:
 
@@ -137,8 +138,13 @@ Notes:
   `allow`.
 - Gemini CLI's hook `timeout` is in milliseconds, and its matcher is a regular expression
   tested anywhere in the tool name.
+- Codex hooks cannot ask for confirmation, so where the other agents get `ask`, Codex gets
+  `deny` with the reason and a note to check with the user, who can run the command
+  themselves. The hook reads every file in an `apply_patch` edit, including deletions.
+- Codex asks you to review a new or changed hook before it runs it: open `/hooks` in Codex
+  and trust the Customs entry once.
 - `customs doctor` reports each registration it finds, and warns when a matcher leaves out
-  shell commands (or, for Gemini CLI, file edits).
+  shell commands (or, for Gemini CLI and Codex, file edits).
 
 # MCP server
 

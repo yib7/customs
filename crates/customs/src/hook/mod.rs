@@ -40,6 +40,7 @@ pub enum Agent {
     ClaudeCode,
     Cursor,
     Gemini,
+    Codex,
 }
 
 impl Agent {
@@ -49,6 +50,7 @@ impl Agent {
             Agent::ClaudeCode => "claude-code-hook",
             Agent::Cursor => "cursor-hook",
             Agent::Gemini => "gemini-hook",
+            Agent::Codex => "codex-hook",
         }
     }
 }
@@ -64,6 +66,49 @@ pub enum ToolCall {
         path: String,
         input: Value,
     },
+    /// Several files edited at once (a Codex `apply_patch`): each path with its new lines.
+    Patch {
+        files: Vec<(String, Value)>,
+    },
+}
+
+/// `s` as one POSIX shell word.
+fn sh_quote(s: &str) -> String {
+    let plain = !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_@%+=:,./-".contains(&b));
+    if plain {
+        s.to_string()
+    } else {
+        format!("'{}'", s.replace('\'', r"'\''"))
+    }
+}
+
+/// The files an `apply_patch` patch touches, each with its header and the lines it adds
+/// or removes (`content`). Paths come from `*** Add File:`, `*** Update File:`,
+/// `*** Delete File:` and `*** Move to:` headers.
+pub fn patch_files(patch: &str) -> Vec<(String, Value)> {
+    let mut files: Vec<(String, String)> = Vec::new();
+    for line in patch.lines() {
+        let header = [
+            "*** Add File:",
+            "*** Update File:",
+            "*** Delete File:",
+            "*** Move to:",
+        ]
+        .iter()
+        .find_map(|h| line.strip_prefix(h));
+        if let Some(path) = header {
+            files.push((path.trim().to_string(), format!("{line}\n")));
+        } else if let (true, Some((_, text))) = (line.starts_with(['+', '-']), files.last_mut()) {
+            text.push_str(line);
+            text.push('\n');
+        }
+    }
+    files
+        .into_iter()
+        .map(|(path, added)| (path, json!({ "content": added })))
+        .collect()
 }
 
 #[derive(Debug, Deserialize)]
@@ -93,7 +138,21 @@ impl HookDecision {
     pub fn render(d: Option<&HookDecision>, agent: Agent) -> Option<Value> {
         match (agent, d) {
             (Agent::ClaudeCode, Some(d)) => Some(d.to_json()),
-            (Agent::ClaudeCode, None) => None,
+            (Agent::ClaudeCode | Agent::Codex, None) => None,
+            // Codex treats `ask` as an invalid answer and runs the tool, so a request for
+            // confirmation becomes a denial that tells the user how to go ahead.
+            (Agent::Codex, Some(d)) if d.decision == "ask" => Some(
+                HookDecision {
+                    decision: "deny",
+                    reason: format!(
+                        "{}\nCodex hooks cannot ask for confirmation, so Customs stopped this. \
+                         Tell the user; if they agree, they can run it themselves.",
+                        d.reason.trim_end()
+                    ),
+                }
+                .to_json(),
+            ),
+            (Agent::Codex, Some(d)) => Some(d.to_json()),
             (Agent::Gemini, None) => Some(json!({})),
             (Agent::Cursor, None) => Some(json!({ "permission": "allow" })),
             (Agent::Cursor, Some(d)) => Some(json!({
@@ -387,6 +446,33 @@ pub fn parse_input(input: &str, agent: Agent) -> anyhow::Result<Option<ToolCall>
                 _ => None,
             }
         }
+        // Codex sends Claude Code's PreToolUse shape: shell commands as `Bash` with
+        // `{command}`, file edits as `apply_patch` with the patch in `command`.
+        Agent::Codex => {
+            if event.as_deref().is_some_and(|e| e != "PreToolUse") {
+                return Ok(None);
+            }
+            let tool_input = v.get("tool_input").cloned().unwrap_or(Value::Null);
+            let command = match tool_input.get("command") {
+                Some(Value::String(s)) => Some(s.clone()),
+                Some(Value::Array(parts)) => Some(
+                    parts
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(sh_quote)
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                ),
+                _ => None,
+            };
+            match (str_at(&v, "tool_name").as_deref(), command) {
+                (Some("Bash"), Some(command)) => Some(ToolCall::Shell { command, cwd }),
+                (Some("apply_patch"), Some(patch)) => Some(ToolCall::Patch {
+                    files: patch_files(&patch),
+                }),
+                _ => None,
+            }
+        }
     })
 }
 
@@ -418,6 +504,13 @@ pub async fn evaluate_call(
             return Ok(
                 tamper::edit_reason(path, input, &opts.server).map(|r| tamper_decision(None, &[r]))
             );
+        }
+        ToolCall::Patch { files } => {
+            let reasons: Vec<String> = files
+                .iter()
+                .filter_map(|(path, input)| tamper::edit_reason(path, input, &opts.server))
+                .collect();
+            return Ok((!reasons.is_empty()).then(|| tamper_decision(None, &reasons)));
         }
         ToolCall::Shell { command, cwd } => (command.as_str(), cwd.clone()),
     };
@@ -736,6 +829,35 @@ mod tests {
         ));
         let read = r#"{"hook_event_name":"BeforeTool","tool_name":"read_file","tool_input":{"file_path":"/w/a"}}"#;
         assert_eq!(parse_input(read, Agent::Gemini).unwrap(), None);
+        // Codex: Claude Code's shape, with `apply_patch` for edits.
+        let codex = r#"{"session_id":"s","turn_id":"t","transcript_path":null,"cwd":"/w","hook_event_name":"PreToolUse","model":"m","permission_mode":"default","tool_name":"Bash","tool_input":{"command":"uv add httpx"},"tool_use_id":"u"}"#;
+        assert_eq!(
+            parse_input(codex, Agent::Codex).unwrap(),
+            Some(ToolCall::Shell {
+                command: "uv add httpx".into(),
+                cwd: Some("/w".into())
+            })
+        );
+        let argv = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":["bash","-lc","npm i left-pad"]}}"#;
+        assert_eq!(
+            parse_input(argv, Agent::Codex).unwrap(),
+            Some(ToolCall::Shell {
+                command: "bash -lc 'npm i left-pad'".into(),
+                cwd: None
+            })
+        );
+        let patch = r#"{"hook_event_name":"PreToolUse","tool_name":"apply_patch","tool_input":{"command":"*** Begin Patch\n*** Update File: src/a.py\n@@\n-x = 1\n+x = 2\n*** Add File: .npmrc\n+registry=https://registry.npmjs.org/\n*** End Patch"}}"#;
+        let Some(ToolCall::Patch { files }) = parse_input(patch, Agent::Codex).unwrap() else {
+            panic!("not a patch")
+        };
+        let paths: Vec<&str> = files.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(paths, ["src/a.py", ".npmrc"]);
+        assert!(files[1].1["content"]
+            .as_str()
+            .unwrap()
+            .contains("+registry=https://registry.npmjs.org/"));
+        let mcp = r#"{"hook_event_name":"PreToolUse","tool_name":"mcp__fs__write","tool_input":{"path":"x"}}"#;
+        assert_eq!(parse_input(mcp, Agent::Codex).unwrap(), None);
     }
 
     #[test]
@@ -761,6 +883,24 @@ mod tests {
                 ["permissionDecision"],
             "deny"
         );
+        // Codex prints nothing to allow, and rejects `ask`, which becomes a denial.
+        assert_eq!(HookDecision::render(None, Agent::Codex), None);
+        assert_eq!(
+            HookDecision::render(Some(&d), Agent::Codex),
+            Some(d.to_json())
+        );
+        let ask = HookDecision {
+            decision: "ask",
+            reason: "warned".into(),
+        };
+        let c = HookDecision::render(Some(&ask), Agent::Codex).unwrap();
+        let out = &c["hookSpecificOutput"];
+        assert_eq!(out["permissionDecision"], "deny");
+        let reason = out["permissionDecisionReason"].as_str().unwrap();
+        assert!(
+            reason.starts_with("warned\nCodex hooks cannot ask"),
+            "{reason}"
+        );
     }
 
     #[tokio::test]
@@ -785,6 +925,45 @@ mod tests {
         assert!(d.reason.contains("Gemini CLI settings"), "{}", d.reason);
         let ls = r#"{"hook_event_name":"BeforeTool","tool_name":"run_shell_command","tool_input":{"command":"ls"},"cwd":"/tmp"}"#;
         assert_eq!(evaluate_for(ls, &opts, Agent::Gemini).await.unwrap(), None);
+        // Codex patches are checked file by file.
+        let patch = |body: &str| {
+            json!({"hook_event_name": "PreToolUse", "tool_name": "apply_patch",
+                   "tool_input": {"command": format!("*** Begin Patch\n{body}\n*** End Patch")}})
+            .to_string()
+        };
+        for (body, why) in [
+            (
+                "*** Update File: /home/u/.codex/hooks.json\n@@\n-      \"command\": \"customs hook codex\"",
+                "Codex hooks",
+            ),
+            (
+                "*** Update File: /home/u/.codex/config.toml\n@@\n-[[hooks.PreToolUse]]",
+                "Codex settings",
+            ),
+            ("*** Delete File: /home/u/.codex/config.toml", "Codex settings"),
+            (
+                "*** Add File: src/x.py\n+print(1)\n*** Update File: pip.conf\n@@\n+index-url = https://pypi.org/simple",
+                "registry or index",
+            ),
+        ] {
+            let d = evaluate_for(&patch(body), &opts, Agent::Codex)
+                .await
+                .unwrap()
+                .unwrap_or_else(|| panic!("not flagged: {body}"));
+            assert!(d.reason.contains(why), "{body}: {}", d.reason);
+        }
+        for body in [
+            "*** Update File: src/x.py\n@@\n-a\n+b",
+            "*** Update File: /home/u/.codex/config.toml\n@@\n-model = \"a\"\n+model = \"b\"",
+        ] {
+            assert_eq!(
+                evaluate_for(&patch(body), &opts, Agent::Codex)
+                    .await
+                    .unwrap(),
+                None,
+                "{body}"
+            );
+        }
     }
 
     #[tokio::test]
