@@ -11,6 +11,7 @@
 mod archive;
 mod delta;
 mod indicators;
+mod large;
 mod lexer;
 mod manifest;
 mod surface;
@@ -26,6 +27,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 pub use delta::{new_lines, DeltaStats};
 pub use indicators::INDICATORS as INDICATOR_NAMES;
+pub use large::install_time_code;
 
 /// Version of the feature schema emitted by this crate.
 pub const FEATURE_SCHEMA_VERSION: u32 = 1;
@@ -1061,6 +1063,7 @@ impl<'a> Scanner<'a> {
                     && archive::is_code_like(&e.path, &e.data)
             })
             .map(|e| e.path.clone())
+            .chain(self.c.unread.iter().cloned())
             .collect();
         let mut errors = self.c.errors.clone();
         errors.append(&mut self.errors);

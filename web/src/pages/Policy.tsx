@@ -410,8 +410,8 @@ function PolicyForm({
         <div className="border-t border-line">
           <SeverityField
             id="rule-unread_code"
-            label="Code too large to scan"
-            description="The package ships a code file or manifest over the scanner's 32 MiB per-file limit. The installer still runs it, and padding a payload past the limit hides it from every rule and the model. No benign package in the training corpus has one, so it blocks by default."
+            label="Code the scanner could not read"
+            description="The package ships code the scanner could not read: a code file or manifest over the 32 MiB per-file limit, an encrypted entry or one with an unsupported compression method, or an install hook in an archive above the scan size limit. The installer still runs it, and hiding a payload this way keeps it from every rule and the model. No benign package in the training corpus has any, so it blocks by default."
             value={draft.unread_code}
             onChange={(v) => set('unread_code', v)}
           />

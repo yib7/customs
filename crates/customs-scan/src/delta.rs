@@ -155,6 +155,7 @@ pub fn delta(prev: &Contents, cur: &Contents) -> (Contents, DeltaStats) {
         n_unsafe_paths: 0,
         stripped_prefix: cur.stripped_prefix.clone(),
         errors: Vec::new(),
+        unread: cur.unread.clone(),
     };
     (out, stats)
 }

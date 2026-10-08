@@ -82,7 +82,7 @@ const POLICY_RULES: Record<string, string> = {
   version_anomaly: 'Unusual version jump',
   nonregistry_dependency_added: 'Release added a dependency fetched outside the registry',
   young_dependency_added: 'Release added a brand-new dependency from outside the maintainers',
-  unread_code: 'Ships a code file too large to scan',
+  unread_code: 'Ships code the scanner could not read',
   startup_hook: 'Installs a .pth file that runs code at every Python start',
   scan_error: 'Archive could not be scanned',
   deny: 'Matches the deny list',

@@ -514,7 +514,7 @@ pub fn rule_label(rule: &str) -> String {
             "Release added a dependency from outside the registry".into()
         }
         "young_dependency_added" => "Release added a brand-new dependency".into(),
-        "unread_code" => "Code file too large to scan".into(),
+        "unread_code" => "Code the scanner could not read".into(),
         "startup_hook" => ".pth file runs code at every Python start".into(),
         other => other.to_string(),
     }

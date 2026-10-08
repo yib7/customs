@@ -37,6 +37,19 @@ pub struct Contents {
     /// Top-level directories that were stripped (`package`, `foo-1.0`), joined by `/`.
     pub stripped_prefix: Option<String>,
     pub errors: Vec<String>,
+    /// Code entries of the scanned archive itself whose content could not be read
+    /// (encrypted, an unsupported compression method, a read error). An installer that
+    /// can read them would run code the scanner never saw.
+    pub unread: Vec<String>,
+}
+
+/// Record an entry of the scanned archive that could not be read, when it is code.
+/// Nested archives are left out: installers do not unpack them, and test fixtures in
+/// legitimate packages include deliberately broken and encrypted ones.
+fn note_unread(out: &mut Contents, depth: u32, path: &str) {
+    if depth == 0 && !is_nested_archive(path) && is_code_like(path, b"") {
+        out.unread.push(path.to_string());
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -355,8 +368,15 @@ fn read_tar<R: Read>(
                 if let Some(r) = rejected(&tripped) {
                     return Err(r);
                 }
-                if n_read == 0 && depth == 0 {
-                    return Err(ScanError::Rejected(format!("corrupt archive: {e}")));
+                // At depth 0 the rest of the archive is unknown, and installers disagree
+                // about it (node-tar skips a bad header and keeps reading), so refuse.
+                if depth == 0 {
+                    let at = if n_read == 0 {
+                        ""
+                    } else {
+                        " after the first entry"
+                    };
+                    return Err(ScanError::Rejected(format!("corrupt archive{at}: {e}")));
                 }
                 out.errors
                     .push(format!("archive truncated or corrupt: {e}"));
@@ -396,6 +416,11 @@ fn read_tar<R: Read>(
             Err(e) => {
                 if let Some(r) = rejected(&tripped) {
                     return Err(r);
+                }
+                if depth == 0 {
+                    return Err(ScanError::Rejected(format!(
+                        "corrupt archive: entry unreadable: {path}: {e}"
+                    )));
                 }
                 out.errors.push(format!("entry unreadable: {path}: {e}"));
                 break;
@@ -443,10 +468,17 @@ fn read_zip(
     }
     for i in 0..zip.len() {
         admit_entry(budget, opts)?;
+        let name = zip.name_for_index(i).and_then(normalize_path);
         let mut f = match zip.by_index(i) {
             Ok(f) => f,
             Err(e) => {
-                out.errors.push(format!("zip entry {i} unreadable: {e}"));
+                out.errors.push(format!(
+                    "zip entry {} unreadable: {e}",
+                    name.as_deref().unwrap_or(&i.to_string())
+                ));
+                if let Some(path) = name {
+                    note_unread(out, depth, &path);
+                }
                 continue;
             }
         };
@@ -486,6 +518,7 @@ fn read_zip(
             Ok(v) => v,
             Err(e) => {
                 out.errors.push(format!("entry unreadable: {path}: {e}"));
+                note_unread(out, depth, &path);
                 continue;
             }
         };
@@ -567,6 +600,11 @@ fn strip_prefix(c: &mut Contents) {
                 && e.path.as_bytes()[root.len()] == b'/'
             {
                 e.path = e.path[cut..].to_string();
+            }
+        }
+        for u in c.unread.iter_mut() {
+            if u.len() > cut && u.starts_with(&root) && u.as_bytes()[root.len()] == b'/' {
+                *u = u[cut..].to_string();
             }
         }
         stripped.push(root);

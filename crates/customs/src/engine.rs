@@ -547,15 +547,27 @@ impl Engine {
         self.metrics.cache("scan_miss");
         let started = Instant::now();
         let summary = if size > self.limits.max_scan_bytes {
-            self.name_only_summary(
+            let limit = self.limits.max_scan_bytes >> 20;
+            let mut s = self.name_only_summary(
                 eco,
                 name,
                 Some(format!(
-                    "archive is {} MB, above the {} MB scan limit; scored on name and metadata only",
+                    "archive is {} MB, above the {limit} MB scan limit; scored on name and metadata only",
                     size >> 20,
-                    self.limits.max_scan_bytes >> 20
                 )),
-            )
+            );
+            // Padding a package past the limit must not let its install-time code through
+            // unread: list what would run, which the `unread_code` rule acts on.
+            let (p, f) = (path.to_path_buf(), filename.to_string());
+            let found =
+                tokio::task::spawn_blocking(move || customs_scan::install_time_code(&p, eco, &f))
+                    .await
+                    .map_err(internal)?;
+            s.unread_code = found
+                .into_iter()
+                .map(|c| format!("{c} (in an archive above the {limit} MB scan limit)"))
+                .collect();
+            s
         } else {
             let bytes = tokio::fs::read(path).await.map_err(internal)?;
             let scanner = self.scanner.clone();
@@ -906,7 +918,8 @@ fn scan_hits(policy: &Policy, s: &ScanSummary) -> Vec<PolicyHit> {
             rule: "unread_code".into(),
             severity,
             detail: format!(
-                "{first}{more} is too large to scan, so its code was never inspected; \
+                "{first}{more} could not be read by the scanner (too large, encrypted or \
+                 compressed with an unsupported method), so its code was never inspected; \
                  installing would run it"
             ),
         });
@@ -1132,7 +1145,7 @@ mod tests {
         assert_eq!(hits[0].severity, Decision::Block);
         assert!(hits[0]
             .detail
-            .starts_with("setup.py and 2 more is too large"));
+            .starts_with("setup.py and 2 more could not be read"));
         policy.unread_code = RuleSeverity::Warn;
         assert_eq!(
             scan_hits(&policy, &summary(&["setup.py"]))[0].severity,

@@ -61,8 +61,11 @@ pub fn human_duration(d: chrono::Duration) -> String {
 /// Name and version from a PyPI distribution file name.
 ///
 /// Wheels are `{name}-{version}(-{build})?-{py}-{abi}-{plat}.whl` with `-` escaped in the
-/// name, so splitting on `-` is exact. Sdists are `{name}-{version}.{ext}`; the name may
-/// contain hyphens, so the version starts at the first hyphen followed by a digit.
+/// name, so splitting on `-` is exact. Sdists are `{name}-{version}.{ext}`; legacy names
+/// may contain hyphens and PEP 440 versions do not, so the version starts at the last
+/// hyphen followed by a digit. Splitting at the first one would read the project
+/// `requests-2x` as `requests`, inheriting that name's allow-list entry and registry
+/// history. Extensions are the ones pip unpacks.
 pub fn parse_pypi_filename(filename: &str) -> Option<(String, String)> {
     if let Some(stem) = filename.strip_suffix(".whl") {
         let parts: Vec<&str> = stem.split('-').collect();
@@ -71,11 +74,24 @@ pub fn parse_pypi_filename(filename: &str) -> Option<(String, String)> {
         }
         return None;
     }
-    let stem = [".tar.gz", ".tar.bz2", ".tar.xz", ".tgz", ".zip", ".tar"]
-        .iter()
-        .find_map(|ext| filename.strip_suffix(ext))?;
+    let stem = [
+        ".tar.gz",
+        ".tar.bz2",
+        ".tar.xz",
+        ".tar.lzma",
+        ".tar.lz",
+        ".tgz",
+        ".tbz",
+        ".txz",
+        ".tlz",
+        ".zip",
+        ".tar",
+    ]
+    .iter()
+    .find_map(|ext| filename.strip_suffix(ext))?;
     let bytes = stem.as_bytes();
-    let idx = (0..bytes.len().saturating_sub(1))
+    let idx = (1..bytes.len().saturating_sub(1))
+        .rev()
         .find(|&i| bytes[i] == b'-' && bytes[i + 1].is_ascii_digit())?;
     Some((stem[..idx].to_string(), stem[idx + 1..].to_string()))
 }
@@ -115,6 +131,19 @@ mod tests {
             parse_pypi_filename("jinja2-time-0.2.0.zip"),
             Some(("jinja2-time".into(), "0.2.0".into()))
         );
+        assert_eq!(
+            parse_pypi_filename("requests-2x-1.0.tar.gz"),
+            Some(("requests-2x".into(), "1.0".into()))
+        );
+        assert_eq!(
+            parse_pypi_filename("py-2fa-0.1.0rc1.tar.bz2"),
+            Some(("py-2fa".into(), "0.1.0rc1".into()))
+        );
+        assert_eq!(
+            parse_pypi_filename("demo-1.0.txz"),
+            Some(("demo".into(), "1.0".into()))
+        );
+        assert_eq!(parse_pypi_filename("-1.0.tar.gz"), None);
         assert_eq!(parse_pypi_filename("weird.exe"), None);
         assert_eq!(parse_pypi_filename("bad.whl"), None);
     }

@@ -93,8 +93,8 @@ fn rule(id: &str) -> Rule {
         ),
         "customs/unread-code" => (
             "UnreadCode",
-            "Package ships code too large to scan",
-            "The archive holds a code file or manifest above the scanner's 32 MiB per-file limit. The installer runs it, but no rule or model inspected it; padding a payload past the limit is an evasion.",
+            "Package ships code the scanner could not read",
+            "The archive holds code the scanner could not read: a code file or manifest above the 32 MiB per-file limit, an encrypted entry or one compressed with an unsupported method, or install-time code in an archive above the scan size limit. The installer runs it, but no rule or model inspected it; padding or re-encoding a payload this way is an evasion.",
             "error",
         ),
         "customs/startup-hook" => (

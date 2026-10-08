@@ -251,10 +251,12 @@ pub struct Policy {
     pub young_dependency_added: RuleSeverity,
     #[serde(default = "default_young_dependency_days")]
     pub young_dependency_days: u32,
-    /// The archive holds a code file or manifest larger than the scanner reads (32 MiB):
-    /// the installer runs it, but no rule or model saw its content. Legitimate packages
-    /// almost never ship one (none of 22,258 benign archives in the corpus), while
-    /// padding `setup.py` past the cap hides any payload.
+    /// The archive holds code the scanner could not read: a code file or manifest over
+    /// the 32 MiB per-file cap, an encrypted entry or one compressed with a method the
+    /// scanner lacks, or install-time code (an npm install hook, an sdist build, a wheel
+    /// `.pth`) in an archive above the scan size limit. The installer runs it, but no rule
+    /// or model saw its content. None of the 22,258 benign archives in the corpus has
+    /// any, while padding `setup.py` past the cap hides any payload.
     #[serde(default = "default_block")]
     pub unread_code: RuleSeverity,
     /// The scanner rejected the archive (more than 20,000 entries or 256 MiB unpacked, an

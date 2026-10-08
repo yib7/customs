@@ -411,6 +411,14 @@ impl Harness {
     }
 
     async fn start_with_ui(edit: impl FnOnce(&mut Policy), ui: Option<PathBuf>) -> Self {
+        Self::start_full(edit, ui, Limits::default()).await
+    }
+
+    async fn start_full(
+        edit: impl FnOnce(&mut Policy),
+        ui: Option<PathBuf>,
+        limits: Limits,
+    ) -> Self {
         let mock = start_mock().await;
         let dir = tempfile::tempdir().unwrap();
         let mut policy = Policy::default();
@@ -426,7 +434,7 @@ impl Harness {
             policy,
             policy_path: dir.path().join("policy.toml"),
             scanner: fake_scanner(scans.clone()),
-            limits: Limits::default(),
+            limits,
             metrics: Arc::new(Metrics::new()),
         })
         .unwrap();
@@ -587,7 +595,7 @@ async fn code_too_large_to_scan_is_blocked() {
     assert_eq!(r.status(), 403);
     assert_eq!(r.headers()["x-customs-decision"], "block");
     let body = r.text().await.unwrap();
-    assert!(body.contains("setup.py is too large to scan"), "{body}");
+    assert!(body.contains("setup.py could not be read"), "{body}");
     let (_, v) = h.check("pypi", "paddedpkg", None).await;
     assert_eq!(v["decision"], "block");
     assert_eq!(v["model_decision"], "allow");
@@ -654,6 +662,27 @@ async fn new_versions_hit_min_age() {
         body.contains("min_age_days: published 2 hours ago (policy: 3 days)"),
         "{body}"
     );
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn archives_over_the_scan_limit_with_install_code_are_blocked() {
+    let limits = Limits {
+        max_scan_bytes: 4,
+        ..Limits::default()
+    };
+    let h = Harness::start_full(|_| {}, None, limits).await;
+    // An sdist runs its build at install; the mock's bytes are not even an archive.
+    let r = h.get(&pypi_file_path("goodpkg", "1.0.0")).await;
+    assert_eq!(r.status(), 403);
+    let body = r.text().await.unwrap();
+    assert!(body.contains("unread_code"), "{body}");
+    assert!(body.contains("above the 0 MB scan limit"), "{body}");
+    // A tarball whose layout cannot be read fails closed the same way.
+    let r = h.get("/npm/plainlib/-/plainlib-0.1.0.tgz").await;
+    assert_eq!(r.status(), 403);
+    // The scanner never ran on either.
+    assert_eq!(h.scans.load(Ordering::SeqCst), 0);
     h.stop().await;
 }
 
@@ -1101,6 +1130,47 @@ async fn policy_api_validates_and_persists() {
     // The bad updates did not change the active policy.
     let now: Value = h.get("/api/policy").await.json().await.unwrap();
     assert_eq!(now["block_threshold"], 0.8);
+
+    // A page on another origin, or one reached through DNS rebinding (its own host name
+    // resolving to 127.0.0.1), cannot switch enforcement off.
+    let mut off = p.clone();
+    off["warn_threshold"] = json!("model");
+    off["mode"] = json!("monitor");
+    for (name, value) in [
+        ("host", "rebind.attacker.example:7878"),
+        ("origin", "http://attacker.example"),
+    ] {
+        let r = h
+            .http
+            .put(format!("{}/api/policy", h.base))
+            .header(name, value)
+            .json(&off)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 403, "{name}: {value}");
+    }
+    let r = h
+        .http
+        .post(format!("{}/api/check", h.base))
+        .header("origin", "http://attacker.example")
+        .json(&json!({"ecosystem": "pypi", "name": "goodpkg"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 403);
+    let now: Value = h.get("/api/policy").await.json().await.unwrap();
+    assert_eq!(now["mode"], "enforce");
+    // The dashboard's own origin is accepted.
+    let r = h
+        .http
+        .put(format!("{}/api/policy", h.base))
+        .header("origin", h.base.as_str())
+        .json(&off)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
     h.stop().await;
 }
 

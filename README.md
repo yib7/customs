@@ -316,7 +316,10 @@ in [DESIGN.md section 4.8](docs/DESIGN.md#48-hostile-inputs).
 What the scanner cannot read, it cannot judge, so unread code fails closed. Padding
 `setup.py` past the 32 MiB per-file limit dropped a test payload's risk from 1.00 to 0.59,
 and 20,001 empty files made any archive unscannable; both now block (`unread_code`,
-`scan_error`), and neither fires on any of the 22,258 benign corpus archives. See
+`scan_error`), and neither fires on any of the 22,258 benign corpus archives. The same
+rule covers wheel entries the scanner cannot decode (encrypted, or compressed with a
+method it lacks) and install hooks in archives above the 256 MiB scan limit, which are
+read by streaming the archive's headers. See
 [DESIGN.md section 4.7](docs/DESIGN.md#47-archive-handling).
 
 A `.pth` file runs at every Python start, not only at install, so a `.pth` file that

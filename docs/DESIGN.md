@@ -413,7 +413,8 @@ verbatim (changing them requires a schema version bump):
 ### 4.7 Archive handling
 
 Formats are detected from content, not the file name: gzip and bzip2 tarballs, plain tar,
-zip (sdist `.zip`, wheels). Defaults: 20,000 entries, 32 MiB per entry (larger entries are
+zip (sdist `.zip`, wheels) with stored, deflate, bzip2 and LZMA entries, the methods
+Python's `zipfile` installs from. Defaults: 20,000 entries, 32 MiB per entry (larger entries are
 counted with their declared size but not analyzed), 256 MiB decompressed in total, a
 compression ratio of 250 (checked once 1 MiB has been decompressed), and one level of
 nested archives (`.zip .whl .tar.gz .tgz .tar.bz2 .tar .egg` inside the package are expanded
@@ -432,10 +433,32 @@ extensions, `binding.gyp`, `package.json`, `setup.cfg`, `pyproject.toml`, `PKG-I
 extensionless files starting with `#!`) was over the per-entry cap, and `scan_error` when
 the archive was rejected. In a rescan of the 42,748 corpus archives, neither fires on a
 single benign archive (no entry of any kind exceeds 32 MiB; the only two rejections were
-the nested cases above). Archives above the 256 MiB download scan limit are still scored
-on name and metadata only (`not_scanned`): large legitimate wheels are common, PyPI caps
-uploads at 100 MB by default, and age and history rules still apply to them. Only content needed for analysis is kept in memory (source, manifest,
-README and nested-archive entries in full, a short magic-number prefix otherwise).
+the nested cases above). Only content needed for analysis is kept in memory (source,
+manifest, README and nested-archive entries in full, a short magic-number prefix
+otherwise).
+
+The size cap is not the only way to keep the scanner from reading a file. A wheel whose
+module is stored with Zstandard (which Python 3.14's `zipfile` installs) or encrypted, or
+an entry whose data fails to decompress, used to be skipped with an error while the
+verdict allowed the rest; such entries of the scanned archive itself now count as
+`unread_code` when they are code. Nested archives are exempt, since installers do not
+unpack them and test suites ship deliberately broken ones: cookiecutter, patool and
+oletools carry encrypted fixture zips, inflate64 Deflate64 ones. A tarball that turns
+corrupt after its first entry was scanned up to the damage and allowed; node-tar skips a
+header with a bad checksum and keeps extracting, so what followed could be installed
+unseen. At depth 0 that is now a rejection (`scan_error`). Rescanning all 51,404 corpus
+archives (22,258 benign) with these changes found no rejection and no `unread_code` hit,
+and neither did 1,488 benign archives downloaded again as published (the corpus stores
+benign packages repacked, which would hide top-level damage).
+
+Archives above the 256 MiB scan limit are scored on name and metadata only
+(`not_scanned`): large legitimate wheels are common, PyPI caps uploads at 100 MB by
+default, and age and history rules still apply. What such an archive would run at
+install is still read, by streaming entry headers from disk: an npm install hook or a
+root `binding.gyp` (the implicit `node-gyp rebuild`), any sdist (its build runs code), a
+wheel's top-level `.pth` file. Each is reported as `unread_code`, so padding a package
+past the scan limit does not get its install-time code through unread, while a large
+wheel or a hook-free npm package is still served.
 
 A third rule, `startup_hook`, reads the install surface itself. Python runs the `import`
 lines of every `.pth` file in site-packages at each interpreter start, so a hook there runs
@@ -639,7 +662,7 @@ hits (`allow`, `not_scanned`), else `warn` or `block`. Rules: `deny`, `allow`,
 rules of section 8 (`provenance_dropped`, `install_script_added`, `publisher_changed`,
 `dormant_revival`, `version_anomaly`, `nonregistry_dependency_added`,
 `young_dependency_added`), `scan_error` (scanner rejected the archive, block by default),
-`unread_code` (a code file over the per-file scan limit, block by default), `startup_hook`
+`unread_code` (code the scanner could not read, block by default), `startup_hook`
 (a `.pth` file that launches, connects, downloads or reads secrets, block by default), `not_scanned`
 (archive above the scan size limit).
 `reasons` mix model features (positive contributions to the stacked logit, largest first)
@@ -662,7 +685,10 @@ Registry proxy:
 - `GET /pypi/files/{path}`: fetches `https://files.pythonhosted.org/{path}`, scans, decides,
   streams the archive or returns 403 with a plain-text explanation. The HTTP reason phrase
   is `Blocked by Customs: <rule or reason>`, which pip prints. PEP 658 `*.metadata` files
-  pass through unscanned.
+  pass through unscanned. The project name and version come from the file name; an sdist
+  name is split at the last hyphen followed by a digit (PEP 440 versions have no
+  hyphen), so the project `requests-2x` is not read as `requests` and does not inherit
+  that name's allow-list entry or registry history.
 - `GET /npm/{package}` (scoped: `/npm/@scope%2fname` and `/npm/@scope/name`): packument with
   `dist.tarball` rewritten to `/npm/{package}/-/{file}.tgz`. `/npm/{package}/{version}` is
   also proxied. A 404 is recorded as `nonexistent_package`.
@@ -703,7 +729,13 @@ API (JSON). CORS allows only `http://localhost:5173` (the Vite dev server).
   day of the window, zeros included; `top_reasons` counts policy rules and the top model
   reasons of warn and block verdicts.
 - `GET /api/policy`, `PUT /api/policy`: the active policy as JSON with the `customs.toml`
-  keys (thresholds are `"model"` or a number). `PUT` takes the full policy (omitted keys
+  keys (thresholds are `"model"` or a number). `PUT` switches enforcement off when asked,
+  so it is accepted only with a `Host` that DNS rebinding cannot produce: an IP address,
+  `localhost` or `*.localhost`, or a name in `CUSTOMS_ALLOWED_HOSTS` (comma-separated;
+  set it for a team server reached by name). A page that resolves its own host name to
+  127.0.0.1 is same-origin to the browser, so CORS alone would not stop it. Any
+  state-changing API request carrying a browser `Origin` other than the dashboard's own
+  (or the Vite dev server) is refused with 403 as well; non-browser clients send none. `PUT` takes the full policy (omitted keys
   take their defaults), validates, persists to the policy file, and returns it; invalid
   input returns 400 `{ "error", "errors": [ { "field", "message" } ] }`.
 - `GET /api/model`: the contents of `metrics.json` (under `metrics`, or merged when the file
@@ -772,7 +804,7 @@ nonregistry_dependency_added = "block"  # npm: new git/URL/file dependency since
 young_dependency_added = "block"        # npm: new dependency first published days before, by strangers
 young_dependency_days = 7
 # Scanner rules: "off", "warn" or "block"
-unread_code = "block"       # a code file or manifest over the 32 MiB per-file scan limit
+unread_code = "block"       # code the scanner could not read (size cap, encryption, compression)
 startup_hook = "block"      # a .pth file that runs a process, network or secret access at startup
 scan_error = "block"        # the scanner rejected the archive (limits, bomb, corrupt)
 allow = ["pypi:requests", "npm:react"]  # always allow (exact names)

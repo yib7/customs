@@ -222,6 +222,108 @@ fn nested_archives_are_expanded_to_the_depth_cap() {
 }
 
 #[test]
+fn bzip2_and_lzma_wheel_entries_are_read() {
+    // Python's zipfile reads both, so pip installs such wheels. The zip crate cannot
+    // write LZMA, so that wheel was written by zipfile.ZIP_LZMA.
+    let bzip2 = zip_with_method(
+        &[
+            ("demo/__init__.py", b"import os\nos.system('x')\n"),
+            ("demo-1.0.dist-info/METADATA", b"Name: demo\nVersion: 1.0\n"),
+        ],
+        zip::CompressionMethod::Bzip2,
+    );
+    let lzma = include_bytes!("fixtures/lzma-demo-1.0-py3-none-any.whl").to_vec();
+    for (what, bytes) in [("bzip2", bzip2), ("lzma", lzma)] {
+        let r = scan(&bytes, "demo-1.0-py3-none-any.whl", &ScanOptions::default()).unwrap();
+        assert!(r.unread_code.is_empty(), "{what}: {:?}", r.errors);
+        assert!(r.errors.is_empty(), "{what}: {:?}", r.errors);
+        assert!(r.features["all_proc_exec"] > 0.0, "{what}");
+    }
+}
+
+#[test]
+fn unreadable_code_entries_are_reported_as_unread() {
+    // Zstandard (93) is a method Python 3.14's zipfile reads and this scanner does not;
+    // pip would install the module the scanner skipped.
+    let files: &[(&str, &[u8])] = &[
+        ("demo/__init__.py", b"x = 1\n"),
+        ("demo/hidden.py", b"import os\nos.system('x')\n"),
+        ("demo/data.bin", b"\x00\x01"),
+        ("demo/fixtures/broken.zip", b"PK"),
+        ("demo-1.0.dist-info/METADATA", b"Name: demo\nVersion: 1.0\n"),
+    ];
+    let bytes = zip_claiming_method(
+        files,
+        &[
+            "demo/hidden.py",
+            "demo/data.bin",
+            "demo/fixtures/broken.zip",
+        ],
+        93,
+    );
+    let r = scan(&bytes, "demo-1.0-py3-none-any.whl", &ScanOptions::default()).unwrap();
+    assert_eq!(r.unread_code, vec!["demo/hidden.py"]);
+    assert!(
+        r.errors.iter().any(|e| e.contains("demo/hidden.py")),
+        "{:?}",
+        r.errors
+    );
+
+    // Inside a zip sdist the wrapper directory is stripped from the reported path too.
+    let files: &[(&str, &[u8])] = &[
+        ("demo-1.0/PKG-INFO", b"Name: demo\nVersion: 1.0\n"),
+        ("demo-1.0/setup.py", BENIGN_SETUP_PY.as_bytes()),
+        ("demo-1.0/demo/hidden.py", b"x = 1\n"),
+    ];
+    let bytes = zip_claiming_method(files, &["demo-1.0/demo/hidden.py"], 93);
+    let r = scan(&bytes, "demo-1.0.zip", &ScanOptions::default()).unwrap();
+    assert_eq!(r.unread_code, vec!["demo/hidden.py"]);
+
+    // A nested archive's unreadable code is not reported: installers do not unpack it.
+    let inner = zip_claiming_method(&[("x/hidden.py", b"x = 1\n")], &["x/hidden.py"], 93);
+    let bytes = tar_gz(&[
+        TarItem::File("demo-1.0/setup.py", BENIGN_SETUP_PY.as_bytes()),
+        TarItem::File("demo-1.0/tests/data/fixture.zip", &inner),
+    ]);
+    let r = scan(&bytes, "demo-1.0.tar.gz", &ScanOptions::default()).unwrap();
+    assert!(r.unread_code.is_empty(), "{:?}", r.unread_code);
+}
+
+#[test]
+fn tar_corrupt_after_the_first_entry_is_rejected() {
+    // node-tar skips a header with a bad checksum and keeps extracting, so what follows
+    // it may be installed while the scanner stopped reading.
+    let mut tar = tar_bytes(&[
+        TarItem::File(
+            "package/package.json",
+            br#"{"name":"demo","version":"1.0.0"}"#,
+        ),
+        TarItem::File("package/index.js", b"module.exports = 1;\n"),
+    ]);
+    // Second header starts after the first header and its one data block.
+    tar[1024 + 148] ^= 0x01;
+    let r = scan(&gz(&tar), "demo-1.0.0.tgz", &ScanOptions::default());
+    assert!(
+        matches!(&r, Err(ScanError::Rejected(m)) if m.contains("after the first entry")),
+        "{r:?}"
+    );
+    // The same damage inside a nested archive is only recorded.
+    let bytes = tar_gz(&[
+        TarItem::File(
+            "package/package.json",
+            br#"{"name":"demo","version":"1.0.0"}"#,
+        ),
+        TarItem::File("package/test/fixture.tar", &tar),
+    ]);
+    let r = scan(&bytes, "demo-1.0.0.tgz", &ScanOptions::default()).unwrap();
+    assert!(
+        r.errors.iter().any(|e| e.contains("truncated or corrupt")),
+        "{:?}",
+        r.errors
+    );
+}
+
+#[test]
 fn garbage_input_is_an_error_not_a_panic() {
     assert!(matches!(
         scan(

@@ -89,6 +89,40 @@ pub fn zip_files(files: &[(&str, &[u8])]) -> Vec<u8> {
     w.finish().unwrap().into_inner()
 }
 
+pub fn zip_with_method(files: &[(&str, &[u8])], method: zip::CompressionMethod) -> Vec<u8> {
+    let mut w = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    let opts = SimpleFileOptions::default().compression_method(method);
+    for (p, d) in files {
+        w.start_file(*p, opts).unwrap();
+        w.write_all(d).unwrap();
+    }
+    w.finish().unwrap().into_inner()
+}
+
+/// A stored zip whose entries named in `relabel` claim compression method `method` in
+/// both the local and the central directory header, as an archive built by a tool that
+/// supports a method the scanner does not.
+pub fn zip_claiming_method(files: &[(&str, &[u8])], relabel: &[&str], method: u16) -> Vec<u8> {
+    let mut b = zip_with_method(files, zip::CompressionMethod::Stored);
+    let patch =
+        |b: &mut Vec<u8>, sig: &[u8; 4], len_at: usize, name_at: usize, method_at: usize| {
+            let mut i = 0;
+            while let Some(off) = b[i..].windows(4).position(|w| w == sig) {
+                let at = i + off;
+                let n = u16::from_le_bytes([b[at + len_at], b[at + len_at + 1]]) as usize;
+                let name = b[at + name_at..at + name_at + n].to_vec();
+                if relabel.iter().any(|r| r.as_bytes() == name.as_slice()) {
+                    b[at + method_at..at + method_at + 2].copy_from_slice(&method.to_le_bytes());
+                }
+                i = at + 4;
+            }
+        };
+    // Local header: method at 8, name length at 26, name at 30. Central: 10, 28, 46.
+    patch(&mut b, b"PK\x03\x04", 26, 30, 8);
+    patch(&mut b, b"PK\x01\x02", 28, 46, 10);
+    b
+}
+
 pub fn zip_with_symlink(target: &str) -> Vec<u8> {
     let mut w = zip::ZipWriter::new(Cursor::new(Vec::new()));
     let opts = SimpleFileOptions::default();

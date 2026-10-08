@@ -70,6 +70,9 @@ spec:
             - { name: http, containerPort: 7878 }
           env:
             - { name: CUSTOMS_LOG_JSON, value: "1" }
+            # Host names under which the dashboard may change the policy (PUT /api/policy);
+            # loopback names and IP addresses are always accepted.
+            - { name: CUSTOMS_ALLOWED_HOSTS, value: "customs,customs.customs.svc.cluster.local" }
           readinessProbe:
             httpGet: { path: /healthz, port: http }
             periodSeconds: 10

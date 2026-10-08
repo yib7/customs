@@ -57,7 +57,12 @@ pub fn router(state: AppState, ui_dir: Option<&Path>) -> Router {
         .route("/pypi/files/{*path}", get(pypi::file))
         .route("/pypi/offsite/{file}", get(pypi::offsite))
         .route("/npm/{*rest}", any(npm::npm_any))
-        .nest("/api", crate::api::router().layer(cors))
+        .nest(
+            "/api",
+            crate::api::router()
+                .layer(middleware::from_fn(guard_api))
+                .layer(cors),
+        )
         .route("/metrics", get(metrics))
         .route("/healthz", get(healthz));
 
@@ -72,6 +77,96 @@ pub fn router(state: AppState, ui_dir: Option<&Path>) -> Router {
     }
     app.layer(middleware::from_fn_with_state(state.clone(), track))
         .with_state(state)
+}
+
+/// Host names, beyond loopback names and IP literals, under which the policy may be
+/// changed (`CUSTOMS_ALLOWED_HOSTS`, comma-separated, ports ignored).
+fn allowed_hosts() -> &'static [String] {
+    static HOSTS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    HOSTS.get_or_init(|| {
+        std::env::var("CUSTOMS_ALLOWED_HOSTS")
+            .unwrap_or_default()
+            .split(',')
+            .map(|h| strip_port(h.trim()).to_ascii_lowercase())
+            .filter(|h| !h.is_empty())
+            .collect()
+    })
+}
+
+fn strip_port(host: &str) -> &str {
+    if let Some(rest) = host.strip_prefix('[') {
+        return rest.split_once(']').map_or(host, |(h, _)| h);
+    }
+    match host.rsplit_once(':') {
+        Some((h, port)) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => h,
+        _ => host,
+    }
+}
+
+/// Whether a `Host` header names this machine in a way DNS rebinding cannot forge: an IP
+/// literal, `localhost` (and `*.localhost`, which resolvers keep on loopback), or a name
+/// the operator listed.
+pub fn host_allowed(host: &str, extra: &[String]) -> bool {
+    let h = strip_port(host).trim_end_matches('.').to_ascii_lowercase();
+    !h.is_empty()
+        && (h.parse::<std::net::IpAddr>().is_ok()
+            || h == "localhost"
+            || h.ends_with(".localhost")
+            || extra.contains(&h))
+}
+
+/// A browser `Origin` that may send state-changing requests: the dashboard served by this
+/// server (same host and port) or the Vite dev server.
+pub fn origin_allowed(origin: &str, host: &str) -> bool {
+    origin == DEV_ORIGIN
+        || origin
+            .strip_prefix("http://")
+            .or_else(|| origin.strip_prefix("https://"))
+            .is_some_and(|authority| authority.eq_ignore_ascii_case(host))
+}
+
+/// Refuse state-changing API calls a web page could have made. CORS keeps other origins
+/// from reading responses, but a cross-site form or fetch can still send one, and DNS
+/// rebinding makes the page same-origin: its host name resolves to 127.0.0.1, so the
+/// browser sends `Host: attacker.example`. Non-browser clients send no `Origin`.
+async fn guard_api(req: Request, next: Next) -> Response {
+    if matches!(*req.method(), Method::GET | Method::HEAD | Method::OPTIONS) {
+        return next.run(req).await;
+    }
+    // Owned copies: a borrow of the request (whose body is not `Sync`) must not live
+    // across the await below.
+    let (host, fwd_host, origin, is_policy) = {
+        let header_str = |h: header::HeaderName| {
+            req.headers()
+                .get(h)
+                .map(|v| v.to_str().unwrap_or("").to_string())
+        };
+        (
+            header_str(header::HOST).unwrap_or_default(),
+            header_str(header::HeaderName::from_static("x-forwarded-host")),
+            header_str(header::ORIGIN),
+            req.uri().path() == "/policy",
+        )
+    };
+    let refuse = |why: String| {
+        tracing::warn!(%host, origin = origin.as_deref().unwrap_or(""), "{why}");
+        (StatusCode::FORBIDDEN, Json(json!({ "error": why }))).into_response()
+    };
+    if let Some(o) = &origin {
+        // Behind a reverse proxy the dashboard's origin is the forwarded host.
+        if !origin_allowed(o, &host) && !fwd_host.as_deref().is_some_and(|f| origin_allowed(o, f)) {
+            return refuse(format!("cross-origin request from {o} refused"));
+        }
+    }
+    // Changing the policy can switch enforcement off, so it also needs a Host that DNS
+    // rebinding cannot produce. Checks stay reachable under any name (team servers).
+    if is_policy && !host_allowed(&host, allowed_hosts()) {
+        return refuse(format!(
+            "policy changes are accepted only on localhost, an IP address, or a host in \
+             CUSTOMS_ALLOWED_HOSTS (got {host:?})"
+        ));
+    }
+    next.run(req).await
 }
 
 /// Count requests by route template and status.
@@ -157,4 +252,43 @@ pub async fn shutdown_signal() {
         _ = term => {},
     }
     tracing::info!("shutting down");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hosts_that_rebinding_cannot_forge() {
+        let none: &[String] = &[];
+        for ok in [
+            "127.0.0.1:7878",
+            "localhost:7878",
+            "LOCALHOST",
+            "app.localhost:1",
+            "[::1]:7878",
+            "10.0.0.5",
+            "localhost.",
+        ] {
+            assert!(host_allowed(ok, none), "{ok}");
+        }
+        for bad in [
+            "evil.example:7878",
+            "localhost.evil.example",
+            "",
+            "127.0.0.1.nip.io",
+        ] {
+            assert!(!host_allowed(bad, none), "{bad}");
+        }
+        let extra = vec!["customs.corp".to_string()];
+        assert!(host_allowed("Customs.Corp:443", &extra));
+    }
+
+    #[test]
+    fn origins() {
+        assert!(origin_allowed("http://127.0.0.1:7878", "127.0.0.1:7878"));
+        assert!(origin_allowed(DEV_ORIGIN, "127.0.0.1:7878"));
+        assert!(!origin_allowed("http://evil.example", "127.0.0.1:7878"));
+        assert!(!origin_allowed("null", "127.0.0.1:7878"));
+    }
 }
