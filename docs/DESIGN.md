@@ -633,6 +633,23 @@ refuse a plain-HTTP registry on any host but `localhost` until it is listed in
 environment variable that replaces PyPI, so `poetry install` goes straight to pypi.org; the
 Claude Code hook (section 9) still checks every `poetry.lock` pin before the command runs.
 
+What the variables do not cover was measured the same way, with a denied package and
+lockfiles written straight against the public registries. The variables beat a
+`registry=` line in `.npmrc` or `bunfig.toml` and pip's config files. Scoped registries do
+not: pnpm and Bun fetched a scope set in `.npmrc` or `[install.scopes]` from that registry
+directly, while npm still sent the tarball through the proxy. Lockfile URLs are used as
+written: npm redirects only `registry.npmjs.org` URLs to the configured registry; pnpm, Bun
+and Deno download any URL their lockfile records, even a `registry.npmjs.org` one; Yarn 1
+downloads every `resolved` URL in `yarn.lock`, so a classic `yarn.lock` never reaches the
+proxy. `uv sync --frozen` downloads the file URLs in `uv.lock`, while plain `uv sync`
+resolved again through the proxy and `uv sync --locked` refused to run. `customs doctor
+[DIR]` checks a project and the current environment for each of these (unset or
+different variables, scoped registries, extra indexes and find-links in pip and uv
+settings or requirements files, non-PyPI Pipfile sources, Poetry, lockfile URLs off the
+proxy) and exits 1 when it finds a way around the proxy. Packages that bypass the proxy
+are still checked by the Claude Code hook and `customs audit`, which read the lockfile
+itself.
+
 Caching: archives are stored by sha256 under `<data-dir>/cache`, verdict inputs (scan and
 model output) in SQLite keyed by (ecosystem, name, version, sha256, model_version).
 Concurrent requests for the same artifact URL share one download and one scan.

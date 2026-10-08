@@ -81,6 +81,7 @@ flowchart LR
 cargo install --path crates/customs        # or: docker compose -f deploy/docker-compose.yml up
 customs serve                              # proxy, API and dashboard on http://127.0.0.1:7878
 eval "$(customs env)"                      # route pip, uv, pipenv, PDM, npm, pnpm, Yarn, Bun and Deno through it
+customs doctor                             # find installs in this project that would still skip the proxy
 
 customs check pypi reqeusts                # BLOCK: does not exist, 1 edit from 'requests'
 customs check npm left-pad                 # ALLOW

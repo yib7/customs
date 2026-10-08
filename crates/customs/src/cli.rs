@@ -47,6 +47,9 @@ pub enum Command {
     Scan(ScanArgs),
     /// Print shell exports that route pip, uv, pipenv, PDM, npm, pnpm, Yarn, Bun and Deno through the proxy.
     Env(EnvArgs),
+    /// Find installs in a project that would skip the proxy: unset variables, scoped
+    /// registries, extra indexes, lockfile URLs installers download as written.
+    Doctor(DoctorArgs),
     /// Model Context Protocol server on stdio, so agents can check packages before installing.
     Mcp(McpArgs),
     /// Agent integrations.
@@ -136,6 +139,18 @@ pub struct AuditArgs {
     pub server: String,
     #[command(flatten)]
     pub local: LocalArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct DoctorArgs {
+    /// Project directory (default: the current directory).
+    #[arg(default_value = ".")]
+    pub dir: PathBuf,
+    /// The proxy installs should go through.
+    #[arg(long, default_value = DEFAULT_SERVER, env = "CUSTOMS_SERVER")]
+    pub server: String,
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -247,6 +262,12 @@ pub async fn run(cli: Cli) -> i32 {
             print!("{}", env_exports(&a.server, a.shell));
             Ok(0)
         }
+        Command::Doctor(a) => Ok(crate::doctor::run(crate::doctor::DoctorOptions {
+            dir: a.dir,
+            server: a.server,
+            json: a.json,
+        })
+        .await),
         Command::Hook {
             target:
                 HookTarget::ClaudeCode {
@@ -506,6 +527,19 @@ pub fn pretty(v: &Verdict, url: Option<&str>, via: &str) -> String {
 /// whitelisted. Pipenv takes its index from the Pipfile and ignores `PIP_INDEX_URL` unless
 /// `PIPENV_PYPI_MIRROR` replaces pypi.org.
 pub fn env_exports(server: &str, shell: ShellArg) -> String {
+    let mut out = String::new();
+    for (k, v) in env_vars(server) {
+        out.push_str(&match shell {
+            ShellArg::Sh => format!("export {k}=\"{v}\"\n"),
+            ShellArg::Fish => format!("set -gx {k} \"{v}\"\n"),
+            ShellArg::Powershell => format!("$env:{k} = \"{v}\"\n"),
+        });
+    }
+    out
+}
+
+/// The variables behind [`env_exports`], in order.
+pub fn env_vars(server: &str) -> Vec<(&'static str, String)> {
     let base = server.trim_end_matches('/');
     let simple = format!("{base}/pypi/simple");
     let npm = format!("{base}/npm/");
@@ -527,15 +561,7 @@ pub fn env_exports(server: &str, shell: ShellArg) -> String {
         }
     }
     vars.push(("CUSTOMS_SERVER", base.to_string()));
-    let mut out = String::new();
-    for (k, v) in vars {
-        out.push_str(&match shell {
-            ShellArg::Sh => format!("export {k}=\"{v}\"\n"),
-            ShellArg::Fish => format!("set -gx {k} \"{v}\"\n"),
-            ShellArg::Powershell => format!("$env:{k} = \"{v}\"\n"),
-        });
-    }
-    out
+    vars
 }
 
 #[cfg(test)]
