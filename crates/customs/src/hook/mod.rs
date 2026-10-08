@@ -501,9 +501,27 @@ pub async fn evaluate_call(
 ) -> anyhow::Result<Option<HookDecision>> {
     let (command, cwd) = match call {
         ToolCall::Edit { path, input } => {
-            return Ok(
-                tamper::edit_reason(path, input, &opts.server).map(|r| tamper_decision(None, &[r]))
-            );
+            let tampering: Vec<String> = tamper::edit_reason(path, input, &opts.server)
+                .into_iter()
+                .collect();
+            let targets = mcp_targets(path, input);
+            if targets.is_empty() {
+                return Ok((!tampering.is_empty()).then(|| tamper_decision(None, &tampering)));
+            }
+            let checker = Checker::connect(&opts.server, &opts.local).await?;
+            let results =
+                check_targets_within(&targets, Some(&checker), client, Some(HOOK_BUDGET)).await;
+            let decision = decide(&results, opts.fail_closed).map(|d| HookDecision {
+                reason: format!(
+                    "This edit adds MCP servers that the agent starts itself, outside this hook.\n{}",
+                    d.reason
+                ),
+                ..d
+            });
+            if tampering.is_empty() {
+                return Ok(decision);
+            }
+            return Ok(Some(tamper_decision(decision, &tampering)));
         }
         ToolCall::Patch { files } => {
             let reasons: Vec<String> = files
@@ -549,6 +567,63 @@ pub async fn evaluate_call(
         return Ok(decision);
     }
     Ok(Some(tamper_decision(decision, &tampering)))
+}
+
+/// The text an edit leaves in `path`: a Write's `content`, or the current file with each
+/// `old_string` replaced (Edit, MultiEdit, Gemini CLI's `replace`). `None` when the edit
+/// does not apply to the file as it is.
+fn edited_text(path: &str, input: &Value) -> Option<String> {
+    if let Some(c) = input.get("content").and_then(Value::as_str) {
+        return Some(c.to_string());
+    }
+    let mut text = std::fs::read_to_string(path).ok()?;
+    let edits: Vec<&Value> = match input.get("edits").and_then(Value::as_array) {
+        Some(a) => a.iter().collect(),
+        None => vec![input],
+    };
+    for e in edits {
+        let old = e.get("old_string")?.as_str()?;
+        let new = e.get("new_string").and_then(Value::as_str).unwrap_or("");
+        if old.is_empty() || !text.contains(old) {
+            return None;
+        }
+        text = if e.get("replace_all").and_then(Value::as_bool) == Some(true) {
+            text.replace(old, new)
+        } else {
+            text.replacen(old, new, 1)
+        };
+    }
+    Some(text)
+}
+
+/// Packages an edit to an MCP server configuration adds or changes: the agent starts them
+/// itself, at its next start, without a tool call this hook could see.
+fn mcp_targets(path: &str, input: &Value) -> Vec<Target> {
+    use crate::audit::{mcp, Parsed};
+    let p = std::path::Path::new(path);
+    if !mcp::is_mcp_config(p) {
+        return Vec::new();
+    }
+    let Some(after) = edited_text(path, input) else {
+        return Vec::new();
+    };
+    let deps = |text: &str| {
+        let mut out = Parsed::default();
+        let _ = mcp::parse(text, p, &mut out);
+        out.deps
+    };
+    let before: std::collections::HashSet<(String, String)> = std::fs::read_to_string(p)
+        .map(|t| deps(&t).into_iter().map(|d| (d.name, d.version)).collect())
+        .unwrap_or_default();
+    deps(&after)
+        .into_iter()
+        .filter(|d| !before.contains(&(d.name.clone(), d.version.clone())))
+        .map(|d| Target::Package {
+            ecosystem: d.ecosystem,
+            version: (d.pinned || d.version != "latest").then_some(d.version),
+            name: d.name,
+        })
+        .collect()
 }
 
 /// Merge tampering reasons into the install decision: a deny stays a deny, and anything

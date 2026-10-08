@@ -102,6 +102,12 @@ send. For a stronger guarantee, start the server with `CUSTOMS_ADMIN_TOKEN` and 
 token out of the agent's environment: policy changes then need it, however the request is
 built.
 
+The same matcher lets the hook check MCP servers an edit adds. When the agent writes a
+server into `.mcp.json` (or `.cursor/mcp.json`, `.vscode/mcp.json`,
+`.gemini/settings.json`), the hook checks the package it would launch (`npx -y pkg`,
+`uvx pkg`) before the edit is made, since the agent later starts that server without a
+tool call. `customs audit` checks the servers already configured.
+
 ## Options
 
 | Flag | Env | Default | Meaning |

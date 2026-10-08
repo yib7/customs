@@ -1370,8 +1370,6 @@ fn run_hook(
     cwd: &std::path::Path,
     extra: &[&str],
 ) -> (String, String, i32) {
-    use std::io::Write;
-    use std::process::{Command, Stdio};
     let input = json!({
         "session_id": "test",
         "transcript_path": "/tmp/t.jsonl",
@@ -1381,6 +1379,18 @@ fn run_hook(
         "tool_name": "Bash",
         "tool_input": {"command": command, "description": "install"},
     });
+    run_hook_input(server, input, cwd, extra)
+}
+
+/// Run `customs hook claude-code` on one PreToolUse input.
+fn run_hook_input(
+    server: &str,
+    input: Value,
+    cwd: &std::path::Path,
+    extra: &[&str],
+) -> (String, String, i32) {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
     let mut child = Command::new(env!("CARGO_BIN_EXE_customs"))
         .args(["hook", "claude-code", "--server", server])
         .args(extra)
@@ -1402,6 +1412,74 @@ fn run_hook(
         String::from_utf8_lossy(&out.stderr).into_owned(),
         out.status.code().unwrap_or(-1),
     )
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn hook_checks_mcp_servers_an_edit_adds() {
+    let h = Harness::start(|_| {}).await;
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dir.path().join(".mcp.json");
+    std::fs::write(
+        &cfg,
+        "{\n  \"mcpServers\": {\n    \"lib\": { \"command\": \"npx\", \"args\": [\"-y\", \"@scope/lib@1.2.3\"] }\n  }\n}\n",
+    )
+    .unwrap();
+    let edit = |old: &str, new: &str| {
+        json!({
+            "session_id": "test",
+            "cwd": dir.path(),
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Edit",
+            "tool_input": {"file_path": cfg, "old_string": old, "new_string": new},
+        })
+    };
+    let base = h.base.clone();
+    let path = dir.path().to_path_buf();
+    let inputs = vec![
+        // Adds a server whose newest release is malicious.
+        edit(
+            "\"lib\": {",
+            "\"mail\": { \"command\": \"npx\", \"args\": [\"-y\", \"evil-js\"] },\n    \"lib\": {",
+        ),
+        // Adds a benign server.
+        edit(
+            "\"lib\": {",
+            "\"fetch\": { \"command\": \"uvx\", \"args\": [\"goodpkg\"] },\n    \"lib\": {",
+        ),
+        // Leaves the existing server as it is.
+        edit("\"-y\", \"@scope", "\"--yes\", \"@scope"),
+    ];
+    let out = tokio::task::spawn_blocking(move || {
+        inputs
+            .into_iter()
+            .map(|i| run_hook_input(&base, i, &path, &[]))
+            .collect::<Vec<_>>()
+    })
+    .await
+    .unwrap();
+    let (stdout, err, code) = &out[0];
+    assert_eq!(*code, 0, "{err}");
+    let v: Value = serde_json::from_str(stdout).unwrap_or_else(|_| panic!("{stdout} {err}"));
+    let hso = &v["hookSpecificOutput"];
+    assert_eq!(hso["permissionDecision"], "deny", "{v}");
+    let reason = hso["permissionDecisionReason"].as_str().unwrap();
+    assert!(reason.starts_with("This edit adds MCP servers"), "{reason}");
+    assert!(reason.contains("npm:evil-js 6.6.6"), "{reason}");
+    assert_eq!(out[1].0.trim(), "", "{:?}", out[1]);
+    assert_eq!(out[2].0.trim(), "", "{:?}", out[2]);
+    let events: Value = h.get("/api/events").await.json().await.unwrap();
+    let names: Vec<&str> = events
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["name"].as_str().unwrap())
+        .collect();
+    assert!(
+        names.contains(&"evil-js") && names.contains(&"goodpkg"),
+        "{names:?}"
+    );
+    assert!(!names.contains(&"@scope/lib"), "{names:?}");
+    h.stop().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

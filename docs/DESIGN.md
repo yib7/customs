@@ -1124,6 +1124,14 @@ a loopback name) is not flagged. The Edit, Write, MultiEdit and NotebookEdit too
 same check on those files when the hook's matcher includes them, which the shipped
 settings do.
 
+An edit to an MCP server configuration (the files of section 11: `.mcp.json`,
+`.cursor/mcp.json`, `.vscode/mcp.json`, `.gemini/settings.json`, ...) is read as the file
+it would leave behind, a Write's content or the current file with the Edit or MultiEdit
+replacements applied, and every package a new or changed server would launch is checked
+like an install. The agent starts those servers itself on its next start, without a tool
+call the hook could see, so this is the only point where such a package passes the hook.
+A block denies the edit; servers the edit leaves as they were are not checked again.
+
 When the same command also installs packages, the install findings come first and a
 deny stays a deny. The tests include everyday commands that must pass untouched (builds,
 `npm run build > log`, `sed -i` on source files, `kill <pid>`, `systemctl status customs`,
