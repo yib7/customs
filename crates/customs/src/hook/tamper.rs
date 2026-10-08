@@ -116,8 +116,19 @@ fn policy_write_re() -> &'static Regex {
 
 /// Reasons a shell command would disable or bypass Customs; empty when it would not.
 pub fn command_reasons(command: &str, server: &str) -> Vec<String> {
-    let lower = command.to_ascii_lowercase();
     let cmds = split_commands(command);
+    // The raw text keeps redirection targets, which the lexer drops; the lexed words have
+    // quotes removed, so `/api/"policy"` reads as written; the raw text without quotes
+    // covers a quoted redirection target (`> custom''s.toml`).
+    let lower = format!(
+        "{command}\n{}\n{}",
+        command.replace(['\'', '"', '\\'], ""),
+        cmds.iter()
+            .map(|c| c.join(" "))
+            .collect::<Vec<_>>()
+            .join("\n")
+    )
+    .to_ascii_lowercase();
     let programs: Vec<(&str, &[String])> = cmds.iter().filter_map(|c| program(c)).collect();
     let writes = command.contains('>')
         || programs.iter().any(|(p, args)| {
@@ -129,7 +140,7 @@ pub fn command_reasons(command: &str, server: &str) -> Vec<String> {
         });
     let mut out = Vec::new();
 
-    if lower.contains("/api/policy") && policy_write_re().is_match(command) {
+    if lower.contains("/api/policy") && policy_write_re().is_match(&lower) {
         out.push("changes the Customs policy through its API".to_string());
     }
     if lower.contains("customs.toml") && writes {
@@ -285,6 +296,10 @@ mod tests {
             "sed -i 's/enforce/monitor/' ~/.config/customs/customs.toml",
             "echo 'mode = \"monitor\"' >> customs.toml",
             "rm customs.toml",
+            // Quote splitting.
+            r#"curl -X PUT "http://127.0.0.1:7878/api/"'policy' -d @p.json"#,
+            "echo x > custom''s.toml",
+            r#"p"kill" cust"oms"#,
         ] {
             assert!(flagged(c), "{c}");
         }
