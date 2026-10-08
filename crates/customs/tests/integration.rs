@@ -2538,11 +2538,16 @@ async fn blocks_are_posted_to_the_webhook_once() {
          http://customs.test/policy"
     );
     assert_eq!(got[1]["loosened"], json!(true));
-    let metrics = h.get("/metrics").await.text().await.unwrap();
-    assert!(
-        metrics.contains("customs_notifications_total{outcome=\"sent\"} 2"),
-        "{metrics}"
-    );
+    // The sender counts a message once the webhook has answered, which can be just after
+    // the receiver above recorded it.
+    let sent = "customs_notifications_total{outcome=\"sent\"} 2";
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut metrics = h.get("/metrics").await.text().await.unwrap();
+    while !metrics.contains(sent) && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        metrics = h.get("/metrics").await.text().await.unwrap();
+    }
+    assert!(metrics.contains(sent), "{metrics}");
     h.stop().await;
 }
 
