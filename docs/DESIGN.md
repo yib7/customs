@@ -187,6 +187,20 @@ How indicators are counted (`customs-scan`, schema 1):
   on `__import__('os')`) like `os.system`. JavaScript `exec(`/`spawn(`/`fork(` count only
   in files that reference `child_process`. Method calls (`re.compile`, `cursor.exec`) and
   `def`s do not count.
+- A string that is run as code is read as code: the literal argument of Python `exec`,
+  `eval` and `compile`, and of JavaScript `eval` and the `Function` body, has its `\n`,
+  `\t` and quote escapes undone and goes through the same rules as the file (three levels
+  deep), in place of the string-content patterns, so its URL is counted once. Its hits land
+  on the literal's line (or on the matching lines of a literal written over several lines),
+  and the file-level dropper rule sees the file and its literals together. A 2026 PyPI
+  dropper campaign (`tlask`, `rlask`, `gpsea`, `pyphetools`, `nhmpy` and others) put the
+  whole payload in an `exec('...')` string inside a `-setup.pth` file, which Python runs at
+  every interpreter start: the scanner had seen `dyn_code` and a URL only, and it now sees
+  the download, the write and the process launch. Bundler modules are left as strings (an
+  eval string that names itself with a `sourceURL` comment, as webpack's development builds
+  wrap every module): on the first try they put library behavior on the install surface of
+  two benign archives. On 6,000 corpus archives the change touched 70 malicious and 9 benign
+  ones, and every indicator that appeared where there was none before was in malware.
 - String-content patterns (`secret_paths`, `persistence`, `recon` command names,
   `download_exec`, `exfil_endpoint`, `ip_url`, `url`, `crypto_wallet` words, and
   `curl`/`wget` as `network`) are regexes over string literal contents. Shell files and npm
