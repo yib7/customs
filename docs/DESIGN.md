@@ -206,6 +206,15 @@ How indicators are counted (`customs-scan`, schema 1):
   wrap every module): on the first try they put library behavior on the install surface of
   two benign archives. On 6,000 corpus archives the change touched 70 malicious and 9 benign
   ones, and every indicator that appeared where there was none before was in malware.
+  Three more forms are read the same way. A call over one base64 literal decoded in place
+  (`exec(b64decode('...'))`, `eval(atob('...'))`, `eval(Buffer.from('...',
+  'base64').toString())`, with zlib or gzip inflation when the call also names
+  `decompress` or `inflateSync`) reads the decoded text when it is mostly printable UTF-8;
+  the encoded literal keeps its length and entropy statistics. A literal after `'-c'` in a
+  list that names `sys.executable` or a `python` program is Python code: litellm 1.82.8
+  shipped its payload as `Popen([sys.executable, "-c", "import base64;
+  exec(base64.b64decode('...'))"])` in a `.pth` file, two layers this now reads through.
+  `builtins.exec` and `__import__('builtins').exec` count as the builtin.
 - String-content patterns (`secret_paths`, `persistence`, `recon` command names,
   `download_exec`, `exfil_endpoint`, `ip_url`, `url`, `crypto_wallet` words, and
   `curl`/`wget` as `network`) are regexes over string literal contents. Shell files and npm
