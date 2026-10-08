@@ -273,9 +273,9 @@ methodology, is in [`docs/EVALUATION.md`](docs/EVALUATION.md).
   that unit tests missed (a name-encoding label leak in the source data, CNN pooling over
   batch padding, the CNN skipped on empty token streams in Rust, and a feature derived
   from the archive file name); after the fixes the binary matches the evaluation to 1e-7.
-  `scripts/installer_e2e.py`, run in CI, drives real pip, uv and npm through the proxy
-  against a fake registry: dependency resolution, the release cooldown, and blocks by the
-  startup-hook and install-script rules.
+  `scripts/installer_e2e.py`, run in CI, drives real pip, uv, npm, pnpm, yarn and bun
+  through the proxy against a fake registry: dependency resolution, the release cooldown,
+  and blocks by the startup-hook and install-script rules.
 * **Seed noise measured.** Five retrains that differ only in random seed give ROC AUC
   0.968 to 0.969 but block recall 61% to 70%, because the block threshold rests on two or
   three validation packages. Model changes are judged against that spread. One scanner

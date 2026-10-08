@@ -125,12 +125,18 @@ async fn fetch_and_rewrite(
         .get(header::ACCEPT)
         .and_then(|v| v.to_str().ok())
         .unwrap_or(DEFAULT_ACCEPT);
-    let page = match state
-        .engine
-        .registry
-        .get(&url, Some(accept), "pypi_simple")
-        .await
-    {
+    // The release-age metadata is fetched alongside the page, not after it.
+    let held_back = async {
+        match project {
+            Some(p) => super::young_versions(state, Ecosystem::Pypi, p).await,
+            None => Default::default(),
+        }
+    };
+    let (page, hidden) = tokio::join!(
+        state.engine.registry.get(&url, Some(accept), "pypi_simple"),
+        held_back
+    );
+    let page = match page {
         Ok(p) => p,
         Err(e) => {
             tracing::warn!(%url, error = %e, "upstream simple page failed");
@@ -175,10 +181,6 @@ async fn fetch_and_rewrite(
         .content_type
         .clone()
         .unwrap_or_else(|| "text/html".into());
-    let hidden = match project {
-        Some(p) => super::young_versions(state, Ecosystem::Pypi, p).await,
-        None => Default::default(),
-    };
     let reason = crate::cooldown::yank_reason(policy.min_age_days);
     let mut removed = 0;
     let body = if ct.contains("json") {

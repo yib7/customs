@@ -5,7 +5,8 @@
 
 Starts a fake PyPI (simple index in HTML and JSON, JSON API, files) and a fake npm
 registry on 127.0.0.1, both serving wheels and tarballs built here, then `customs serve`
-with its upstream pointed at them, and drives pip, uv and npm through the proxy:
+with its upstream pointed at them, and drives pip, uv, npm, pnpm, yarn and bun through
+the proxy (each that is installed; --require lists the ones that must be):
 
 - a plain install, with a dependency resolved through the proxy;
 - an unpinned install of a package whose newest release is younger than min_age_days
@@ -436,7 +437,9 @@ def run(
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--bin", default=str(ROOT / "target/debug/customs"))
-    ap.add_argument("--require", default="pip,uv,npm", help="installers that must be present")
+    ap.add_argument(
+        "--require", default="pip,uv,npm", help="comma-separated installers that must be present"
+    )
     args = ap.parse_args()
     required = set(filter(None, args.require.split(",")))
 
@@ -491,6 +494,59 @@ def main() -> int:
             shutil.rmtree(work, ignore_errors=True)
     print(f"\n{FAILURES} failed" if FAILURES else "\nall passed")
     return 1 if FAILURES else 0
+
+
+def js_manager(tool: str, url: str, work: Path, env: dict) -> None:
+    """The npm scenarios with another client: pnpm and bun read the abbreviated packument."""
+    print(f"== {tool}")
+    registry = f"{url}/npm/"
+    proj = work / tool
+    proj.mkdir()
+    (proj / "package.json").write_text('{"name": "e2e", "version": "1.0.0", "private": true}\n')
+    tool_env = {
+        **env,
+        "npm_config_registry": registry,
+        "npm_config_ignore_scripts": "true",
+        "npm_config_store_dir": str(work / f"{tool}-store"),
+        "YARN_CACHE_FOLDER": str(work / f"{tool}-cache"),
+        "BUN_INSTALL_CACHE_DIR": str(work / f"{tool}-cache"),
+        "BUN_CONFIG_REGISTRY": registry,
+    }
+    add = {
+        "pnpm": ["pnpm", "add", "--ignore-scripts", "--registry", registry],
+        "yarn": ["yarn", "add", "--ignore-scripts", "--non-interactive", "--registry", registry],
+        "bun": ["bun", "add", "--ignore-scripts", "--registry", registry],
+    }[tool]
+
+    def version(pkg: str) -> str | None:
+        p = proj / "node_modules" / pkg / "package.json"
+        return json.loads(p.read_text())["version"] if p.exists() else None
+
+    r = run([*add, "plain-js"], cwd=proj, env=tool_env)
+    expect(
+        r.returncode == 0 and version("plain-js") == "2.0.0",
+        "plain-js installs",
+        r.stdout + r.stderr,
+    )
+    # pnpm keeps transitive dependencies out of the top-level node_modules.
+    nested = proj / "node_modules" / "plain-js" / "node_modules" / "calm-js" / "package.json"
+    calm = version("calm-js") or (
+        json.loads(nested.read_text())["version"] if nested.exists() else None
+    )
+    if calm is None:
+        store = proj / "node_modules" / ".pnpm"
+        calm = (
+            next((d.name.split("@")[-1] for d in store.glob("calm-js@*")), None)
+            if store.exists()
+            else None
+        )
+    expect(calm == "1.0.0", "its dependency resolves to calm-js 1.0.0", str(calm))
+    r = run([*add, "evil-js@1.0.1"], cwd=proj, env=tool_env)
+    expect(
+        r.returncode != 0 and version("evil-js") is None,
+        "evil-js 1.0.1 is refused",
+        r.stdout + r.stderr,
+    )
 
 
 def wait_healthy(url: str, server: subprocess.Popen, seconds: float = 60) -> bool:
@@ -641,6 +697,14 @@ def scenarios(url: str, work: Path, required: set[str]) -> None:
         expect(
             "npm" not in required, "npm is installed", "npm is required (--require) but not on PATH"
         )
+
+    for tool in ("pnpm", "yarn", "bun"):
+        if shutil.which(tool):
+            js_manager(tool, url, work, env)
+        else:
+            expect(
+                tool not in required, f"{tool} is installed", f"{tool} is required but not on PATH"
+            )
 
     print("== verdicts")
     events = json.load(urllib.request.urlopen(f"{url}/api/events?limit=200"))

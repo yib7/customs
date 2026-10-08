@@ -32,7 +32,9 @@ jobs:
         with:
           python-version: "3.12"
       - uses: astral-sh/setup-uv@v6
-      - run: python3 scripts/installer_e2e.py --bin target/debug/customs
+      - uses: oven-sh/setup-bun@v2
+      - run: npm install --global pnpm@10.28.0 yarn@1.22.22
+      - run: python3 scripts/installer_e2e.py --bin target/debug/customs --require pip,uv,npm,pnpm,yarn,bun
 
   python:
     runs-on: ubuntu-latest

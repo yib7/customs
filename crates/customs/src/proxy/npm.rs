@@ -160,12 +160,21 @@ async fn packument(
         .get(header::ACCEPT)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("application/json");
-    let page = match state
-        .engine
-        .registry
-        .get(&url, Some(accept), "npm_packument")
-        .await
-    {
+    // The release-age metadata is fetched alongside the page, not after it.
+    let held_back = async {
+        match version {
+            None => super::young_versions(state, Ecosystem::Npm, name).await,
+            Some(_) => Default::default(),
+        }
+    };
+    let (page, hidden) = tokio::join!(
+        state
+            .engine
+            .registry
+            .get(&url, Some(accept), "npm_packument"),
+        held_back
+    );
+    let page = match page {
         Ok(p) => p,
         Err(e) => {
             tracing::warn!(%url, error = %e, "upstream packument failed");
@@ -200,11 +209,6 @@ async fn packument(
     }
     match serde_json::from_slice::<Value>(&page.body) {
         Ok(mut v) => {
-            let hidden = if version.is_none() {
-                super::young_versions(state, Ecosystem::Npm, name).await
-            } else {
-                Default::default()
-            };
             let n = crate::cooldown::filter_packument(&mut v, &hidden);
             rewrite_packument(&mut v, &proxy_base(headers));
             let mut resp = ([(header::CONTENT_TYPE, ct)], v.to_string()).into_response();

@@ -876,7 +876,7 @@ only in enforce mode with `min_age_severity = "block"`: allow-listed versions st
 unless also denied, a package whose versions are all young keeps them (the install then
 fails with the block reason instead of "no matching version"), and a pinned young version
 is still blocked when fetched. Metadata fetch errors fail open (nothing held back).
-`scripts/installer_e2e.py` checks this with real pip, uv and npm.
+`scripts/installer_e2e.py` checks this with real pip, uv, npm, pnpm, yarn and bun.
 
 `POST /api/check` resolves an unpinned or ranged version the same way by default
 (`"resolve": "served"`) and adds a `min_age_resolution` hit naming the newer version it
