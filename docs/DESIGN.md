@@ -753,7 +753,9 @@ both to proxied downloads and to `POST /api/check`.
 `customs hook claude-code` is a PreToolUse command hook for the `Bash` tool. It parses the
 command for package installs (`pip install`, `pip3 install`, `python -m pip install`,
 `uv pip install`, `uv add`, `poetry add`, `pipx install`, `npm install|i|add`,
-`pnpm add|install`, `yarn add`, `bun add`, `npx <pkg>`, `uvx <pkg>`), resolves each requirement, calls the
+`pnpm add|install`, `yarn add`, `bun add`, `npx <pkg>`, `uvx <pkg>`, and the scaffolding
+commands `npm init|create <x>`, `pnpm|yarn|bun create <x>`, which run `create-<x>`, or
+`@scope/create-<x>` for `@scope/<x>`), resolves each requirement, calls the
 running server's `/api/check` (or scans in-process when no server is running), and returns
 a PreToolUse decision: `deny` with an explanation when any package is blocked, `ask` when
 any is warned, nothing otherwise. Local paths, URLs, `-r requirements.txt` and editable

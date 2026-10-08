@@ -45,6 +45,9 @@ Run `/hooks` in Claude Code to confirm it is registered.
 `uv pip install`, `uv add`, `uv tool install`, `uv run --with`, `uvx`, `poetry add`,
 `pdm add`, `pipx install|run|inject`, `npm install|i|add` (and npm's aliases),
 `npm exec`, `pnpm add`, `pnpm dlx`, `yarn add`, `yarn dlx`, `bun add`, `bunx`, and `npx`.
+Scaffolding commands run a package too: `npm create vite` and `npm init vite` run
+`create-vite`, and so do `pnpm create`, `yarn create` and `bun create` (`@scope/app` is
+`@scope/create-app`); `bun create` from a GitHub repository comes back for review.
 
 Project installs too: `npm install` and `npm ci` with no package, `pnpm install`, `yarn`,
 `bun install`, `uv sync`, `poetry install`, `pipenv install`, `pipenv sync`, and

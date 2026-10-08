@@ -1156,6 +1156,8 @@ fn npm(args: &[String], cwd: &Path, out: &mut Vec<Install>) {
         });
     } else if sub == "exec" || sub == "x" {
         npx_like(rest, out, "npm exec");
+    } else if matches!(sub, "init" | "create" | "innit") {
+        create_like(rest, out, "npm init");
     }
 }
 
@@ -1181,6 +1183,7 @@ fn pnpm(args: &[String], cwd: &Path, out: &mut Vec<Install>) {
             }
         }
         "dlx" => npx_like(rest, out, "pnpm dlx"),
+        "create" => create_like(rest, out, "pnpm create"),
         _ => {}
     }
 }
@@ -1217,6 +1220,7 @@ fn yarn(args: &[String], cwd: &Path, out: &mut Vec<Install>) {
             }
         }
         "dlx" => npx_like(rest, out, "yarn dlx"),
+        "create" => create_like(rest, out, "yarn create"),
         "install" => out.push(Install {
             tool: "yarn install".into(),
             targets: vec![project(Manager::Yarn, cwd, opt_value(args, &["--cwd"]))],
@@ -1243,7 +1247,61 @@ fn bun(args: &[String], cwd: &Path, out: &mut Vec<Install>) {
             }
         }
         "x" => npx_like(rest, out, "bunx"),
+        "create" | "c" => create_like(rest, out, "bun create"),
         _ => {}
+    }
+}
+
+/// `npm init <initializer>`, `npm create`, `pnpm create`, `yarn create`, `bun create`: each
+/// downloads and runs the package named after the initializer (`vite@5` is
+/// `create-vite@5`, `@scope/app` is `@scope/create-app`, `@scope` is `@scope/create`).
+/// Without an initializer, `npm init` only writes a package.json.
+fn create_like(args: &[String], out: &mut Vec<Install>, tool: &str) {
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        if a == "--" || !a.starts_with('-') {
+            break;
+        }
+        i += if NPM_VALUE.contains(&a) { 2 } else { 1 };
+    }
+    let Some(init) = args.get(i).filter(|a| !a.is_empty() && a.as_str() != "--") else {
+        return;
+    };
+    let target = if init.ends_with(".jsx") || init.ends_with(".tsx") || init.starts_with('.') {
+        // `bun create ./Component.tsx` or a local template folder.
+        return;
+    } else if !init.starts_with('@') && init.contains('/') {
+        Target::Unverifiable {
+            ecosystem: Ecosystem::Npm,
+            spec: init.clone(),
+            reason: "a template from a GitHub repository is not checked".into(),
+        }
+    } else {
+        parse_npm_spec(&create_package(init))
+    };
+    out.push(Install {
+        tool: tool.into(),
+        targets: vec![target],
+    });
+}
+
+/// The package an initializer names, version kept.
+fn create_package(init: &str) -> String {
+    let (name, version) = match init.rfind('@') {
+        Some(k) if k > 0 => (&init[..k], Some(&init[k + 1..])),
+        _ => (init, None),
+    };
+    let pkg = match name.strip_prefix('@') {
+        Some(scoped) => match scoped.split_once('/') {
+            Some((scope, n)) => format!("@{scope}/create-{n}"),
+            None => format!("@{scoped}/create"),
+        },
+        None => format!("create-{name}"),
+    };
+    match version {
+        Some(v) => format!("{pkg}@{v}"),
+        None => pkg,
     }
 }
 
@@ -1938,6 +1996,45 @@ mod tests {
             tools("npx a; uvx b; pip install c"),
             vec!["npx", "uvx", "pip install"]
         );
+    }
+
+    #[test]
+    fn create_initializers() {
+        assert_eq!(
+            targets("npm create vite@5 my-app -- --template react"),
+            vec![js("create-vite", Some("5"))]
+        );
+        assert_eq!(
+            targets("npm init react-app my-app"),
+            vec![js("create-react-app", None)]
+        );
+        assert_eq!(targets("npm init -y"), vec![]);
+        assert_eq!(targets("npm init"), vec![]);
+        assert_eq!(
+            targets("npm init --yes @vue/app@3"),
+            vec![js("@vue/create-app", Some("3"))]
+        );
+        assert_eq!(
+            targets("pnpm create @angular"),
+            vec![js("@angular/create", None)]
+        );
+        assert_eq!(
+            targets("yarn create next-app web"),
+            vec![js("create-next-app", None)]
+        );
+        assert_eq!(
+            targets("bun create hono api"),
+            vec![js("create-hono", None)]
+        );
+        assert_eq!(targets("bun c elysia app"), vec![js("create-elysia", None)]);
+        assert!(matches!(
+            &targets("bun create someone/template app")[..],
+            [Target::Unverifiable { .. }]
+        ));
+        assert_eq!(targets("bun create ./Button.tsx"), vec![]);
+        assert_eq!(create_package("@scope@1.0.0"), "@scope/create@1.0.0");
+        assert_eq!(create_package("\u{e9}t\u{e9}"), "create-\u{e9}t\u{e9}");
+        assert_eq!(targets("npm init ''"), vec![]);
     }
 
     #[test]
