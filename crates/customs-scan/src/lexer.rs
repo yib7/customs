@@ -646,6 +646,151 @@ pub fn with_decoded<'a>(toks: &[Token<'a>], decoded: &'a [Option<String>]) -> Ve
         .collect()
 }
 
+/// One step of a reversal pattern: a punctuation or name token with this text, the
+/// reversed literal itself, or an empty string literal.
+#[derive(Clone, Copy)]
+enum Pat {
+    T(&'static str),
+    Lit,
+    Empty,
+}
+
+/// Ways to reverse a string literal at run time, as a pattern prefix and suffix. Malware
+/// stores a host, path or module name backwards and reverses it before use, so literal
+/// matching misses it.
+type Reversal = (&'static [Pat], &'static [Pat]);
+const PY_REVERSALS: &[Reversal] = &[
+    // 'lit'[::-1]
+    (
+        &[
+            Pat::Lit,
+            Pat::T("["),
+            Pat::T(":"),
+            Pat::T(":"),
+            Pat::T("-"),
+            Pat::T("1"),
+            Pat::T("]"),
+        ],
+        &[],
+    ),
+    // ''.join(reversed('lit'))
+    (
+        &[
+            Pat::Empty,
+            Pat::T("."),
+            Pat::T("join"),
+            Pat::T("("),
+            Pat::T("reversed"),
+            Pat::T("("),
+        ],
+        &[Pat::Lit, Pat::T(")"), Pat::T(")")],
+    ),
+];
+/// `.reverse().join('')`
+const JS_REVERSE_JOIN: &[Pat] = &[
+    Pat::T("."),
+    Pat::T("reverse"),
+    Pat::T("("),
+    Pat::T(")"),
+    Pat::T("."),
+    Pat::T("join"),
+    Pat::T("("),
+    Pat::Empty,
+    Pat::T(")"),
+];
+const JS_REVERSALS: &[Reversal] = &[
+    // 'lit'.split('').reverse().join('')
+    (
+        &[
+            Pat::Lit,
+            Pat::T("."),
+            Pat::T("split"),
+            Pat::T("("),
+            Pat::Empty,
+            Pat::T(")"),
+        ],
+        JS_REVERSE_JOIN,
+    ),
+    // [...'lit'].reverse().join('')
+    (
+        &[Pat::T("["), Pat::T("..."), Pat::Lit, Pat::T("]")],
+        JS_REVERSE_JOIN,
+    ),
+];
+
+/// String literals reversed at run time (see [`PY_REVERSALS`] and [`JS_REVERSALS`]):
+/// `(first, end, literal index, reversed text)`, where `first..end` is the token range the
+/// expression covers. Run on decoded tokens, so an escaped literal is reversed as decoded.
+pub fn reversed_literals(toks: &[Token<'_>], lang: Lang) -> Vec<(usize, usize, usize, String)> {
+    let pats = match lang {
+        Lang::Python => PY_REVERSALS,
+        Lang::Js => JS_REVERSALS,
+        Lang::Shell => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    let mut i = 0;
+    'next: while i < toks.len() {
+        for (prefix, suffix) in pats {
+            let n = prefix.len() + suffix.len();
+            let mut lit = None;
+            let matched = n <= toks.len() - i
+                && prefix
+                    .iter()
+                    .chain(*suffix)
+                    .zip(&toks[i..])
+                    .enumerate()
+                    .all(|(k, (p, t))| match p {
+                        Pat::Lit if t.kind == TokKind::Str => {
+                            lit = Some(i + k);
+                            true
+                        }
+                        Pat::Empty => t.kind == TokKind::Str && t.text.is_empty(),
+                        Pat::T(x) => t.kind != TokKind::Str && t.text == *x,
+                        Pat::Lit => false,
+                    });
+            if let (true, Some(l)) = (matched, lit) {
+                // Python joins adjacent literals before the subscript applies, so
+                // `'a' 'b'[::-1]` reverses 'ab'.
+                let mut run = l;
+                if lang == Lang::Python && l == i {
+                    let done = out
+                        .last()
+                        .map_or(0, |r: &(usize, usize, usize, String)| r.1);
+                    while run > done && toks[run - 1].kind == TokKind::Str {
+                        run -= 1;
+                    }
+                }
+                let text: String = toks[run..=l].iter().map(|t| t.text).collect();
+                out.push((i.min(run), i + n, run, text.chars().rev().collect()));
+                i += n;
+                continue 'next;
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+/// `toks` with each reversal from [`reversed_literals`] replaced by one string token that
+/// holds the reversed text, on the literal's line.
+pub fn with_reversed<'a>(
+    toks: &[Token<'a>],
+    revs: &'a [(usize, usize, usize, String)],
+) -> Vec<Token<'a>> {
+    if revs.is_empty() {
+        return toks.to_vec();
+    }
+    let mut out = Vec::with_capacity(toks.len());
+    let mut i = 0;
+    for (first, end, lit, text) in revs {
+        out.extend_from_slice(&toks[i..*first]);
+        out.push(Token { text, ..toks[*lit] });
+        i = *end;
+    }
+    out.extend_from_slice(&toks[i..]);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -677,6 +822,66 @@ mod tests {
         assert_eq!(dec, vec![None, None, a.clone(), None, a.clone(), a]);
         assert_eq!(d(r"tail\").as_deref(), None);
         assert_eq!(d(r"\xe9t\xe9").as_deref(), Some("\u{e9}t\u{e9}"));
+    }
+
+    #[test]
+    fn reversals() {
+        let rev = |src: &str, lang: Lang| -> Vec<(TokKind, String)> {
+            let toks = lex(src, lang);
+            let revs = reversed_literals(&toks, lang);
+            with_reversed(&toks, &revs)
+                .iter()
+                .map(|t| (t.kind, t.text.to_string()))
+                .collect()
+        };
+        let s = |x: &str| (TokKind::Str, x.to_string());
+        let p = |x: &str| (TokKind::Punct, x.to_string());
+        let i = |x: &str| (TokKind::Ident, x.to_string());
+        assert_eq!(
+            rev("x = 'ss.c'[::-1]", Lang::Python),
+            vec![i("x"), p("="), s("c.ss")]
+        );
+        assert_eq!(
+            rev("''.join(reversed(\"so\"))", Lang::Python),
+            vec![s("os")]
+        );
+        assert_eq!(
+            rev(
+                "require('ssecorp_dlihc'.split('').reverse().join(''))",
+                Lang::Js
+            ),
+            vec![i("require"), p("("), s("child_process"), p(")")]
+        );
+        assert_eq!(
+            rev("f([...\"sj.x\"].reverse().join(''))", Lang::Js),
+            vec![i("f"), p("("), s("x.js"), p(")")]
+        );
+        // Slices other than a full reversal, and joins with a separator, stay as written.
+        assert_eq!(rev("'abc'[::-2]", Lang::Python).len(), 7);
+        assert_eq!(rev("'abc'[::1]", Lang::Python).len(), 6);
+        assert_eq!(
+            rev("'abc'.split('').reverse().join(',')", Lang::Js).len(),
+            15
+        );
+        assert!(reversed_literals(&lex("'x'[::-1]", Lang::Shell), Lang::Shell).is_empty());
+        // Python reverses adjacent literals as one; JavaScript has no implicit joining.
+        assert_eq!(
+            rev("x = 'ab' 'cd'[::-1]", Lang::Python),
+            vec![i("x"), p("="), s("dcba")]
+        );
+        assert_eq!(
+            rev("f('ab' 'cd'[::-1], 'ef'[::-1])", Lang::Python),
+            vec![i("f"), p("("), s("dcba"), p(","), s("fe"), p(")")]
+        );
+        // The reversed token keeps the literal's line.
+        let toks = lex("a = 1\nb = (\n  'x'\n)[::-1]\n", Lang::Python);
+        let revs = reversed_literals(&toks, Lang::Python);
+        assert!(revs.is_empty(), "a parenthesized literal is not matched");
+        let toks = lex("a = 1\nb = 'yx'[::-1]\n", Lang::Python);
+        let revs = reversed_literals(&toks, Lang::Python);
+        let out = with_reversed(&toks, &revs);
+        let t = out.iter().find(|t| t.kind == TokKind::Str).unwrap();
+        assert_eq!((t.text, t.line), ("xy", 2));
     }
 
     use super::*;

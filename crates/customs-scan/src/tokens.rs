@@ -13,7 +13,9 @@
 //!    `'child_process'` becomes `child_process`, `"discord.com"` stays `discord.com`.
 //!    Template literal chunks around `${...}` are separate strings. Literals joined by `+`
 //!    (or written side by side in Python) count as one, folded as the indicator rules
-//!    fold them, so `('child_' + 'process')` also becomes `child_process`.
+//!    fold them, so `('child_' + 'process')` also becomes `child_process`. Escapes that
+//!    spell characters by number are decoded first, and a literal reversed at run time
+//!    (`'...'[::-1]`, `'...'.split('').reverse().join('')`) is read forwards.
 //! 5. Numbers become `<num>`.
 //! 6. Punctuation is kept verbatim, with multi-character operators as single tokens
 //!    (`==`, `=>`, `**`, `...`, `?.`).
@@ -22,7 +24,9 @@
 //! 8. The stream is truncated at `max_tokens` (default 4096) tokens in total.
 
 use crate::indicators::fold_runs;
-use crate::lexer::{decoded_strings, lex, with_decoded, Lang, TokKind};
+use crate::lexer::{
+    decoded_strings, lex, reversed_literals, with_decoded, with_reversed, Lang, TokKind,
+};
 
 pub const FILE_MARKER: &str = "<file>";
 pub const STR_TOKEN: &str = "<str>";
@@ -52,7 +56,9 @@ pub fn push_unit_tokens(out: &mut Vec<String>, text: &str, lang: Lang, max_token
     out.push(FILE_MARKER.to_string());
     let raw = lex(text, lang);
     let decoded = decoded_strings(text, &raw, lang);
-    let toks = with_decoded(&raw, &decoded);
+    let dec = with_decoded(&raw, &decoded);
+    let revs = reversed_literals(&dec, lang);
+    let toks = with_reversed(&dec, &revs);
     let runs = match lang {
         Lang::Shell => Vec::new(),
         _ => fold_runs(&toks, lang),
@@ -149,6 +155,18 @@ mod tests {
             4096,
         );
         assert_eq!(out, vec!["<file>", "u", "=", "(", "<str>", "+", "k", ")"]);
+        // Literals reversed at run time read forwards, then fold like any other literal.
+        let mut out = Vec::new();
+        push_unit_tokens(
+            &mut out,
+            "require('ssecorp'.split('').reverse().join('') + '_dlihc'[0]);",
+            Lang::Js,
+            4096,
+        );
+        assert_eq!(&out[..4], ["<file>", "require", "(", "process"]);
+        let mut out = Vec::new();
+        push_unit_tokens(&mut out, "m = 'ssec' 'orp'[::-1]\n", Lang::Python, 4096);
+        assert_eq!(out, vec!["<file>", "m", "=", "process"]);
     }
 
     #[test]

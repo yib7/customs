@@ -14,6 +14,12 @@ and the rewritten archive is re-scanned and re-scored with the exported models:
 ``reverse_strings``   store every string literal reversed and reverse it at run time:
                       ``"..."[::-1]`` in Python, ``.split('').reverse().join('')`` in
                       JavaScript.
+``array_join``        split every string literal into pieces and join them at run time:
+                      ``''.join(['ev', 'al'])`` in Python, ``['ev', 'al'].join('')`` in
+                      JavaScript.
+``string_table``      move every string literal into one array at the top of the file and
+                      read it back by index (``_s[3]``), the string-array layout
+                      javascript-obfuscator produces.
 ``base64_wrap``       replace each install-time script with a stub that base64-decodes and
                       executes the original (the most common real-world wrapper).
 ``trojan_padding``    bury the payload inside a large benign codebase by adding the source of
@@ -123,6 +129,71 @@ def reverse_strings(files: Files, eco: str) -> Files:
             return f"{q}{body}{q}[::-1]" if py else f"{q}{body}{q}.split('').reverse().join('')"
 
         out[p] = STR_RE.sub(rev, text).encode()
+    return out
+
+
+def _pieces(body: str) -> list[str]:
+    """Cut a literal into two to four pieces of at least two characters."""
+    k = min(4, max(2, len(body) // 4))
+    step = -(-len(body) // k)
+    return [body[i : i + step] for i in range(0, len(body), step)]
+
+
+def array_join(files: Files, eco: str) -> Files:
+    out = {}
+    for p, data in files.items():
+        if not _is_code(p):
+            out[p] = data
+            continue
+        text = data.decode("utf-8", "replace")
+        py = p.endswith(".py")
+
+        def join(m: re.Match, py: bool = py) -> str:
+            if m.start() > 0 and m.string[m.start() - 1].isalpha():
+                return m[0]
+            q = m["q"]
+            items = ", ".join(f"{q}{s}{q}" for s in _pieces(m["body"]))
+            return f"''.join([{items}])" if py else f"[{items}].join('')"
+
+        out[p] = STR_RE.sub(join, text).encode()
+    return out
+
+
+FUTURE_RE = re.compile(r"^(?:from __future__ import [^\n]*\n)+", re.M)
+
+
+def string_table(files: Files, eco: str) -> Files:
+    out = {}
+    for p, data in files.items():
+        if not _is_code(p):
+            out[p] = data
+            continue
+        text = data.decode("utf-8", "replace")
+        table: list[str] = []
+        index: dict[str, int] = {}
+
+        def ref(m: re.Match, table: list[str] = table, index: dict[str, int] = index) -> str:
+            if m.start() > 0 and m.string[m.start() - 1].isalpha():
+                return m[0]
+            body = m["body"]
+            if body not in index:
+                index[body] = len(table)
+                table.append(body)
+            return f"_s[{index[body]}]"
+
+        body = STR_RE.sub(ref, text)
+        if not table:
+            out[p] = data
+            continue
+        decl = "[" + ", ".join(json.dumps(s) for s in table) + "]"
+        if p.endswith(".py"):
+            # `from __future__` imports have to stay first.
+            m = FUTURE_RE.match(body)
+            at = m.end() if m else 0
+            body = body[:at] + f"_s = {decl}\n" + body[at:]
+        else:
+            body = f"var _s = {decl};\n" + body
+        out[p] = body.encode()
     return out
 
 
@@ -267,6 +338,8 @@ def run(n: int = 600, scheme: str = SCHEME, seed: int = 0, only: list[str] | Non
         "hex_escape": hex_escape,
         "char_codes": char_codes,
         "reverse_strings": reverse_strings,
+        "array_join": array_join,
+        "string_table": string_table,
         "base64_wrap": base64_wrap,
         "trojan_padding": make_trojan_padding(donor),
         "indirection": indirection,

@@ -7,7 +7,8 @@
 //! text for shell scripts and npm script commands.
 
 use crate::lexer::{
-    decoded_strings, lex, strip_shell_comments, with_decoded, Lang, TokKind, Token,
+    decoded_strings, lex, reversed_literals, strip_shell_comments, with_decoded, with_reversed,
+    Lang, TokKind, Token,
 };
 use regex::{Regex, RegexSet};
 use std::cell::OnceCell;
@@ -518,7 +519,9 @@ pub fn analyze(text: &str, lang: Lang) -> FileAnalysis {
         Lang::Python | Lang::Js => {
             let raw = lex(text, lang);
             let decoded = decoded_strings(text, &raw, lang);
-            let toks = with_decoded(&raw, &decoded);
+            let dec = with_decoded(&raw, &decoded);
+            let revs = reversed_literals(&dec, lang);
+            let toks = with_reversed(&dec, &revs);
             let runs = fold_runs(&toks, lang);
             if runs.is_empty() {
                 analyze_code(&toks, &[], lang, &mut fa);
@@ -776,13 +779,41 @@ impl<'a> View<'a, '_> {
     fn prev_is(&self, i: usize, p: &str) -> bool {
         i > 0 && self.is_punct(i - 1, p)
     }
-    /// Identifier before the `.` that precedes token `i` (`os` in `os.system`).
+    /// Identifier before the `.` that precedes token `i` (`os` in `os.system`), or the
+    /// module a Python dynamic import before it returns (`__import__('os').system`).
     fn receiver(&self, i: usize) -> Option<&'a str> {
-        if i >= 2 && self.is_punct(i - 1, ".") && self.kind(i - 2) == Some(TokKind::Ident) {
-            Some(self.text(i - 2))
-        } else {
-            None
+        if i < 2 || !self.is_punct(i - 1, ".") {
+            return None;
         }
+        if self.kind(i - 2) == Some(TokKind::Ident) {
+            return Some(self.text(i - 2));
+        }
+        if i >= 5 && self.is_punct(i - 2, ")") {
+            return self
+                .dyn_import(i - 5)
+                .filter(|&(_, end)| end == i - 1)
+                .map(|(m, _)| m);
+        }
+        None
+    }
+    /// `__import__('a.b')` or `import_module('a.b')` at `i`, with one literal argument: the
+    /// module the call returns (`a` and `a.b` respectively, as Python does) and the index
+    /// after the closing parenthesis.
+    fn dyn_import(&self, i: usize) -> Option<(&'a str, usize)> {
+        let top = match self.text(i) {
+            "__import__" => true,
+            "import_module" => false,
+            _ => return None,
+        };
+        if self.kind(i) != Some(TokKind::Ident)
+            || !self.is_punct(i + 1, "(")
+            || self.kind(i + 2) != Some(TokKind::Str)
+            || !self.is_punct(i + 3, ")")
+        {
+            return None;
+        }
+        let m = self.text(i + 2);
+        Some((if top { m.split('.').next()? } else { m }, i + 4))
     }
     fn after_dot(&self, i: usize) -> bool {
         self.prev_is(i, ".") || self.prev_is(i, "?.")
@@ -837,15 +868,20 @@ fn python_rules(code: &[Token<'_>], fa: &mut FileAnalysis) {
         let recv = v.receiver(i);
         let after_dot = v.after_dot(i);
         let bare_call = !after_dot && v.call(i) && prev != "def";
+        // A module loaded by name counts as imported: `__import__('subprocess')`.
+        let loaded = v
+            .dyn_import(i)
+            .map(|(m, _)| m.split('.').next().unwrap_or(m));
+        // `getattr(os, 'system')`, also on a module loaded by name.
+        let by_getattr = (bare_call && name == "getattr")
+            .then(|| py_getattr(&v, i))
+            .flatten();
 
         // proc_exec
         if name == "subprocess"
-            || (recv == Some("os")
-                && (matches!(name, "system" | "popen" | "popen2" | "popen3" | "startfile")
-                    || name.starts_with("exec")
-                    || name.starts_with("spawn")
-                    || name.starts_with("posix_spawn")))
-            || (recv == Some("pty") && name == "spawn")
+            || loaded == Some("subprocess")
+            || recv.is_some_and(|r| py_proc_attr(r, name))
+            || by_getattr.is_some_and(|(r, a)| r == "subprocess" || py_proc_attr(r, a))
             || (bare_call
                 && matches!(
                     name,
@@ -877,26 +913,9 @@ fn python_rules(code: &[Token<'_>], fa: &mut FileAnalysis) {
 
         // network: module names used as modules (imported or dereferenced).
         let module_use = in_import || v.is_punct(i + 1, ".");
-        if (module_use
-            && matches!(
-                name,
-                "requests"
-                    | "urllib"
-                    | "urllib2"
-                    | "urllib3"
-                    | "httplib"
-                    | "httpx"
-                    | "aiohttp"
-                    | "socket"
-                    | "ftplib"
-                    | "smtplib"
-                    | "telnetlib"
-                    | "paramiko"
-                    | "pycurl"
-                    | "websocket"
-                    | "websockets"
-            )
-            && !after_dot)
+        if (module_use && PY_NET_MODULES.contains(&name) && !after_dot)
+            || loaded.is_some_and(|m| PY_NET_MODULES.contains(&m))
+            || by_getattr.is_some_and(|(r, _)| PY_NET_MODULES.contains(&r))
             || (recv == Some("http") && name == "client")
             || (bare_call && matches!(name, "urlopen" | "urlretrieve"))
         {
@@ -959,6 +978,50 @@ fn python_rules(code: &[Token<'_>], fa: &mut FileAnalysis) {
             fa.hit(FILE_WRITE, line);
         }
     }
+}
+
+const PY_NET_MODULES: &[&str] = &[
+    "requests",
+    "urllib",
+    "urllib2",
+    "urllib3",
+    "httplib",
+    "httpx",
+    "aiohttp",
+    "socket",
+    "ftplib",
+    "smtplib",
+    "telnetlib",
+    "paramiko",
+    "pycurl",
+    "websocket",
+    "websockets",
+];
+
+/// Whether `recv.name` runs a process (`os.system`, `os.execv`, `pty.spawn`).
+fn py_proc_attr(recv: &str, name: &str) -> bool {
+    (recv == "os"
+        && (matches!(name, "system" | "popen" | "popen2" | "popen3" | "startfile")
+            || name.starts_with("exec")
+            || name.starts_with("spawn")
+            || name.starts_with("posix_spawn")))
+        || (recv == "pty" && name == "spawn")
+}
+
+/// `getattr(m, 'attr')` at `i`, where `m` is a name or a module loaded by name: the
+/// module (top-level package) and the attribute.
+fn py_getattr<'a>(v: &View<'a, '_>, i: usize) -> Option<(&'a str, &'a str)> {
+    let args = v.call_args(i);
+    let (module, next) = match v.dyn_import(args.start) {
+        Some((m, end)) => (m, end),
+        None if v.kind(args.start) == Some(TokKind::Ident) => (v.text(args.start), args.start + 1),
+        None => return None,
+    };
+    if !v.is_punct(next, ",") || v.kind(next + 1) != Some(TokKind::Str) || next + 2 != args.end {
+        return None;
+    }
+    let top = module.split('.').next().unwrap_or(module);
+    Some((top, v.text(next + 1)))
 }
 
 fn py_open_writes(v: &View<'_, '_>, i: usize) -> bool {
@@ -1199,6 +1262,58 @@ mod tests {
         let url = |src: &str| analyze(src, Lang::Python).counts[URL];
         assert_eq!(url("u = '\\x68ttps://evil.example/x'\n"), 1);
         assert_eq!(url("u = r'\\x68ttps://evil.example/x'\n"), 0);
+    }
+
+    #[test]
+    fn reversed_literals_are_read_forwards() {
+        // The red team's reverse_strings evasion: every literal stored backwards.
+        let c = js(
+            "const cp = require('ssecorp_dlihc'.split('').reverse().join(''));\ncp.exec('ls');\n",
+        );
+        assert_eq!(c[PROC_EXEC], 2);
+        assert_eq!(
+            js("fetch([...'x/elpmaxe.live//:sptth'].reverse().join(''));\n")[URL],
+            1
+        );
+        assert_eq!(py("k = open('asr_di/hss./~'[::-1])\n")[SECRET_PATHS], 2);
+        assert_eq!(
+            py("u = ''.join(reversed('x/elpmaxe.live//:sptth'))\n")[URL],
+            1
+        );
+        // Escapes are decoded first, and a reversed half still folds with its neighbour.
+        assert_eq!(py("u = 'https://' + 'x/elpmaxe.l\\x69ve'[::-1]\n")[URL], 1);
+    }
+
+    #[test]
+    fn modules_loaded_by_name() {
+        // Python's counterpart of `require('child_process')`.
+        assert_eq!(py("__import__('os').system('id')\n")[PROC_EXEC], 1);
+        assert_eq!(
+            py("import importlib\nimportlib.import_module('subprocess').run(['id'])\n")[PROC_EXEC],
+            1
+        );
+        assert_eq!(
+            py("m = __import__('subprocess')\nm.Popen(['id'])\n")[PROC_EXEC],
+            1
+        );
+        assert_eq!(
+            py("getattr(__import__('os'), 'system')('id')\n")[PROC_EXEC],
+            1
+        );
+        assert_eq!(py("import os\ngetattr(os, 'system')('id')\n")[PROC_EXEC], 1);
+        assert_eq!(py("__import__('socket').socket()\n")[NETWORK], 1);
+        assert_eq!(
+            py("__import__('urllib.request').request.urlopen(u)\n")[NETWORK],
+            1
+        );
+        // Still dynamic code, and harmless modules or attributes count for nothing else.
+        let c = py("__import__('os').path.join('a', 'b')\ngetattr(os, 'getcwd')()\n");
+        assert_eq!((c[DYN_CODE], c[PROC_EXEC], c[NETWORK]), (1, 0, 0));
+        // `import_module('os.path')` returns os.path, not os; `__import__` returns the package.
+        assert_eq!(py("import_module('os.path').system('x')\n")[PROC_EXEC], 0);
+        assert_eq!(py("__import__('os.path').system('x')\n")[PROC_EXEC], 1);
+        // A computed module name is not resolved.
+        assert_eq!(py("__import__(name).system('x')\n")[PROC_EXEC], 0);
     }
 
     #[test]

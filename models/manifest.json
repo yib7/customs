@@ -1,0 +1,13 @@
+{
+ "model_version": "2026.10.08",
+ "feature_schema_version": 1,
+ "code_gbdt": "code_gbdt.json",
+ "code_nn": "code_nn.json",
+ "name_model": "name_model.json",
+ "ensemble": "ensemble.json",
+ "popular_names": {
+  "pypi": "popular_pypi.txt",
+  "npm": "popular_npm.txt"
+ },
+ "metrics": "metrics.json"
+}

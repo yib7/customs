@@ -180,8 +180,13 @@ How indicators are counted (`customs-scan`, schema 1):
   `eval(`, `require('child_process')`) match tokens only, so a name in a comment never
   counts and a name inside a string never counts as a call. Python module names
   (`requests`, `socket`, ...) count when imported or dereferenced (`x.`), not when used as a
-  plain variable. JavaScript `exec(`/`spawn(`/`fork(` count only in files that reference
-  `child_process`. Method calls (`re.compile`, `cursor.exec`) and `def`s do not count.
+  plain variable. A module loaded by a literal name counts as imported, the Python
+  counterpart of `require('child_process')`: `__import__('subprocess')` and
+  `importlib.import_module('socket')` count like `import subprocess` and `import socket`,
+  `__import__('os').system(...)` like `os.system(...)`, and `getattr(os, 'system')` (also
+  on `__import__('os')`) like `os.system`. JavaScript `exec(`/`spawn(`/`fork(` count only
+  in files that reference `child_process`. Method calls (`re.compile`, `cursor.exec`) and
+  `def`s do not count.
 - String-content patterns (`secret_paths`, `persistence`, `recon` command names,
   `download_exec`, `exfil_endpoint`, `ip_url`, `url`, `crypto_wallet` words, and
   `curl`/`wget` as `network`) are regexes over string literal contents. Shell files and npm
@@ -211,9 +216,22 @@ How indicators are counted (`customs-scan`, schema 1):
   chunked blob is high-entropy chunk by chunk; the base64 run length uses the folded text.
   On 6,000 random corpus archives, folding changed features in 45 of 4,784 malicious and 9
   of 1,216 benign archives, and every indicator that appeared where there was none before
-  appeared in malware. Constant idioms such as `String.fromCharCode(...)` chains,
-  `chr(n) + chr(n)`, `[...].join('')` and reversed strings are not decoded: each shows up
-  in under 1% of malicious archives and about as often in benign ones.
+  appeared in malware.
+- Before folding, string literals are decoded the way the interpreter would read them.
+  Escapes that spell characters by number (`\x63`, `\u0063`, `\u{63}`, Python's
+  `\U00000063`) are decoded; control characters stay escaped so line numbers do not move,
+  and Python raw strings keep their backslashes. A literal reversed at run time is read
+  forwards: Python `'...'[::-1]` (over the whole run of adjacent literals, which Python joins
+  first) and `''.join(reversed('...'))`, JavaScript `'...'.split('').reverse().join('')` and
+  `[...'...'].reverse().join('')`. Both came from the red team (section 10): spelling every
+  literal as escapes cut automatic blocking of held-out malware from 67.1% to 60.6%, and
+  reversing every literal cut it from 67.2% to 60.5%. On the same 6,000 corpus archives,
+  decoding escapes changed features in 232 malicious and 60 benign archives (mostly string
+  entropy) and reading reversals forwards in 5 malicious and no benign ones; in both cases
+  every indicator that appeared where there was none before appeared in malware. Building
+  literals from character codes (`String.fromCharCode(...)`, `''.join(map(chr, [...]))`)
+  is not decoded: the red team found it costs no detection, since `decode_obf` and the CNN
+  already flag the construct.
 
 ### 4.3 Structural and obfuscation features (no prefix unless stated)
 
@@ -905,8 +923,9 @@ As implemented; results are in `docs/EVALUATION.md` and `models/metrics.json`.
 - **Ablation.** The tree model retrained on behavior features only (no manifest metadata,
   sizes, or file counts).
 - **Robustness and augmentation.** Text-level evasions applied to held-out malware and
-  re-scored: string splitting, base64 wrapping, burial in a real library, install-surface
-  indirection, metadata mimicry, starjacking. The augmentation stage then adds starjacked
+  re-scored: string splitting, hex and Unicode escapes, character codes, reversed literals,
+  base64 wrapping, burial in a real library, install-surface indirection, metadata mimicry,
+  starjacking. The augmentation stage then adds starjacked
   and buried copies of training malware (benign training donors only) and everything is
   retrained; the report shows before and after, separating evasion families used in
   training from unseen ones.
