@@ -25,8 +25,8 @@
 
 use crate::indicators::fold_runs;
 use crate::lexer::{
-    decoded_strings, joined_literals, lex, reversed_literals, with_decoded, with_reversed, Lang,
-    TokKind,
+    decoded_strings, joined_literals, lex, reversed_literals, with_decoded, with_reversed,
+    with_tables, Lang, TokKind,
 };
 
 pub const FILE_MARKER: &str = "<file>";
@@ -61,7 +61,8 @@ pub fn push_unit_tokens(out: &mut Vec<String>, text: &str, lang: Lang, max_token
     let revs = reversed_literals(&dec, lang);
     let unrev = with_reversed(&dec, &revs);
     let joins = joined_literals(&unrev, lang);
-    let toks = with_reversed(&unrev, &joins);
+    let joined = with_reversed(&unrev, &joins);
+    let toks = with_tables(&joined, lang);
     let runs = match lang {
         Lang::Shell => Vec::new(),
         _ => fold_runs(&toks, lang),

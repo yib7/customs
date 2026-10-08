@@ -6,6 +6,8 @@
 //! token at all, and inside a string it produces a `Str` token, so token rules only ever see
 //! real identifiers.
 
+use std::collections::{HashMap, HashSet};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Lang {
     Python,
@@ -938,6 +940,155 @@ pub fn joined_literals(toks: &[Token<'_>], lang: Lang) -> Vec<(usize, usize, usi
     out
 }
 
+/// A table of string literals assigned once and only read by literal index.
+struct Table<'a> {
+    name: &'a str,
+    /// Index of the opening bracket and one past the closing one.
+    span: (usize, usize),
+    /// Token index of each item.
+    items: Vec<usize>,
+    used: Vec<bool>,
+}
+
+/// `toks` with string-table reads resolved: `_s = ['child_process', 'exec']` followed by
+/// `require(_s[0])[_s[1]]` reads as `require('child_process')['exec']`, the string-array
+/// layout javascript-obfuscator produces and a cheap way to keep every literal away from
+/// where it is used. A table is a name assigned once to a list (in Python also a tuple) of
+/// at least two plain literals and never touched through `.` (so `push`, `shift` and
+/// other rotations leave it alone) or written by index. Each read `name[3]` (decimal or
+/// hex index) becomes the literal, on the line of the read; a literal read this way leaves
+/// the table, so it is counted once.
+pub fn with_tables<'a>(toks: &[Token<'a>], lang: Lang) -> Vec<Token<'a>> {
+    if lang == Lang::Shell {
+        return toks.to_vec();
+    }
+    let punct = |k: usize, x: &str| {
+        toks.get(k)
+            .is_some_and(|t| t.kind == TokKind::Punct && t.text == x)
+    };
+    let after_dot = |k: usize| k > 0 && punct(k - 1, ".");
+    let mut tables: Vec<Table<'a>> = Vec::new();
+    let mut defined: HashSet<&str> = HashSet::new();
+    let mut spoiled: HashSet<&str> = HashSet::new();
+    for (i, t) in toks.iter().enumerate() {
+        if t.kind != TokKind::Ident || after_dot(i) {
+            continue;
+        }
+        let indexed_write = punct(i + 1, "[") && punct(i + 3, "]") && punct(i + 4, "=");
+        if punct(i + 1, ".") || indexed_write || (punct(i + 1, "=") && defined.contains(t.text)) {
+            spoiled.insert(t.text);
+            continue;
+        }
+        if !punct(i + 1, "=") {
+            continue;
+        }
+        let close = match toks.get(i + 2) {
+            Some(o) if o.kind == TokKind::Punct && o.text == "[" => "]",
+            Some(o) if o.kind == TokKind::Punct && o.text == "(" && lang == Lang::Python => ")",
+            _ => continue,
+        };
+        let mut items = Vec::new();
+        let mut k = i + 3;
+        while toks.get(k).is_some_and(|x| x.kind == TokKind::Str) {
+            items.push(k);
+            if punct(k + 1, ",") {
+                k += 2;
+            } else {
+                k += 1;
+                break;
+            }
+        }
+        if items.len() >= 2 && punct(k, close) {
+            let used = vec![false; items.len()];
+            defined.insert(t.text);
+            tables.push(Table {
+                name: t.text,
+                span: (i + 2, k + 1),
+                items,
+                used,
+            });
+        }
+    }
+    tables.retain(|s| !spoiled.contains(s.name));
+    if tables.is_empty() {
+        return toks.to_vec();
+    }
+    // Each name left has one table: a second assignment spoils it.
+    let by_name: HashMap<&str, usize> = tables
+        .iter()
+        .enumerate()
+        .map(|(k, s)| (s.name, k))
+        .collect();
+    // Reads: name [ index ].
+    let mut reads: Vec<(usize, usize, usize)> = Vec::new();
+    for (i, t) in toks.iter().enumerate() {
+        if t.kind != TokKind::Ident || after_dot(i) || !punct(i + 1, "[") || !punct(i + 3, "]") {
+            continue;
+        }
+        let Some(&s) = by_name.get(t.text) else {
+            continue;
+        };
+        let Some(n) = toks
+            .get(i + 2)
+            .filter(|x| x.kind == TokKind::Num)
+            .and_then(|x| {
+                match x
+                    .text
+                    .strip_prefix("0x")
+                    .or_else(|| x.text.strip_prefix("0X"))
+                {
+                    Some(h) => usize::from_str_radix(h, 16).ok(),
+                    None => x.text.parse().ok(),
+                }
+            })
+        else {
+            continue;
+        };
+        if n < tables[s].items.len() {
+            tables[s].used[n] = true;
+            reads.push((i, s, n));
+        }
+    }
+    if reads.is_empty() {
+        return toks.to_vec();
+    }
+    let starts: HashMap<usize, usize> = tables
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.used.contains(&true))
+        .map(|(k, s)| (s.span.0, k))
+        .collect();
+    let mut out = Vec::with_capacity(toks.len());
+    let mut reads = reads.into_iter().peekable();
+    let mut i = 0;
+    while i < toks.len() {
+        if let Some((_, s, n)) = reads.next_if(|r| r.0 == i) {
+            let item = toks[tables[s].items[n]];
+            out.push(Token {
+                line: toks[i].line,
+                ..item
+            });
+            i += 4;
+            continue;
+        }
+        if let Some(s) = starts.get(&i).map(|&k| &tables[k]) {
+            // The table keeps only the literals nothing reads.
+            out.push(toks[i]);
+            let comma = toks[s.items[0] + 1];
+            for (k, _) in s.items.iter().zip(&s.used).filter(|(_, u)| !**u) {
+                out.push(toks[*k]);
+                out.push(comma);
+            }
+            out.push(toks[s.span.1 - 1]);
+            i = s.span.1;
+            continue;
+        }
+        out.push(toks[i]);
+        i += 1;
+    }
+    out
+}
+
 /// Whether a `[` after this token is a subscript rather than an array literal.
 fn is_value_end(t: &Token<'_>) -> bool {
     match t.kind {
@@ -1053,6 +1204,63 @@ mod tests {
         let out = with_reversed(&toks, &revs);
         let t = out.iter().find(|t| t.kind == TokKind::Str).unwrap();
         assert_eq!((t.text, t.line), ("xy", 2));
+    }
+
+    #[test]
+    fn tables() {
+        let text = |src: &str, lang: Lang| -> String {
+            with_tables(&lex(src, lang), lang)
+                .iter()
+                .map(|t| match t.kind {
+                    TokKind::Str => format!("'{}'", t.text),
+                    _ => t.text.to_string(),
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        // Read literals move to their reads; unread ones stay in the table.
+        assert_eq!(
+            text(
+                "var _s = ['child_process', 'exec', 'unused'];\nrequire(_s[0])[_s[0x1]]('id');",
+                Lang::Js
+            ),
+            "var _s = [ 'unused' , ] ; require ( 'child_process' ) [ 'exec' ] ( 'id' ) ;"
+        );
+        assert_eq!(
+            text(
+                "T = ('os', 'system',); __import__(T[0])(T[1])",
+                Lang::Python
+            ),
+            "T = ( ) ; __import__ ( 'os' ) ( 'system' )"
+        );
+        // A read keeps the line it is on.
+        let toks = with_tables(
+            &lex("_s = ['a', 'b']\n\nx = _s[1]", Lang::Python),
+            Lang::Python,
+        );
+        assert!(toks.iter().any(|t| t.text == "b" && t.line == 3));
+        // Tables that rotate, are written, are reassigned or hold anything but literals stay.
+        for src in [
+            "var a = ['x', 'y']; a.push(a.shift()); f(a[0]);",
+            "var a = ['x', 'y']; a[0] = 'z'; f(a[0]);",
+            "var a = ['x', 'y']; a = ['z', 'w']; f(a[0]);",
+            "var a = ['x', y]; f(a[0]);",
+            "var a = ['x']; f(a[0]);",
+            "var a = ['x', 'y']; f(a[i], a[2], o.a[0]);",
+        ] {
+            assert_eq!(text(src, Lang::Js), text_plain(src), "{src}");
+        }
+    }
+
+    fn text_plain(src: &str) -> String {
+        lex(src, Lang::Js)
+            .iter()
+            .map(|t| match t.kind {
+                TokKind::Str => format!("'{}'", t.text),
+                _ => t.text.to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 
     #[test]

