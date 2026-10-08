@@ -104,10 +104,26 @@ mod tests {
     use super::*;
     use std::io::Write;
 
-    fn tmp(name: &str, bytes: &[u8]) -> std::path::PathBuf {
+    /// A file in the temp directory, removed when dropped.
+    struct Tmp(std::path::PathBuf);
+
+    impl std::ops::Deref for Tmp {
+        type Target = std::path::Path;
+        fn deref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for Tmp {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    fn tmp(name: &str, bytes: &[u8]) -> Tmp {
         let p = std::env::temp_dir().join(format!("customs-large-{}-{name}", std::process::id()));
         std::fs::write(&p, bytes).unwrap();
-        p
+        Tmp(p)
     }
 
     fn tgz(files: &[(&str, &str)]) -> Vec<u8> {

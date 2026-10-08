@@ -34,6 +34,7 @@ import argparse
 import hashlib
 import json
 import re
+import shutil
 import subprocess
 import tarfile
 import tempfile
@@ -737,8 +738,12 @@ def parity(binary: Path, models: Path, per_rule: int = 20, quiet: int = 30, seed
             return None
         return sorted({h["rule"] for h in hits if h["rule"] in RULES})
 
-    with ThreadPoolExecutor(4) as ex:
-        got = list(ex.map(check, sample.itertuples()))
+    try:
+        with ThreadPoolExecutor(4) as ex:
+            got = list(ex.map(check, sample.itertuples()))
+    finally:
+        # Every checked package's archive lands here: 100 MB or more per run.
+        shutil.rmtree(tmp, ignore_errors=True)
     out = {"checked": 0, "agree": 0, "disagree": []}
     for r, g in zip(sample.itertuples(), got, strict=True):
         if g is None:
