@@ -8,6 +8,9 @@ copies of training malware so the models learn what the code does instead:
                real benign project (attackers do this, it is called starjacking).
 ``bury``       add the source files of a real benign package next to the payload, so size
                and file counts look like a normal library.
+``starjack_self`` starjack, with the copied repository links renamed to the sample's own
+               name. A repository link that names the package is free to write, so the
+               model must not read it as a sign of a real project.
 ``starjack+bury`` both.
 
 Donors come from the benign *training* split only. Augmented rows inherit the source
@@ -19,7 +22,9 @@ attacks.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 from pathlib import Path
 
 import numpy as np
@@ -30,7 +35,10 @@ from .malicious import canonicalize, read_tar_tree
 from .pipeline import SCHEME, load_table, log, work
 
 Files = dict[str, bytes]
-TRANSFORMS = ("starjack", "bury", "starjack+bury")
+TRANSFORMS = ("starjack", "starjack_self", "bury", "starjack+bury")
+FORGE_RE = re.compile(
+    r"(github\.com|gitlab\.com|bitbucket\.org)([/:])([\w.-]+)/([\w.-]+?)(\.git)?(?=[/#?\s\"]|$)"
+)
 
 
 def _strip_root(files: Files) -> Files:
@@ -81,6 +89,57 @@ def starjack(files: Files, eco: str, donor: Files) -> Files:
     return out
 
 
+def _own_name(files: Files, eco: str) -> str | None:
+    if eco == "npm":
+        try:
+            name = json.loads(files.get("package.json", b"{}")).get("name")
+        except (ValueError, AttributeError):
+            return None
+        return name.rsplit("/", 1)[-1] if isinstance(name, str) and name else None
+    for ln in files.get("PKG-INFO", b"").split(b"\n"):
+        if ln.startswith(b"Name:"):
+            return ln[5:].strip().decode("utf-8", "replace") or None
+    return None
+
+
+def self_repo(files: Files, eco: str) -> Files:
+    """Point every forge repository link at a repository named after the package itself,
+    adding one when there is none."""
+    name = _own_name(files, eco)
+    if not name:
+        return files
+    owner = "dev-" + hashlib.sha256(name.encode()).hexdigest()[:6]
+
+    def rename(text: str) -> str:
+        return FORGE_RE.sub(lambda m: f"{m[1]}{m[2]}{m[3]}/{name}{m[5] or ''}", text)
+
+    out = dict(files)
+    url = f"https://github.com/{owner}/{name}"
+    if eco == "npm":
+        try:
+            pkg = json.loads(files.get("package.json", b"{}"))
+        except ValueError:
+            return files
+        if not isinstance(pkg, dict):
+            return files
+        for k in ("repository", "homepage", "bugs"):
+            if k in pkg:
+                pkg[k] = json.loads(rename(json.dumps(pkg[k])))
+        if not FORGE_RE.search(json.dumps(pkg.get("repository", ""))):
+            pkg["repository"] = {"type": "git", "url": f"git+{url}.git"}
+        out["package.json"] = json.dumps(pkg, indent=2).encode()
+    elif "PKG-INFO" in files:
+        head, sep, body = files["PKG-INFO"].decode("utf-8", "replace").partition("\n\n")
+        lines = [
+            rename(ln) if ln.startswith(("Home-page:", "Project-URL:", "Download-URL:")) else ln
+            for ln in head.split("\n")
+        ]
+        if not any(FORGE_RE.search(ln) for ln in lines):
+            lines.append(f"Project-URL: Source, {url}")
+        out["PKG-INFO"] = ("\n".join(lines) + sep + body).encode()
+    return out
+
+
 def bury(files: Files, eco: str, donor: Files, prefix: str = "lib") -> Files:
     out = {f"{prefix}/{p}": d for p, d in donor.items() if _is_code(p)}
     out.update(files)
@@ -90,6 +149,8 @@ def bury(files: Files, eco: str, donor: Files, prefix: str = "lib") -> Files:
 def apply(name: str, files: Files, eco: str, donor: Files) -> Files:
     if name == "starjack":
         return starjack(files, eco, donor)
+    if name == "starjack_self":
+        return self_repo(starjack(files, eco, donor), eco)
     if name == "bury":
         return bury(files, eco, donor)
     return bury(starjack(files, eco, donor), eco, donor)
