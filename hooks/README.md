@@ -66,7 +66,9 @@ since nothing has checked them. Dependencies in `package.json`, `deno.json`, `py
 not pin yet (one the agent just added) are checked as well. Warnings about packages the
 lockfile already pins do not stop the command; on a real 300-package lockfile, about 1% of
 legitimate packages are over the warn threshold. A large project with nothing cached yet
-is checked for up to 40 seconds; anything left is reported for review.
+is checked for up to 40 seconds; anything left is reported for review. `uv run` syncs the
+project before it runs a command, so it gets the same check for the dependencies
+`pyproject.toml` lists and `uv.lock` does not pin yet (`uv sync` checks every pin).
 
 The command is split like a shell would: `&&`, `||`, `;`, pipes, subshells, quotes,
 escapes, line continuations, comments, redirections, `$(...)` and backticks, and wrappers

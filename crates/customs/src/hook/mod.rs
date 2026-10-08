@@ -252,6 +252,7 @@ pub fn expand_projects(targets: Vec<Target>) -> Expanded {
             manager,
             dir,
             extras,
+            unlocked_only,
         } = t
         else {
             out.targets.push(t);
@@ -268,9 +269,10 @@ pub fn expand_projects(targets: Vec<Target>) -> Expanded {
             out.mismatches
                 .push((placeholder, TargetResult::Mismatch { label, message }));
         }
+        let skip = if unlocked_only { e.locked } else { 0 };
         out.locked
-            .extend((0..e.targets.len()).map(|i| i < e.locked));
-        out.targets.extend(e.targets);
+            .extend((skip..e.targets.len()).map(|i| i < e.locked));
+        out.targets.extend(e.targets.into_iter().skip(skip));
     }
     out
 }
@@ -779,6 +781,7 @@ fn finish_error(msg: &str, fail_closed: bool, agent: Agent) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hook::parse::Manager;
     use crate::verdict::PolicyHit;
     use customs_model::{Scores, Thresholds};
     use customs_scan::Ecosystem;
@@ -1066,6 +1069,37 @@ mod tests {
                 "{body}"
             );
         }
+    }
+
+    #[test]
+    fn uv_run_checks_only_what_the_lockfile_does_not_pin() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(
+            d.path().join("pyproject.toml"),
+            "[project]\nname = \"app\"\ndependencies = [\"requests>=2\", \"Flask==3.0.0\"]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            d.path().join("uv.lock"),
+            "version = 1\n\n[[package]]\nname = \"requests\"\nversion = \"2.32.3\"\nsource = { registry = \"https://pypi.org/simple\" }\n",
+        )
+        .unwrap();
+        let project = |unlocked_only| Target::Project {
+            manager: Manager::Uv,
+            dir: d.path().to_path_buf(),
+            extras: vec![],
+            unlocked_only,
+        };
+        let labels = |e: &Expanded| e.targets.iter().map(target_label).collect::<Vec<_>>();
+        let sync = expand_projects(vec![project(false)]);
+        assert_eq!(
+            labels(&sync),
+            vec!["pypi:requests (2.32.3)", "pypi:flask (3.0.0)"]
+        );
+        assert_eq!(sync.locked, vec![true, false]);
+        let run = expand_projects(vec![project(true)]);
+        assert_eq!(labels(&run), vec!["pypi:flask (3.0.0)"]);
+        assert_eq!(run.locked, vec![false]);
     }
 
     #[tokio::test]

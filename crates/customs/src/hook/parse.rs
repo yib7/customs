@@ -39,6 +39,10 @@ pub enum Target {
         manager: Manager,
         dir: PathBuf,
         extras: Vec<String>,
+        /// Only what the manifest lists and the lockfile does not pin yet: `uv run` syncs
+        /// the project before every command, and a dependency the agent just added is what
+        /// it would fetch that nothing has checked (`uv sync` checks the whole lockfile).
+        unlocked_only: bool,
     },
 }
 
@@ -87,6 +91,7 @@ fn project(manager: Manager, cwd: &Path, dir: Option<String>) -> Target {
         manager,
         dir: dir.map_or_else(|| cwd.to_path_buf(), |d| cwd.join(d)),
         extras: Vec::new(),
+        unlocked_only: false,
     }
 }
 
@@ -108,6 +113,7 @@ fn local_project(cwd: &Path, spec: &str) -> Option<Target> {
                 .map(|e| e.trim().to_string())
                 .filter(|e| !e.is_empty())
                 .collect(),
+            unlocked_only: false,
         })
 }
 
@@ -817,6 +823,7 @@ const UV_GLOBAL_VALUE: &[&str] = &[
 
 fn uv(args: &[String], cwd: &Path, out: &mut Vec<Install>) {
     let rest = skip_opts(args, UV_GLOBAL_VALUE);
+    let global = &args[..args.len() - rest.len()];
     let Some((sub, rest)) = rest.split_first() else {
         return;
     };
@@ -878,8 +885,26 @@ fn uv(args: &[String], cwd: &Path, out: &mut Vec<Install>) {
                 });
             }
             let (forced, at) = uv_run_command(rest);
-            if let Some(cmd) = rest.get(at) {
-                run_script(cmd, forced, cwd, out, "uv run");
+            let isolated = match rest.get(at) {
+                Some(cmd) if cmd == "-" => true,
+                Some(cmd) => run_script(cmd, forced, cwd, out, "uv run"),
+                None => false,
+            };
+            let opts = &rest[..at.min(rest.len())];
+            let no_sync = opts
+                .iter()
+                .any(|a| matches!(a.as_str(), "--no-sync" | "--no-project" | "--script" | "-s"));
+            if !isolated && !no_sync {
+                let dir = opt_value(opts, &["--directory", "--project"])
+                    .or_else(|| opt_value(global, &["--directory", "--project"]));
+                let mut target = project(Manager::Uv, cwd, dir);
+                if let Target::Project { unlocked_only, .. } = &mut target {
+                    *unlocked_only = true;
+                }
+                out.push(Install {
+                    tool: "uv run".into(),
+                    targets: vec![target],
+                });
             }
         }
         _ => {}
@@ -955,8 +980,10 @@ fn uv_run_command(args: &[String]) -> (bool, usize) {
 const MAX_SCRIPT_BYTES: u64 = 1 << 20;
 
 /// `uv run` and `pipx run` with a script: a URL is fetched and run as is, and a local
-/// `.py` file (or any file with `--script`) has its PEP 723 dependencies installed.
-fn run_script(cmd: &str, forced: bool, cwd: &Path, out: &mut Vec<Install>, tool: &str) {
+/// `.py` file (or any file with `--script`) has its PEP 723 dependencies installed. True
+/// when the script runs in its own environment (a URL, or a file with a metadata block)
+/// rather than the project's.
+fn run_script(cmd: &str, forced: bool, cwd: &Path, out: &mut Vec<Install>, tool: &str) -> bool {
     let lower = cmd.to_ascii_lowercase();
     if lower.starts_with("https://") || lower.starts_with("http://") {
         out.push(Install {
@@ -966,18 +993,21 @@ fn run_script(cmd: &str, forced: bool, cwd: &Path, out: &mut Vec<Install>, tool:
                 runner: tool.into(),
             }],
         });
-        return;
+        return true;
     }
     if !(forced || lower.ends_with(".py") || lower.ends_with(".pyw")) {
-        return;
+        return false;
     }
-    let targets = script_metadata(&cwd.join(cmd)).unwrap_or_default();
+    let Some(targets) = script_metadata(&cwd.join(cmd)) else {
+        return false;
+    };
     if !targets.is_empty() {
         out.push(Install {
             tool: format!("{tool} {cmd}"),
             targets,
         });
     }
+    true
 }
 
 /// The packages a script's PEP 723 `# /// script` block makes `uv run` or `pipx run`
@@ -2309,15 +2339,26 @@ mod tests {
         );
         assert_eq!(t("pipx run s.py"), deps);
         assert_eq!(t("./s.py").len(), 0, "a direct run uses no installer");
-        assert!(t("uv run plain.py").is_empty());
+        let in_project = vec![Target::Project {
+            manager: Manager::Uv,
+            dir: d.path().to_path_buf(),
+            extras: vec![],
+            unlocked_only: true,
+        }];
+        assert_eq!(
+            t("uv run plain.py"),
+            in_project,
+            "no metadata: runs in the project"
+        );
         assert!(
             t("pipx run plain.py").is_empty(),
             "a script path is not a package name"
         );
-        assert!(t("uv run missing.py").is_empty());
-        assert!(
-            t("uv run python s.py").is_empty(),
-            "runs in the project environment"
+        assert_eq!(t("uv run missing.py"), in_project);
+        assert_eq!(
+            t("uv run python s.py"),
+            in_project,
+            "metadata only counts for uv run s.py"
         );
         let idx = t("uv run idx.py");
         assert_eq!(idx[0], py("httpx", None));
@@ -2422,6 +2463,47 @@ mod tests {
             manager,
             dir: PathBuf::from(dir),
             extras: vec![],
+            unlocked_only: false,
+        }
+    }
+
+    /// What `uv run` syncs before it runs the command.
+    fn uv_run(dir: &str) -> Target {
+        Target::Project {
+            manager: Manager::Uv,
+            dir: PathBuf::from(dir),
+            extras: vec![],
+            unlocked_only: true,
+        }
+    }
+
+    #[test]
+    fn uv_run_syncs_the_project() {
+        assert_eq!(targets("uv run pytest -q"), vec![uv_run("/nonexistent")]);
+        assert_eq!(
+            targets("uv --directory app run pytest"),
+            vec![uv_run("/nonexistent/app")]
+        );
+        assert_eq!(
+            targets("uv run --project app pytest"),
+            vec![uv_run("/nonexistent/app")]
+        );
+        assert_eq!(
+            targets("uv run --with pandas python x.py"),
+            vec![py("pandas", None), uv_run("/nonexistent")]
+        );
+        for c in [
+            "uv run --no-sync pytest",
+            "uv run --no-project python x.py",
+            "uv run --script missing.py",
+            "uv run https://x.example/s.py",
+        ] {
+            assert!(
+                !targets(c)
+                    .iter()
+                    .any(|t| matches!(t, Target::Project { .. })),
+                "{c}"
+            );
         }
     }
 
@@ -2691,9 +2773,13 @@ mod tests {
         assert_eq!(targets("uv tool run black"), vec![py("black", None)]);
         assert_eq!(
             targets("uv run --with pandas,numpy python x.py"),
-            vec![py("pandas", None), py("numpy", None)]
+            vec![
+                py("pandas", None),
+                py("numpy", None),
+                uv_run("/nonexistent")
+            ]
         );
-        assert!(targets("uv run python x.py").is_empty());
+        assert_eq!(targets("uv run python x.py"), vec![uv_run("/nonexistent")]);
         assert_eq!(targets("uv sync"), vec![proj(Manager::Uv, "/nonexistent")]);
         assert_eq!(
             targets("poetry add requests@^2.28"),
@@ -2877,6 +2963,7 @@ mod tests {
             manager: Manager::Pip,
             dir: d.path().join("."),
             extras: extras.iter().map(|e| e.to_string()).collect(),
+            unlocked_only: false,
         };
         assert_eq!(at("pip install -e ."), vec![here(&[])]);
         assert_eq!(

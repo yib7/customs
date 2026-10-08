@@ -1126,7 +1126,12 @@ and then runs `npm install`. `pip install .`, `pip install -e .` and `uv pip ins
 directory has a `pyproject.toml`: there is no lockfile, so the hook checks
 `[project].dependencies` plus the optional-dependency groups named as extras. The local
 project itself is not scanned; a non-editable `pip install .` still asks for that reason. Without a lockfile, the manifest's git and URL dependencies
-produce `ask` like any other unverifiable spec.
+produce `ask` like any other unverifiable spec. `uv run` syncs the project before every
+command it runs, so `uv run pytest` after an edit to `pyproject.toml` installs the new
+dependency as `uv sync` would; the hook checks those, the manifest dependencies `uv.lock`
+does not pin yet, and lockfile URL mismatches, but not every pin again on each run (`uv
+sync` does that). `--no-sync`, `--no-project`, and a script that carries its own PEP 723
+metadata or comes from a URL run outside the project and skip this.
 
 For packages a lockfile already pins, only a block counts. On this repository's
 `web/package-lock.json`, 4 of about 300 legitimate packages are over the warn threshold,
