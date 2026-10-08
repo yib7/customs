@@ -1,6 +1,6 @@
 # Customs: evaluation report
 
-Generated 2026-10-08T02:45:20+00:00 by `python -m customs_ml.report` from the artifacts of `python -m customs_ml.pipeline`. Every number below is on held-out test data with thresholds frozen on the validation split, unless a row says otherwise.
+Generated 2026-10-08T04:34:23+00:00 by `python -m customs_ml.report` from the artifacts of `python -m customs_ml.pipeline`. Every number below is on held-out test data with thresholds frozen on the validation split, unless a row says otherwise.
 
 ## Data
 
@@ -20,16 +20,16 @@ Generated 2026-10-08T02:45:20+00:00 by `python -m customs_ml.report` from the ar
 
 | Metric | Test value (95% CI) |
 |---|---|
-| ROC AUC | 0.974 (0.968 to 0.978) |
-| PR AUC | 0.978 (0.972 to 0.982) |
-| Detection rate at the **block** threshold (target FPR 0.1%) | 68.1% (64.1 to 72.0) |
-| Realized test FPR at block | 0.12% (0.02 to 0.23) |
-| Detection rate at the **warn** threshold (target FPR 1%) | 79.4% (76.1 to 82.7) |
-| Realized test FPR at warn | 0.74% (0.48 to 1.02) |
-| Detection at exactly 0.1% FPR on the test ROC (threshold-free) | 68.0% (52.3 to 74.4) |
-| Detection at exactly 1% FPR on the test ROC (threshold-free) | 80.6% (76.9 to 83.9) |
+| ROC AUC | 0.972 (0.965 to 0.978) |
+| PR AUC | 0.977 (0.972 to 0.982) |
+| Detection rate at the **block** threshold (target FPR 0.1%) | 63.8% (59.6 to 67.7) |
+| Realized test FPR at block | 0.07% (0.00 to 0.17) |
+| Detection rate at the **warn** threshold (target FPR 1%) | 78.2% (74.9 to 81.6) |
+| Realized test FPR at warn | 0.66% (0.43 to 0.93) |
+| Detection at exactly 0.1% FPR on the test ROC (threshold-free) | 68.1% (57.0 to 74.0) |
+| Detection at exactly 1% FPR on the test ROC (threshold-free) | 80.7% (77.2 to 84.3) |
 | Brier score | 0.064 |
-| Expected calibration error | 0.035 |
+| Expected calibration error | 0.040 |
 
 ![ROC curves](figures/roc.png)
 
@@ -39,12 +39,12 @@ Each component's thresholds were chosen on validation at the same target FPRs.
 
 | Model | ROC AUC | PR AUC | Recall at block | FPR at block | Recall at warn | FPR at warn |
 |---|---:|---:|---:|---:|---:|---:|
-| Customs (ensemble) | 0.974 | 0.978 | 68.1% | 0.12% | 79.4% | 0.74% |
-| Code model (GBDT) | 0.968 | 0.973 | 67.8% | 0.12% | 80.0% | 1.04% |
-| Code model (CNN) | 0.928 | 0.935 | 30.8% | 0.02% | 61.0% | 0.55% |
+| Customs (ensemble) | 0.972 | 0.977 | 63.8% | 0.07% | 78.2% | 0.66% |
+| Code model (GBDT) | 0.969 | 0.974 | 64.8% | 0.09% | 80.3% | 1.07% |
+| Code model (CNN) | 0.923 | 0.934 | 35.6% | 0.00% | 64.1% | 0.64% |
 | Name model | 0.680 | 0.685 | 0.5% | 0.02% | 9.9% | 1.04% |
 
-Stacking weights on component logits: code GBDT 0.98, code CNN 0.48, name 0.06 (fit on validation with 5-fold cluster-grouped cross-fitting; calibration and thresholds use out-of-fold scores). Each component logit is clipped to [-4, 4] before stacking, the bound with the best out-of-fold recall up to 1% FPR on validation. Without it, a few benign validation packages with extreme CNN logits set the block threshold well past its 0.1% target.
+Stacking weights on component logits: code GBDT 0.94, code CNN 0.47, name 0.05 (fit on validation with 5-fold cluster-grouped cross-fitting; calibration and thresholds use out-of-fold scores). Each component logit is clipped to [-4, 4] before stacking, the bound with the best out-of-fold recall up to 1% FPR on validation. Without it, a few benign validation packages with extreme CNN logits set the block threshold well past its 0.1% target.
 
 ## Against GuardDog
 
@@ -52,51 +52,51 @@ Stacking weights on component logits: code GBDT 0.98, code CNN 0.48, name 0.06 (
 
 | | GuardDog | Customs |
 |---|---:|---:|
-| ROC AUC (GuardDog risk score vs Customs risk) | 0.837 | 0.974 |
+| ROC AUC (GuardDog risk score vs Customs risk) | 0.837 | 0.973 |
 | Any finding: FPR | 18.0% | same FPR by construction |
-| Any finding: detection rate | 79.4% | 96.1% |
+| Any finding: detection rate | 79.4% | 95.9% |
 | `high_risk` label: FPR | 5.0% | same FPR by construction |
-| `high_risk` label: detection rate | 49.7% | 87.9% |
+| `high_risk` label: detection rate | 49.7% | 88.6% |
 
-At GuardDog's own false-positive rate, Customs' detection-rate gain has a paired cluster-bootstrap 95% CI of 13.2 to 20.3 points. (For this comparison only, Customs' threshold is set on the test benign packages to match GuardDog's realized FPR; that is what matched-FPR means.)
+At GuardDog's own false-positive rate, Customs' detection-rate gain has a paired cluster-bootstrap 95% CI of 13.0 to 20.2 points. (For this comparison only, Customs' threshold is set on the test benign packages to match GuardDog's realized FPR; that is what matched-FPR means.)
 
 ## Where it is weak
 
 | Slice | n malicious | n benign | ROC AUC | Recall at block | FPR at block |
 |---|---:|---:|---:|---:|---:|
-| ecosystem:pypi | 209 | 2,332 | 0.974 | 44.5% | 0.04% |
-| ecosystem:npm | 3,891 | 1,885 | 0.965 | 69.4% | 0.21% |
-| malicious:novel_campaigns | 3,550 | 4,217 | 0.973 | 68.5% | 0.12% |
-| malicious:seen_campaigns | 550 | 4,217 | 0.979 | 65.8% | 0.12% |
-| malicious:malicious_intent | 3,903 | 4,217 | 0.977 | 69.5% | 0.12% |
-| malicious:compromised_lib | 197 | 4,217 | 0.911 | 41.1% | 0.12% |
-| size:tercile_1 | 2,877 | 1,406 | 0.984 | 80.1% | 0.28% |
-| size:tercile_2 | 747 | 1,405 | 0.960 | 51.8% | 0.07% |
-| size:tercile_3 | 476 | 1,406 | 0.927 | 21.2% | 0.00% |
+| ecosystem:pypi | 209 | 2,332 | 0.981 | 44.0% | 0.04% |
+| ecosystem:npm | 3,891 | 1,885 | 0.964 | 64.9% | 0.11% |
+| malicious:novel_campaigns | 3,550 | 4,217 | 0.971 | 64.0% | 0.07% |
+| malicious:seen_campaigns | 550 | 4,217 | 0.979 | 62.7% | 0.07% |
+| malicious:malicious_intent | 3,903 | 4,217 | 0.976 | 65.0% | 0.07% |
+| malicious:compromised_lib | 197 | 4,217 | 0.904 | 41.1% | 0.07% |
+| size:tercile_1 | 2,877 | 1,406 | 0.983 | 75.2% | 0.21% |
+| size:tercile_2 | 747 | 1,405 | 0.955 | 48.3% | 0.00% |
+| size:tercile_3 | 476 | 1,406 | 0.926 | 19.3% | 0.00% |
 
 False-positive rate on benign packages by popularity tier:
 
 | Tier | n | FPR at block | FPR at warn |
 |---|---:|---:|---:|
-| top | 574 | 0.00% | 0.52% |
-| mid | 1,490 | 0.07% | 0.54% |
-| tail | 2,153 | 0.19% | 0.93% |
+| top | 574 | 0.00% | 0.35% |
+| mid | 1,490 | 0.00% | 0.54% |
+| tail | 2,153 | 0.14% | 0.84% |
 
 `malicious:*` slices are each malicious subset against all benign test packages. `novel_campaigns` are test samples whose near-duplicate cluster has no member in training: the closest thing to a never-seen attack. Size terciles cut on benign source-line counts, to expose any small-package shortcut.
 
 ## What the misses are
 
-Of 4,100 test malware packages, 846 fall below the warn threshold. Grouped by what the scanner saw:
+Of 4,100 test malware packages, 893 fall below the warn threshold. Grouped by what the scanner saw:
 
 | Scanner saw | n malicious | Missed | Miss rate |
 |---|---:|---:|---:|
-| Behavior indicators on the install surface | 2,960 | 303 | 10.2% |
-| Indicators only outside the install surface | 482 | 263 | 54.6% |
-| No behavior indicator anywhere | 658 | 280 | 42.6% |
+| Behavior indicators on the install surface | 2,960 | 327 | 11.0% |
+| Indicators only outside the install surface | 482 | 284 | 58.9% |
+| No behavior indicator anywhere | 658 | 282 | 42.9% |
 
 A hand audit of 20 missed packages with no indicator anywhere (one per campaign, sampled at random) found 12 whose payload is a compiled binary (`.node`, `.exe`, `.so`, a macOS app), 1 that ships no code and depends on a malicious package (which the proxy scans on its own when the client fetches it), and 7 with no malicious content in the archive: two placeholders (a name reserved against dependency confusion that only raises an error, and the PyPA sample project) and five releases that read as clean. Those seven are label noise, so part of this row is not detectable by any scanner.
 
-Binary-only packages (a compiled binary and under 50 lines of source) are a temporal blind spot: 155 test malware packages against 68 in training, and 85.2% of the test ones are missed at warn.
+Binary-only packages (a compiled binary and under 50 lines of source) are a temporal blind spot: 155 test malware packages against 68 in training, and 86.5% of the test ones are missed at warn.
  Searching every packaged binary for infostealer and dropper strings (webhook and bot endpoints, browser credential stores, wallet and SSH key paths, anti-VM process names, autorun commands, IP-literal URLs) does not separate the classes: at least one appears in 4.9% of malicious and 3.2% of benign training binaries, and in 7.5% of malicious test ones. PyInstaller marks 34.5% of malicious training binaries but 2.0% in test, so a feature built on it would learn the past. Binary payloads stay with the policy rules (minimum package age, install scripts in new packages) rather than the classifier.
 
 ## Ablation: what does the code itself say?
@@ -106,8 +106,8 @@ The tree model retrained on 47 behavior features only (indicator counts and obfu
 | Feature set | ROC AUC | Recall at block | Recall at warn |
 |---|---:|---:|---:|
 | All features (before augmentation) | 0.976 | 73.0% | 81.1% |
-| All features | 0.968 | 67.8% | 80.0% |
-| Behavior only | 0.939 | 40.3% | 60.7% |
+| All features | 0.969 | 64.8% | 80.3% |
+| Behavior only | 0.937 | 45.6% | 59.7% |
 
 ## Adversarial robustness
 
@@ -115,23 +115,25 @@ Held-out test malware rewritten as text (never executed), re-scanned and re-scor
 
 | Transform | Seen in training | Block (before) | Block (after) | Warn (before) | Warn (after) |
 |---|---|---:|---:|---:|---:|
-| none | n/a | 53.0% | 67.5% | 80.0% | 78.2% |
-| string_split | no | 47.6% | 66.6% | 78.0% | 77.9% |
-| hex_escape | no | 67.8% | 79.0% |
-| char_codes | no | 69.1% | 80.5% |
-| reverse_strings | no | 65.0% | 77.5% |
-| base64_wrap | no | 68.4% | 84.5% | 91.6% | 92.2% |
-| trojan_padding | yes | 35.4% | 60.6% | 68.0% | 78.4% |
-| indirection | no | 52.5% | 67.5% | 79.9% | 78.2% |
-| metadata_mimicry | yes | 38.6% | 57.9% | 63.2% | 75.2% |
-| starjack | yes | 29.8% | 55.6% | 57.9% | 74.9% |
+| none | n/a | 53.0% | 62.0% | 80.0% | 76.9% |
+| string_split | no | 47.6% | 61.1% | 78.0% | 76.6% |
+| hex_escape | no | n/a | 61.3% | n/a | 78.2% |
+| char_codes | no | n/a | 61.8% | n/a | 79.5% |
+| reverse_strings | no | n/a | 59.9% | n/a | 76.5% |
+| array_join | no | n/a | 59.9% | n/a | 76.2% |
+| string_table | no | n/a | 59.2% | n/a | 77.4% |
+| base64_wrap | no | 68.4% | 78.9% | 91.6% | 92.5% |
+| trojan_padding | yes | 35.4% | 59.1% | 68.0% | 77.9% |
+| indirection | no | 52.5% | 62.0% | 79.9% | 76.9% |
+| metadata_mimicry | yes | 38.6% | 56.4% | 63.2% | 74.6% |
+| starjack | yes | 29.8% | 52.8% | 57.9% | 73.5% |
 
 Clean test performance before and after augmentation:
 
 | | ROC AUC | Recall at block | Recall at warn | FPR at block |
 |---|---:|---:|---:|---:|
 | Before | 0.979 | 53.9% | 80.0% | 0.00% |
-| After | 0.974 | 68.1% | 79.4% | 0.12% |
+| After | 0.972 | 63.8% | 78.2% | 0.07% |
 
 ## Name model
 
@@ -151,13 +153,13 @@ The name model's job is the pre-download check (typosquats and names an agent ha
 | | Value |
 |---|---:|
 | Requests | 706 |
-| Mean latency per request (scan + score + policy) | 80 ms |
-| Malicious: blocked (HTTP 403) | 65.0% |
-| Malicious: blocked or warned | 78.1% |
+| Mean latency per request (scan + score + policy) | 148 ms |
+| Malicious: blocked (HTTP 403) | 63.1% |
+| Malicious: blocked or warned | 75.8% |
 | Benign: blocked | 0.2% |
-| Benign: warned | 0.5% |
+| Benign: warned | 0.2% |
 | Decisions identical to the Python pipeline | 100.0% |
-| Largest risk difference vs Python | 1.69e-07 |
+| Largest risk difference vs Python | 9.51e-08 |
 
 ### Latency under concurrent installs
 
@@ -175,14 +177,14 @@ The server's own scan-and-score time averages 34 ms. Sequential cold latency gro
 
 ## Independent dataset: MalRegistry
 
-The time-split test above uses one collector's malware. MalRegistry (the PyPI malware corpus from *An Empirical Study of Malicious Code In PyPI Ecosystem*, ASE 2023) was gathered separately. Its 11,630 unique archives are canonicalized like the corpus and scored by the shipped binary. Samples whose name appears in the training data (1,523) or whose code is a MinHash near-duplicate of training malware (7,643) are set aside; the rest are **novel**. Novel clusters are split in half: misses in the dev half were studied and drove scanner changes, the held-out half was never looked at. Both halves are frozen by archive hash, so every run below is measured on the same samples.
+The time-split test above uses one collector's malware. MalRegistry (the PyPI malware corpus from *An Empirical Study of Malicious Code In PyPI Ecosystem*, ASE 2023) was gathered separately. Its 11,630 unique archives are canonicalized like the corpus and scored by the shipped binary. Samples whose name appears in the training data (1,523) or whose code is a MinHash near-duplicate of training malware (7,610) are set aside; the rest are **novel**. Novel clusters are split in half: misses in the dev half were studied and drove scanner changes, the held-out half was never looked at. Both halves are frozen by archive hash, so every run below is measured on the same samples.
 
 | Subset | n | Warn or block | Block |
 |---|---:|---:|---:|
-| All archives | 11,630 | 95.6% | 86.5% |
-| Novel, dev half (in training) | 1,698 | 96.8% | 87.9% |
-| Novel, held-out half | 2,174 | 82.6% | 42.8% |
-| Novel, held-out, one per cluster | 660 | 83.2% | 68.0% |
+| All archives | 11,630 | 96.1% | 85.6% |
+| Novel, dev half (in training) | 1,698 | 96.8% | 85.3% |
+| Novel, held-out half | 2,174 | 85.2% | 40.2% |
+| Novel, held-out, one per cluster | 660 | 82.9% | 62.3% |
 
 Novel malware from another collector is much harder than the time-split test set. Thresholds move between retrains, so the comparisons below are made at matched false positive rates on the benign test split.
 
@@ -207,9 +209,9 @@ The changes helped the half they were designed on and barely moved the half that
 
 Held-out recall at 0.5% FPR by share of dev clusters added: 25% (213 clusters): 43.0%, 50% (426 clusters): 46.1%, 100% (853 clusters): 48.7%.
 
-The shipped models include the dev half (pipeline stage `malregistry`). Rerun through the binary, they score the held-out half at 42.4% / 50.0% / 86.5% (code only, 0.1% / 0.5% / 1% FPR).
+The shipped models include the dev half (pipeline stage `malregistry`). Rerun through the binary, they score the held-out half at 42.0% / 50.0% / 92.5% (code only, 0.1% / 0.5% / 1% FPR).
 
-**Read the campaign-weighted numbers.** Weighting each held-out campaign equally, the shipped models catch 67.4% / 80.4% / 84.0% at the same rates. One campaign holds 901 near-identical archives (41.4% of the held-out half) with code-only risk near 0.82, so per-archive recall jumps by that share whenever a retrain moves that score across a threshold; per-archive numbers between runs are only comparable when that campaign stays on the same side.
+**Read the campaign-weighted numbers.** Weighting each held-out campaign equally, the shipped models catch 66.5% / 80.5% / 84.1% at the same rates. One campaign holds 901 near-identical archives (41.4% of the held-out half) with code-only risk near 0.85, so per-archive recall jumps by that share whenever a retrain moves that score across a threshold; per-archive numbers between runs are only comparable when that campaign stays on the same side.
 
 ## Experiment: release diff model
 
@@ -217,18 +219,18 @@ A hijacked release of a popular library is mostly the previous release plus a pa
 
 | | Base model | Diff model |
 |---|---:|---:|
-| ROC AUC, real compromised test releases (n=178) | 0.904 | 0.881 |
+| ROC AUC, real compromised test releases (n=178) | 0.896 | 0.881 |
 | ROC AUC, synthetic compromises (test) | n/a | 0.994 |
 
 | Test FPR | Base recall | Base + diff recall |
 |---:|---:|---:|
-| 0.1% | 45.5% | 43.3% |
-| 0.5% | 66.3% | 56.7% |
-| 1.0% | 70.2% | 62.9% |
+| 0.1% | 45.5% | 43.8% |
+| 0.5% | 63.5% | 59.0% |
+| 1.0% | 73.6% | 61.8% |
 
-At 0.5% FPR the two models disagree often: 58 releases are caught by both, 60 only by the base model and 7 only by the diff model (among them litellm 1.82.7 and 1.82.8, which the base model scores far below its warn threshold). The diff model misses releases whose previous version was already compromised, since the payload is then not new.
+At 0.5% FPR the two models disagree often: 56 releases are caught by both, 57 only by the base model and 9 only by the diff model (among them litellm 1.82.7 and 1.82.8, which the base model scores far below its warn threshold). The diff model misses releases whose previous version was already compromised, since the payload is then not new.
 
-Combined at a matched false positive rate (each model's score turned into a tail probability on benign validation pairs, then the maximum), the pair gains -2.2 points at 0.1%, -9.6 points at 0.5%, -7.3 points at 1.0% FPR, on 178 releases. Taking the maximum of two scores spends the false positive budget on both, which costs recall at the block operating point (45.5% to 43.3% at 0.1%). The diff model is therefore not part of the shipped decision: the combination loses recall at every rate measured.
+Combined at a matched false positive rate (each model's score turned into a tail probability on benign validation pairs, then the maximum), the pair gains -1.7 points at 0.1%, -4.5 points at 0.5%, -11.8 points at 1.0% FPR, on 178 releases. Taking the maximum of two scores spends the false positive budget on both, which costs recall at the block operating point (45.5% to 43.8% at 0.1%). The diff model is therefore not part of the shipped decision: the combination loses recall at every rate measured.
 
 ## Release history rules on compromised npm releases
 
@@ -249,13 +251,13 @@ On the 165 compromised releases in the test period, together with the model:
 
 | | Model alone | With the rules |
 |---|---:|---:|
-| Warned or blocked (any default rule) | 66.7% | 97.6% to 100.0% |
-| Blocked, `install_script_added` only | 41.2% | 77.0% to 77.6% |
-| Blocked, every blocking rule | 41.2% | 95.8% to 98.8% |
+| Warned or blocked (any default rule) | 61.8% | 97.6% to 100.0% |
+| Blocked, `install_script_added` only | 40.6% | 77.0% to 77.6% |
+| Blocked, every blocking rule | 40.6% | 95.8% to 98.8% |
 
 `install_script_added` is the rule that earns its place: it fired on 4 of 14,894 legitimate releases (0.03%, under the block budget of 0.1%) and on at least 69.1% of compromised ones, because the classic takeover adds a `postinstall` and established packages rarely change theirs. It compares with the previous release and, when that shows no change, with the newest release at least a day older: attackers often publish several malicious versions within hours, and each one matches the one before it. It therefore blocks by default. `publisher_changed` is the noisiest rule on by default (1.06% of releases; 40.0% of packages over the window, since large projects rotate release managers), and its value on compromised releases cannot be measured once they are unpublished, so it stays at warn. Provenance cannot be judged from what survives: of the 17 compromised releases still listed, 3 followed a release with provenance, and 2 of those carry valid provenance themselves, because the attacker published through the project's own CI. A takeover by stolen token drops provenance; a takeover of the build does not.
 
-The two dependency rules target waves whose payload arrives through a dependency, not the package's own files, so the scanner sees nothing in the archive: a new `optionalDependencies` entry pointing at a GitHub commit, or a new dependency on a package the attacker published days earlier. `nonregistry_dependency_added` fires when a git, URL or file dependency is new or changed since the previous release; `young_dependency_added` fires when a new dependency is not on the registry, or was first published less than 7 days before the release by someone who maintains or publishes none of the package's releases (a maintainer's own new platform package is routine). They fired on 8.6% to 39.8% and 6.4% to 42.2% of compromised releases, and on 0 and 1 of 14,894 legitimate ones. Of the 55 test-period compromised releases the model lets through, they catch 29. Both block by default.
+The two dependency rules target waves whose payload arrives through a dependency, not the package's own files, so the scanner sees nothing in the archive: a new `optionalDependencies` entry pointing at a GitHub commit, or a new dependency on a package the attacker published days earlier. `nonregistry_dependency_added` fires when a git, URL or file dependency is new or changed since the previous release; `young_dependency_added` fires when a new dependency is not on the registry, or was first published less than 7 days before the release by someone who maintains or publishes none of the package's releases (a maintainer's own new platform package is routine). They fired on 8.6% to 39.8% and 6.4% to 42.2% of compromised releases, and on 0 and 1 of 14,894 legitimate ones. Of the 63 test-period compromised releases the model lets through, they catch 29. Both block by default.
 
 Takeovers come in waves, one attacker working through every package a stolen account or token can publish. Grouping the test-period releases by npm scope, or by name prefix for unscoped packages, shows which waves each layer stops (groups of at least 3 releases; blocked means under the default policy):
 
@@ -263,7 +265,7 @@ Takeovers come in waves, one attacker working through every package a stolen acc
 |---|---:|---:|---:|---:|---:|
 | `@emilgroup/*` | 21 | 19 | 21 | 18 | 21 |
 | `@mastra/*` | 19 | 19 | 0 | 19 | 19 |
-| `@antv/*` | 18 | 18 | 18 | 18 | 18 |
+| `@antv/*` | 18 | 18 | 17 | 18 | 18 |
 | `@redhat-cloud-services/*` | 16 | 16 | 9 | 16 | 16 |
 | `autotel-*` | 11 | 8 | 0 | 11 | 11 |
 | `@tanstack/*` | 7 | 7 | 0 | 7 | 7 |
