@@ -8,6 +8,13 @@ minimum age, install scripts in young packages), and npm, Yarn and pnpm entries 
 lockfile injection. Blocked and warned packages show up as
 code scanning alerts on the lockfile line that pins them, and in the pull request diff.
 
+MCP server configurations in the repository (`.mcp.json`, `.cursor/mcp.json`,
+`.vscode/mcp.json`, `.gemini/settings.json`, `.codex/config.toml`) are checked the same
+way: each package a server launches with `npx`, `uvx` or a similar launcher, at its
+pinned version or, without one, at the newest release. A server without an exact version
+also gets a note-level alert (`customs/unpinned-mcp-server`), since each agent start runs
+whatever release is newest.
+
 ## Workflow
 
 Save this as `.github/workflows/customs.yml`:

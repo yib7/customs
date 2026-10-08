@@ -1830,6 +1830,10 @@ async fn cli_audit_checks_packages_mcp_configs_launch() {
         vec![
             run_audit(&cwd, &[&["--format", "json"], &srv[..]].concat()),
             run_audit(&cwd, &[&[".mcp.json"], &srv[..]].concat()),
+            run_audit(
+                &cwd,
+                &[&["--format", "sarif", "-o", "out.sarif"], &srv[..]].concat(),
+            ),
         ]
     })
     .await
@@ -1876,6 +1880,35 @@ async fn cli_audit_checks_packages_mcp_configs_launch() {
         text.contains(".mcp.json:3  npm evil-js (latest, now 6.6.6)  block"),
         "{text}"
     );
+
+    // SARIF: the block as an error, the allowed unpinned server as a note.
+    assert_eq!(out[2].2, 1, "{}", out[2].1);
+    let sarif: Value =
+        serde_json::from_str(&std::fs::read_to_string(d.join("out.sarif")).unwrap()).unwrap();
+    let mut results: Vec<(String, String, String)> = sarif["runs"][0]["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            (
+                r["ruleId"].as_str().unwrap().to_string(),
+                r["level"].as_str().unwrap().to_string(),
+                r["properties"]["package"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    results.sort();
+    assert_eq!(results.len(), 2, "{results:?}");
+    assert_eq!(
+        results[1],
+        (
+            "customs/unpinned-mcp-server".into(),
+            "note".into(),
+            "goodpkg".into()
+        )
+    );
+    assert_eq!(results[0].1, "error");
+    assert_eq!(results[0].2, "evil-js");
     h.stop().await;
 }
 

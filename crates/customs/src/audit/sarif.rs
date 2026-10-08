@@ -103,6 +103,12 @@ fn rule(id: &str) -> Rule {
             "A .pth file in the package launches a process, opens a connection, downloads, or reads secrets. Python executes its import lines whenever any interpreter starts, so the code keeps running long after the install.",
             "error",
         ),
+        "customs/unpinned-mcp-server" => (
+            "UnpinnedMcpServer",
+            "MCP server starts a package without a pinned version",
+            "An agent configuration starts this MCP server with npx, uvx or a similar launcher and no exact version, so each start fetches the newest release. The current release passed Customs, but a compromised release would run at the next start without review. Pin an exact version.",
+            "note",
+        ),
         "customs/unavailable" => (
             "UnavailableVersion",
             "Pinned version is not available on the registry",
@@ -221,6 +227,14 @@ fn describe(f: &Finding) -> Option<(String, &'static str, String)> {
             msg.push('.');
             Some((primary_rule(verdict), level(verdict.decision), msg))
         }
+        Outcome::Checked { verdict, .. } if !f.dep.pinned => Some((
+            "customs/unpinned-mcp-server".into(),
+            "note",
+            format!(
+                "{label}: this MCP server runs the newest release at every start (now {}); pin an exact version.",
+                verdict.version.as_deref().unwrap_or("unknown")
+            ),
+        )),
         Outcome::Mismatch(m) => Some((
             "customs/lockfile-mismatch".into(),
             "error",
@@ -304,7 +318,11 @@ pub fn to_sarif(report: &Report, cwd: &Path) -> Value {
                 "properties": {
                     "tags": ["security", "supply-chain"],
                     "precision": if r.level == "error" { "high" } else { "medium" },
-                    "security-severity": if r.level == "error" { "9.0" } else { "5.0" },
+                    "security-severity": match r.level {
+                        "error" => "9.0",
+                        "warning" => "5.0",
+                        _ => "2.0",
+                    },
                 },
             })
         })
