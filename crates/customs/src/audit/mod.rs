@@ -9,6 +9,7 @@
 
 mod bun;
 mod deno;
+pub mod mcp;
 mod package_lock;
 mod pipfile;
 mod pnpm;
@@ -43,6 +44,10 @@ pub struct Dependency {
     pub file: PathBuf,
     /// 1-based.
     pub line: usize,
+    /// False for a package an MCP configuration launches without an exact version:
+    /// `version` is then the range or tag it asks for (`latest` when none), and the check
+    /// resolves it to the release that would run now.
+    pub pinned: bool,
 }
 
 impl Dependency {
@@ -101,6 +106,27 @@ impl Parsed {
             version: version.to_string(),
             file: file.to_path_buf(),
             line,
+            pinned: true,
+        });
+    }
+
+    /// A package an MCP server configuration launches.
+    fn server_dep(
+        &mut self,
+        eco: Ecosystem,
+        name: &str,
+        version: &str,
+        pinned: bool,
+        file: &Path,
+        line: usize,
+    ) {
+        self.deps.push(Dependency {
+            ecosystem: eco,
+            name: normalize_name(eco, name),
+            version: version.to_string(),
+            file: file.to_path_buf(),
+            line,
+            pinned,
         });
     }
 
@@ -112,6 +138,7 @@ impl Parsed {
                 version: version.to_string(),
                 file: file.to_path_buf(),
                 line,
+                pinned: true,
             },
             message,
         });
@@ -156,11 +183,16 @@ pub enum LockKind {
     YarnLock,
     BunLock,
     DenoLock,
+    /// An agent's MCP server configuration (see [`mcp`]).
+    McpConfig,
 }
 
 impl LockKind {
     /// The format of a file named on the command line.
     pub fn detect(path: &Path) -> Option<Self> {
+        if mcp::is_mcp_config(path) {
+            return Some(LockKind::McpConfig);
+        }
         let name = path.file_name()?.to_str()?;
         Some(match name {
             "poetry.lock" => LockKind::PoetryLock,
@@ -189,6 +221,8 @@ impl LockKind {
                 | "yarn.lock"
                 | "bun.lock"
                 | "deno.lock"
+                | ".mcp.json"
+                | "mcp.json"
         ) || (name.starts_with("requirements") && name.ends_with(".txt"))
     }
 }
@@ -209,7 +243,7 @@ pub fn find_lockfiles(paths: &[PathBuf], recursive: bool) -> Result<Vec<PathBuf>
             }
             if LockKind::detect(p).is_none() {
                 return Err(format!(
-                    "{}: not a lockfile Customs can read (requirements*.txt, poetry.lock, uv.lock, Pipfile.lock, package-lock.json, npm-shrinkwrap.json, pnpm-lock.yaml, yarn.lock, bun.lock, deno.lock)",
+                    "{}: not a lockfile Customs can read (requirements*.txt, poetry.lock, uv.lock, Pipfile.lock, package-lock.json, npm-shrinkwrap.json, pnpm-lock.yaml, yarn.lock, bun.lock, deno.lock) or an MCP server configuration (.mcp.json, mcp.json, .gemini/settings.json, .codex/config.toml, claude_desktop_config.json)",
                     p.display()
                 ));
             }
@@ -254,6 +288,13 @@ fn search_dir(dir: &Path, recursive: bool, out: &mut Vec<PathBuf>) -> std::io::R
             out.push(e.path());
         }
     }
+    // Agents keep MCP configurations in hidden folders a non-recursive search skips.
+    for rel in mcp::PROJECT_CONFIGS {
+        let p = dir.join(rel);
+        if p.is_file() && !out.contains(&p) {
+            out.push(p);
+        }
+    }
     for d in subdirs {
         search_dir(&d, recursive, out)?;
     }
@@ -281,6 +322,7 @@ pub fn parse_lockfile(path: &Path) -> Result<Parsed, String> {
         LockKind::YarnLock => yarn::parse(text, path, &mut out),
         LockKind::BunLock => bun::parse(text, path, &mut out),
         LockKind::DenoLock => deno::parse(text, path, &mut out),
+        LockKind::McpConfig => mcp::parse(text, path, &mut out),
         LockKind::Requirements => unreachable!(),
     }
     .map_err(|e| format!("{}: {e}", path.display()))?;
@@ -736,11 +778,13 @@ pub async fn check_all(checker: &Checker, deps: Vec<Dependency>, jobs: usize) ->
         .map(|dep| async move {
             // `==` keeps a PyPI version the registry lacks from resolving to another one.
             let spec = match dep.ecosystem {
-                Ecosystem::Pypi => format!("=={}", dep.version),
-                Ecosystem::Npm => dep.version.clone(),
+                _ if !dep.pinned && dep.version == "latest" => None,
+                _ if !dep.pinned => Some(dep.version.clone()),
+                Ecosystem::Pypi => Some(format!("=={}", dep.version)),
+                Ecosystem::Npm => Some(dep.version.clone()),
             };
             let outcome = match checker
-                .check(dep.ecosystem, &dep.name, Some(&spec), "audit")
+                .check(dep.ecosystem, &dep.name, spec.as_deref(), "audit")
                 .await
             {
                 Ok(v) => Outcome::Checked {
@@ -1021,6 +1065,29 @@ pub fn render_text(r: &Report, cwd: &Path) -> String {
             s.push('\n');
         }
     }
+    let unpinned: Vec<&Finding> = r.findings.iter().filter(|f| !f.dep.pinned).collect();
+    if !unpinned.is_empty() {
+        s.push_str(
+            "\nMCP servers without a pinned version (each start runs the newest matching release;\n\
+             pin one, so a new release reaches you only when you change the pin):\n",
+        );
+        for f in unpinned {
+            let resolved = f
+                .verdict()
+                .and_then(|v| v.version.as_deref())
+                .map(|v| format!(", now {v}"))
+                .unwrap_or_default();
+            s.push_str(&format!(
+                "  {}:{}  {} {} ({}{resolved})  {}\n",
+                display_path(&f.dep.file, cwd),
+                f.dep.line,
+                ecosystem_str(f.dep.ecosystem),
+                f.dep.name,
+                f.dep.version,
+                f.status(),
+            ));
+        }
+    }
     if !r.skipped.is_empty() {
         s.push_str("\nNot checked:\n");
         for k in &r.skipped {
@@ -1046,6 +1113,8 @@ pub fn render_json(r: &Report, cwd: &Path) -> Value {
                 "ecosystem": ecosystem_str(f.dep.ecosystem),
                 "name": f.dep.name,
                 "version": f.dep.version,
+                "pinned": f.dep.pinned,
+                "resolved_version": v.and_then(|v| v.version.clone()),
                 "file": display_path(&f.dep.file, cwd),
                 "line": f.dep.line,
                 "status": f.status(),
@@ -1159,6 +1228,7 @@ pub(crate) mod tests {
                 version: "1.0.0".into(),
                 file: PathBuf::from("sub/requirements.txt"),
                 line,
+                pinned: true,
             },
             outcome,
         }

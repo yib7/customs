@@ -42,7 +42,7 @@ pub enum Command {
     Serve(ServeArgs),
     /// Check one package: `customs check pypi requests==2.32.3`, `customs check npm @scope/pkg@^1`.
     Check(CheckArgs),
-    /// Check every package pinned in lockfiles: `customs audit`, `customs audit -r --format sarif`.
+    /// Check every package pinned in lockfiles or launched by MCP server configurations: `customs audit`, `customs audit -r --format sarif`.
     Audit(AuditArgs),
     /// Scan a local archive offline and print the verdict.
     Scan(ScanArgs),

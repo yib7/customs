@@ -1269,6 +1269,17 @@ a pull request before anything is installed. PATHS are lockfiles or directories
 | `yarn.lock` | classic and berry entry headers with `version` (berry `resolution` names the installed package) |
 | `bun.lock` | `packages` entries: `name@version` first (the real name for aliases), then the tarball URL, empty for the default registry; trailing commas allowed. `bun.lockb` is binary and refused with a hint to write `bun.lock` |
 | `deno.lock` | v4/v5 `npm` map (v3: `packages.npm`), keys `name@version` with `_peer@version` suffixes, `tarball` when the registry is not the default; `jsr` packages and `remote` modules listed as not checked |
+| MCP server configurations | `mcpServers` in `.mcp.json`, `.cursor/mcp.json`, `.gemini/settings.json`, `claude_desktop_config.json`, `mcp_config.json` (Windsurf) and `~/.claude.json` (also per project); `servers` in `.vscode/mcp.json`; `[mcp_servers.*]` in `.codex/config.toml`. `command` and `args` go through the hook's command parser, so `npx`, `bunx`, `pnpm dlx`, `uvx` and `pipx run` name their packages; `docker` servers are listed as not checked |
+
+A directory search also looks in `.cursor`, `.vscode`, `.gemini` and `.codex` without
+`--recursive`. An agent starts its MCP servers itself, before any tool call, so the hook
+never sees those installs, and a desktop app does not read the shell variables that point
+installers at the proxy. A server launched without an exact version fetches the newest
+release at every start, which is how postmark-mcp 1.0.16 (September 2025) reached its
+users: the release added a line that copied every email the server sent to its author.
+Such a package is checked at the release that would run now, and the report lists it
+under "MCP servers without a pinned version" with that release (JSON: `"pinned": false`
+and `resolved_version`).
 
 Each pin keeps its file and 1-based line. Pins are deduplicated on (ecosystem, normalized
 name, version), keeping the first location. Entries that cannot be checked are listed as

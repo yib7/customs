@@ -1723,6 +1723,85 @@ fn run_audit(cwd: &std::path::Path, args: &[&str]) -> (String, String, i32) {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn cli_audit_checks_packages_mcp_configs_launch() {
+    let h = Harness::start(|_| {}).await;
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    std::fs::write(
+        d.join(".mcp.json"),
+        r#"{
+  "mcpServers": {
+    "mail": { "command": "npx", "args": ["-y", "evil-js"] },
+    "lib": { "command": "npx", "args": ["-y", "@scope/lib@1.2.3"] },
+    "remote": { "type": "http", "url": "https://mcp.example/mcp" }
+  }
+}
+"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(d.join(".cursor")).unwrap();
+    std::fs::write(
+        d.join(".cursor/mcp.json"),
+        r#"{"mcpServers": {"fetch": {"command": "uvx", "args": ["goodpkg"]}}}"#,
+    )
+    .unwrap();
+    let base = h.base.clone();
+    let cwd = d.to_path_buf();
+    let out = tokio::task::spawn_blocking(move || {
+        let srv = ["--server", base.as_str()];
+        vec![
+            run_audit(&cwd, &[&["--format", "json"], &srv[..]].concat()),
+            run_audit(&cwd, &[&[".mcp.json"], &srv[..]].concat()),
+        ]
+    })
+    .await
+    .unwrap();
+
+    let (json_out, err, code) = &out[0];
+    assert_eq!(*code, 1, "{err}");
+    let v: Value = serde_json::from_str(json_out).unwrap();
+    let mut got: Vec<(String, String, bool, String, String)> = v["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            (
+                r["file"].as_str().unwrap().to_string(),
+                r["name"].as_str().unwrap().to_string(),
+                r["pinned"].as_bool().unwrap(),
+                r["resolved_version"].as_str().unwrap_or("").to_string(),
+                r["status"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    got.sort();
+    let row = |f: &str, n: &str, p: bool, ver: &str, st: &str| {
+        (f.into(), n.into(), p, ver.into(), st.into())
+    };
+    assert_eq!(
+        got,
+        vec![
+            row(".cursor/mcp.json", "goodpkg", false, "1.1.0", "allow"),
+            row(".mcp.json", "@scope/lib", true, "1.2.3", "allow"),
+            row(".mcp.json", "evil-js", false, "6.6.6", "block"),
+        ],
+        "{json_out}"
+    );
+
+    let (text, err, code) = &out[1];
+    assert_eq!(*code, 1, "{err}");
+    assert!(
+        text.contains("MCP servers without a pinned version"),
+        "{text}"
+    );
+    assert!(
+        text.contains(".mcp.json:3  npm evil-js (latest, now 6.6.6)  block"),
+        "{text}"
+    );
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn cli_audit_reports_lockfile_findings() {
     let h = Harness::start(|_| {}).await;
     let dir = tempfile::tempdir().unwrap();

@@ -115,6 +115,8 @@ source to prompt-inject the agent reading the verdict. See [`hooks/README.md`](h
 
 **Lockfiles in CI.** `customs audit` checks every pin in `requirements.txt`, `poetry.lock`,
 `uv.lock`, `Pipfile.lock`, `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `bun.lock` and `deno.lock`,
+as well as the packages agents launch as MCP servers (`npx -y ...`, `uvx ...` in `.mcp.json`,
+`.cursor/mcp.json`, `.vscode/mcp.json`, `.gemini/settings.json`, `.codex/config.toml`),
 and can write SARIF 2.1.0 for GitHub code scanning. It also blocks lockfile injection for
 npm, Yarn, pnpm, Bun and Deno: an entry whose tarball URL serves a different package than the
 name the diff shows. The composite action in [`action.yml`](action.yml)
