@@ -327,14 +327,14 @@ Ratios are 0 when the denominator is 0.
 Feature order (`feature_names()`, 77 names): the 14 `inst_<indicator>` in table order, the
 14 `all_<indicator>`, then the 28 features above in the order listed, then
 `inst_hidden_ws_lines`, `all_hidden_ws_lines`, `inst_exec_decoded`, `all_exec_decoded`,
-`inst_max_file_kinds`, `all_max_file_kinds`, `all_top_file_share`, `inst_n_files`, `n_links`, `n_unsafe_paths`, then the 11 manifest features in the order
+`inst_max_file_kinds`, `all_max_file_kinds`, `all_top_file_share`, `inst_n_files`, `n_links`, `n_unsafe_paths`, then the 12 manifest features in the order
 listed in 4.4. Models bind features by name, so adding features never breaks an older model
 file.
 
 ### 4.4 Manifest features
 
-`meta_desc_len`, `meta_has_homepage`, `meta_has_repo`, `meta_has_author_email`,
-`meta_has_license`, `meta_n_deps`, `meta_readme_bytes`, `meta_version_major`,
+`meta_desc_len`, `meta_has_homepage`, `meta_has_repo`, `meta_repo_mismatch`,
+`meta_has_author_email`, `meta_has_license`, `meta_n_deps`, `meta_readme_bytes`, `meta_version_major`,
 `meta_version_is_zero` (0.0.0 or 0.0.1 style), `meta_version_huge` (major at least 90, a
 dependency-confusion tell), `meta_n_keywords`.
 
@@ -989,6 +989,25 @@ As implemented; results are in `docs/EVALUATION.md` and `models/metrics.json`.
   and buried copies of training malware (benign training donors only) and everything is
   retrained; the report shows before and after, separating evasion families used in
   training from unseen ones.
+- **Starjacking and the repository link.** Starjacked malware was blocked 11 points less
+  often than clean malware: the copied README and repository link look like a real
+  project, and the code alone did not make up the difference. `meta_repo_mismatch` is
+  set when every forge repository the manifest links (npm `repository`, `homepage`,
+  `bugs`; core metadata `Home-page`, `Download-URL`, `Project-URL`; pyproject, Poetry,
+  `setup.cfg` and `setup.py` URLs) names a different project than the package, after
+  dropping case and punctuation and letting an npm scope match (`@babel/helpers` matches
+  `babel/babel`). Among packages that link a repository, it fires on 47% of PyPI malware
+  and 14% of benign PyPI packages, and on 25% against 8.5% on npm, where monorepos are
+  common. A first retrain closed the starjacking gap but learned the converse: a link
+  naming the package itself read as a real project, and metadata mimicry (a README plus
+  `github.com/<owner>/<own-name>`) fell from 63.2% to 48.9% blocked. Such a link costs
+  nothing, so the augmentation stage now also writes `starjack_self` copies, starjacked
+  with every forge link renamed to the sample's own name. Against the same data and CNN
+  without the feature, starjacked malware went from 6.6 points below clean malware to
+  5.2 points above, mimicry from 8.5 points below to 7.5, and MalRegistry
+  campaign-weighted recall at 0.1% / 0.5% / 1% FPR moved by +1.1 / -1.4 / -1.3 points.
+  Five seeds with and without the feature give a paired ROC AUC gain of 0.0019 (sd
+  0.0008) and recall changes inside seed noise.
 
 ### 10.1 Independent dataset (`customs_ml/external.py`)
 

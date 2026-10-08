@@ -14,11 +14,12 @@ are stopped before anything is downloaded.
 
 | | Customs | GuardDog 3.2 |
 |---|---:|---:|
-| ROC AUC | **0.971** | 0.837 |
-| Malware caught at GuardDog's own false-positive rate (18%) | **95.9%** | 79.4% |
-| Malware caught at GuardDog's `high_risk` false-positive rate (5%) | **87.7%** | 49.7% |
-| Malware flagged (warn) at a 0.8% false-positive rate | **80.0%** | |
-| Malware auto-blocked at a 0.17% false-positive rate | **69.5%** | |
+| ROC AUC | **0.974** | 0.837 |
+| Malware caught at GuardDog's own false-positive rate (18%) | **96.4%** | 79.4% |
+| Malware caught at GuardDog's `high_risk` false-positive rate (5%) | **88.6%** | 49.7% |
+| Malware flagged (warn) at a 0.6% false-positive rate | **78.6%** | |
+| Malware caught at exactly a 0.1% false-positive rate | **70.5%** | |
+| Malware auto-blocked at a 0.05% false-positive rate | **63.4%** | |
 
 The Rust binary reproduces the offline evaluation exactly: replaying 706 held-out packages
 through the live proxy gave identical decisions to the Python pipeline (largest risk
@@ -136,10 +137,11 @@ name prefix each), 15 are blocked in full. The rest warn.
 
 | Test set (time split, malware found from 2026-02-13) | Value (95% CI) |
 |---|---|
-| ROC AUC | 0.971 (0.963 to 0.977) |
-| Flagged at the warn threshold (target FPR 1%) | 80.0% (76.9 to 83.0), realized FPR 0.83% |
-| Blocked at the block threshold (target FPR 0.1%) | 69.5% (65.4 to 73.3), realized FPR 0.17% |
-| Never-seen campaigns (no near-duplicate in training), ROC AUC | 0.969 |
+| ROC AUC | 0.974 (0.969 to 0.979) |
+| Flagged at the warn threshold (target FPR 1%) | 78.6% (75.4 to 81.9), realized FPR 0.64% |
+| Blocked at the block threshold (target FPR 0.1%) | 63.4% (59.2 to 67.4), realized FPR 0.05% |
+| Caught at exactly 0.1% FPR on the test ROC (threshold-free) | 70.5% (55.2 to 75.3) |
+| Never-seen campaigns (no near-duplicate in training), ROC AUC | 0.974 |
 | Benign false positives at block, popular packages | 0 of 2,064 (top and mid tiers) |
 
 ![Verdict for a real PyPI stealer, blocked with the code evidence](docs/screenshots/verdict-light.png)
@@ -148,26 +150,30 @@ name prefix each), 15 are blocked in full. The rest warn.
 leaned on metadata (an ablation without it drops ROC AUC from 0.976 to 0.941), so training
 was augmented with disguised malware; the string rewrites were never trained on, and each
 one that cost detection led to a scanner pass that reads the string the way the runtime
-would. Detection at the block threshold, against 68.6% for the clean samples:
+would. Detection at the block threshold, against 60.9% for the clean samples:
 
 | Evasion | Used in augmentation | Before the scanner fix | Now |
 |---|---|---:|---:|
-| starjacking (README, repo link and description copied from a real project) | yes | n/a | 57.5% |
-| fake README and repository metadata | yes | n/a | 63.2% |
-| payload buried inside a real library's source | yes | n/a | 66.9% |
-| literals split into `+` concatenations | no | 4-point gap | 68.0% |
-| literals written as `\xNN` escapes | no | 6.5-point gap | 68.1% |
-| literals stored reversed (`'...'[::-1]`) | no | 6.7-point gap | 67.0% |
-| literals split into joined lists (`''.join([...])`) | no | 7.8-point gap | 66.5% |
-| literals moved into one string table (`_s[3]`) | no | 2.8-point gap | 68.0% |
-| literals built from character codes | no | n/a | 68.4% |
-| install script moved behind an import | no | n/a | 68.6% |
-| payload wrapped in base64 + exec | no | n/a | 86.1% |
-| payload wrapped in zlib + base64 + exec | no | n/a | 86.9% |
+| starjacking (README, repo link and description copied from a real project) | yes | 11-point gap | 66.1% |
+| fake README and repository metadata | yes | n/a | 53.4% |
+| payload buried inside a real library's source | yes | n/a | 54.6% |
+| literals split into `+` concatenations | no | 4-point gap | 60.4% |
+| literals written as `\xNN` escapes | no | 6.5-point gap | 61.4% |
+| literals stored reversed (`'...'[::-1]`) | no | 6.7-point gap | 60.2% |
+| literals split into joined lists (`''.join([...])`) | no | 7.8-point gap | 60.1% |
+| literals moved into one string table (`_s[3]`) | no | 2.8-point gap | 59.8% |
+| literals built from character codes | no | n/a | 58.8% |
+| install script moved behind an import | no | n/a | 60.9% |
+| payload wrapped in base64 + exec | no | n/a | 78.8% |
+| payload wrapped in zlib + base64 + exec | no | n/a | 76.2% |
 
 The wrapped payloads score higher than clean ones because the scanner decodes the literal
 handed to `exec` or `eval` (plain, base64, or zlib inside base64, within a per-file budget)
 and reads it as code, while the encoded blob itself still counts as obfuscation.
+Starjacked copies are now caught more often than clean ones: the scanner flags a
+repository link that names a different project than the package, which a copied link
+always does. Training also sees copies whose link is renamed after the package itself,
+so a matching link is not read as proof of a real project.
 
 **A second source.** The test sets above hold one collector's malware.
 [MalRegistry](https://github.com/lxyeternal/pypi_malregistry) (ASE 2023) was gathered by
@@ -177,7 +183,7 @@ campaign into a dev half and a held-out half that is never looked at or trained 
 | Held-out MalRegistry campaigns (2,174 archives, 660 clusters) | Before | After |
 |---|---:|---:|
 | Caught at a 0.5% false-positive rate (code only, no name model) | 37.4% | **48.7%** |
-| Warned or blocked, one sample per campaign | 59.2% | **83.9%** |
+| Warned or blocked, one sample per campaign | 59.2% | **81.7%** |
 
 *Before* is the model trained on one collector; *after* adds the dev half to training (the
 first row is a controlled retrain; the second is the shipped model). The gain grows with
@@ -185,15 +191,15 @@ the share of dev campaigns added (43.0% at a quarter, 46.1% at half). A round of
 fixes driven by dev-half error analysis, by contrast, helped the dev half and barely moved
 the held-out one, which is why the held-out half exists.
 
-Weighting each campaign equally, the shipped models catch 63.9% / 81.0% / 83.8% of held-out
+Weighting each campaign equally, the shipped models catch 67.7% / 79.9% / 83.1% of held-out
 campaigns at 0.1% / 0.5% / 1% false positives. Per-archive numbers are fragile here: one
 campaign is 901 near-identical archives (41% of the held-out half) with a code risk near
-0.94, so per-archive recall moves by 41 points whenever a retrain carries that one score
-across a threshold. At 0.5% it read 50.0% for the previous model and 91.1% for this one,
-while the campaign-weighted number moved from 80.5% to 81.0%.
+0.91, so per-archive recall moves by 41 points whenever a retrain carries that one score
+across a threshold. At 0.5% it read 91.1% for the previous model and 65.4% for this one,
+while the campaign-weighted number moved from 81.0% to 79.9%.
 
 **Known weak spots** (from the report): compromised releases of popular libraries (a
-payload inside thousands of lines of legitimate code, ROC AUC 0.903, 42% blocked) and very
+payload inside thousands of lines of legitimate code, ROC AUC 0.913, 39% blocked) and very
 large packages. Blocking of compromised releases rose from 31% to 46% once the scanner
 parsed `bun run index.js` correctly and followed hooks that call other scripts
 (`npm run setup`); retrains with different seeds block between 36% and 43% of them, so
@@ -229,8 +235,9 @@ methodology, is in [`docs/EVALUATION.md`](docs/EVALUATION.md).
   validation packages, and an earlier model's threshold landed at 0.02% FPR on test with
   10 points of recall lost. The cause was a few benign packages with extreme CNN logits;
   the stacker now bounds each component's logit, with the bound chosen on validation, and
-  the realized FPR sits between 0.07% and 0.17% across recent retrains, inside the 0.07%
-  to 0.31% spread of a five-seed study.
+  the realized FPR sits between 0.05% and 0.17% across recent retrains, close to the 0.07%
+  to 0.31% spread of a five-seed study. The threshold-free row (detection at exactly 0.1%
+  FPR on the test ROC) separates what the model learned from where the threshold landed.
 * **Red-teamed.** Held-out malware is rewritten with evasions and re-scanned; evasions used
   in augmentation are reported separately from unseen ones.
 * **Verified end to end.** `scripts/replay.py` serves held-out malware from a fake

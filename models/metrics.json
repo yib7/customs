@@ -1,0 +1,48 @@
+{
+ "model_version": "2026.10.08",
+ "feature_schema_version": 1,
+ "thresholds": {
+  "warn": 0.8643333311701347,
+  "block": 0.9911173683786573,
+  "target_fpr_warn": 0.01,
+  "target_fpr_block": 0.001
+ },
+ "metrics": {
+  "split": "temporal (test: malware found from 2026-02-13)",
+  "roc_auc": {
+   "value": 0.9742134912693685,
+   "ci_low": 0.9689566152423191,
+   "ci_high": 0.9790003038402922
+  },
+  "pr_auc": {
+   "value": 0.9785915722739265,
+   "ci_low": 0.9732821325283068,
+   "ci_high": 0.98301956843666
+  },
+  "recall_at_fpr_0_001": {
+   "value": 0.6341463414634146,
+   "ci_low": 0.5915639192487266,
+   "ci_high": 0.6735963238498756
+  },
+  "recall_at_fpr_0_01": {
+   "value": 0.7858536585365854,
+   "ci_low": 0.7540041250975638,
+   "ci_high": 0.8186016206712257
+  },
+  "test_fpr_block": {
+   "value": 0.00047427080863172874,
+   "ci_low": 0.0,
+   "ci_high": 0.0011987532965715656
+  },
+  "brier": 0.06181095345420655,
+  "n_test_malicious": 4100,
+  "n_test_benign": 4217,
+  "baselines": {
+   "guarddog": {
+    "fpr": 0.18,
+    "recall": 0.794,
+    "customs_recall_at_matched_fpr": 0.964
+   }
+  }
+ }
+}
