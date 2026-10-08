@@ -86,7 +86,8 @@ Every indicator is counted on two surfaces and emitted with a prefix:
 
 - `inst_`: code that runs at install or import time without the user calling anything.
   PyPI: `setup.py`, `setup.cfg` cmdclass targets when resolvable, every top-level
-  `__init__.py` of a package directory, `*.pth` files. npm: commands in `package.json`
+  `__init__.py` of a package directory, `*.pth` files and a top-level `sitecustomize.py` or
+  `usercustomize.py`. npm: commands in `package.json`
   `scripts.preinstall|install|postinstall|prepare|preprepare|postprepare`, files those commands
   reference (`node x.js`, `bun x.js`, `bun run x.js`), scripts they invoke by name
   (`npm run setup`, `pnpm run setup`, `yarn setup`, `bun run setup`, `run-s a b`; up to
@@ -114,7 +115,11 @@ Implementation details (`customs-scan`, schema 1):
   directory with no `__init__.py` of its own, such as `mistralai/` in mistralai 2.x), the
   `__init__.py` of each subpackage one level further down (at most 8, skipping `tests`,
   `docs`, `examples` and similar), because importing `mistralai.client` runs
-  `mistralai/client/__init__.py`; every `*.pth` file at any depth, sorted.
+  `mistralai/client/__init__.py`; every `*.pth` file at any depth, sorted, and
+  `sitecustomize.py` or `usercustomize.py` at the root (or under `src/`), which Python
+  imports from site-packages at every interpreter start. Across the 23K PyPI archives in
+  the corpus a root-level copy appears only in four malicious `rlask` releases; the twelve
+  benign packages that ship one keep it in a test or bootstrap folder.
   Then the package's own imports are followed from the setup-time files (`setup.py`,
   cmdclass targets, an in-tree backend), three hops deep (at most 48 files): relative
   imports (`from .core import run`, `from . import util`, `from ..x import y`) and absolute
