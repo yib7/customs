@@ -1776,7 +1776,7 @@ fn mcp_server_over_stdio() {
     );
     let r = mcp_recv(&mut stdout);
     assert_eq!(r["id"], 2);
-    assert_eq!(r["result"]["tools"].as_array().unwrap().len(), 4);
+    assert_eq!(r["result"]["tools"].as_array().unwrap().len(), 5);
 
     mcp_send(
         &mut stdin,
