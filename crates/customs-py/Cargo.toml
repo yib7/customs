@@ -6,7 +6,7 @@ license.workspace = true
 publish = false
 
 [lib]
-name = "customs_scan"
+name = "customs_scan_py"
 crate-type = ["cdylib", "rlib"]
 # Test binaries would need to link libpython; the bindings are exercised from Python.
 test = false
