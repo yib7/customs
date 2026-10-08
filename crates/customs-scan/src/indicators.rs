@@ -541,7 +541,10 @@ pub fn analyze(text: &str, lang: Lang) -> FileAnalysis {
     text_stats(&mut fa, text);
     match lang {
         Lang::Shell => analyze_shell(text, &mut fa),
-        Lang::Python | Lang::Js => analyze_source(text, lang, &mut fa, 0),
+        Lang::Python | Lang::Js => {
+            let mut budget = INFLATE_BUDGET.min(INFLATE_RATIO * text.len() as u64);
+            analyze_source(text, lang, &mut fa, 0, &mut budget)
+        }
     }
     fa
 }
@@ -552,7 +555,7 @@ const MAX_LITERAL_CODE_DEPTH: u32 = 3;
 /// Lex, decode and fold Python or JavaScript source, then run the rules over it. Code
 /// handed to `exec`/`eval` as a literal (see [`literal_code`]) is analyzed as code, not as
 /// a string, with its hits on the literal's line.
-fn analyze_source(text: &str, lang: Lang, fa: &mut FileAnalysis, depth: u32) {
+fn analyze_source(text: &str, lang: Lang, fa: &mut FileAnalysis, depth: u32, budget: &mut u64) {
     let raw = lex(text, lang);
     let decoded = decoded_strings(text, &raw, lang);
     let dec = with_decoded(&raw, &decoded);
@@ -563,7 +566,7 @@ fn analyze_source(text: &str, lang: Lang, fa: &mut FileAnalysis, depth: u32) {
     let toks = with_tables(&joined, lang);
     let runs = fold_runs(&toks, lang);
     if runs.is_empty() {
-        let skip = nested_code(&toks, lang, fa, depth);
+        let skip = nested_code(&toks, lang, fa, depth, budget);
         analyze_code(&toks, &[], &skip, lang, fa, depth == 0);
     } else {
         let folds: Vec<Fold> = runs.iter().map(|r| make_fold(&toks, &r.2)).collect();
@@ -587,14 +590,20 @@ fn analyze_source(text: &str, lang: Lang, fa: &mut FileAnalysis, depth: u32) {
             code.push(*t);
             fold_of.push(None);
         }
-        let skip = nested_code(&code, lang, fa, depth);
+        let skip = nested_code(&code, lang, fa, depth, budget);
         analyze_code(&code, &fold_of, &skip, lang, fa, depth == 0);
     }
 }
 
 /// Analyze the literal code in `toks` into `fa`; returns the indices of those literals,
 /// which the caller then leaves out of its string rules so nothing is counted twice.
-fn nested_code(toks: &[Token<'_>], lang: Lang, fa: &mut FileAnalysis, depth: u32) -> Vec<usize> {
+fn nested_code(
+    toks: &[Token<'_>],
+    lang: Lang,
+    fa: &mut FileAnalysis,
+    depth: u32,
+    budget: &mut u64,
+) -> Vec<usize> {
     if depth >= MAX_LITERAL_CODE_DEPTH {
         return Vec::new();
     }
@@ -613,15 +622,27 @@ fn nested_code(toks: &[Token<'_>], lang: Lang, fa: &mut FileAnalysis, depth: u32
                 unescape_code(t.text)
             }
             // The encoded blob stays a string too: its length and entropy are evidence.
-            Encoding::Base64 | Encoding::Base64Deflated => {
-                match decode_base64_text(t.text, enc == Encoding::Base64Deflated) {
-                    Some(text) => std::borrow::Cow::Owned(text),
+            Encoding::Base64 => match decode_base64_text(t.text, None) {
+                Some(text) => std::borrow::Cow::Owned(text),
+                None => continue,
+            },
+            // Inflation multiplies input a thousandfold, so the file shares one budget.
+            Encoding::Base64Deflated => {
+                let limit = (*budget).min(MAX_INFLATED);
+                if limit == 0 {
+                    continue;
+                }
+                match decode_base64_text(t.text, Some(limit)) {
+                    Some(text) => {
+                        *budget = budget.saturating_sub(text.len() as u64);
+                        std::borrow::Cow::Owned(text)
+                    }
                     None => continue,
                 }
             }
         };
         let mut inner = FileAnalysis::default();
-        analyze_source(&code, lang, &mut inner, depth + 1);
+        analyze_source(&code, lang, &mut inner, depth + 1, budget);
         // A literal written over several lines keeps its lines; one written on a single
         // line (with `\n` escapes) or encoded puts every hit on that line.
         let spans_lines = enc == Encoding::Plain && t.text.contains('\n');
@@ -650,6 +671,12 @@ const INFLATERS: &[&str] = &[
 
 /// Most decompressed text read from one literal.
 const MAX_INFLATED: u64 = 1 << 20;
+
+/// Most decompressed text read from all the literals of one file, nested ones included:
+/// at most [`INFLATE_RATIO`] times the file's size, so scan work stays linear in the archive.
+/// Real payloads inflate three to five times their base64 size.
+const INFLATE_BUDGET: u64 = 4 << 20;
+const INFLATE_RATIO: u64 = 16;
 
 /// Names of base64 decoders in Python and JavaScript.
 const B64_DECODERS: &[&str] = &[
@@ -792,9 +819,9 @@ fn interpreter_list(toks: &[Token<'_>], c: usize) -> bool {
 }
 
 /// Decode a base64 literal (standard or URL-safe alphabet, whitespace and `\n` escapes
-/// ignored) to text, inflating the bytes first when `inflate` is set; `None` unless it
-/// decodes cleanly to mostly printable UTF-8.
-pub(crate) fn decode_base64_text(s: &str, inflate: bool) -> Option<String> {
+/// ignored) to text, inflating the bytes first (to at most `inflate` bytes) when it is set;
+/// `None` unless it decodes cleanly to mostly printable UTF-8.
+pub(crate) fn decode_base64_text(s: &str, inflate: Option<u64>) -> Option<String> {
     let mut bits = 0u32;
     let mut nbits = 0u32;
     let mut out = Vec::with_capacity(s.len() / 4 * 3);
@@ -822,8 +849,14 @@ pub(crate) fn decode_base64_text(s: &str, inflate: bool) -> Option<String> {
             bits &= (1 << nbits) - 1;
         }
     }
-    if inflate {
-        out = inflate_any(&out)?;
+    if let Some(limit) = inflate {
+        out = inflate_any(&out, limit)?;
+        // Output cut at the limit may end inside a character.
+        if let Err(e) = std::str::from_utf8(&out) {
+            if e.error_len().is_none() {
+                out.truncate(e.valid_up_to());
+            }
+        }
     }
     let text = String::from_utf8(out).ok()?;
     let printable = text
@@ -833,13 +866,13 @@ pub(crate) fn decode_base64_text(s: &str, inflate: bool) -> Option<String> {
     (text.len() >= 8 && printable * 10 >= text.chars().count() * 9).then_some(text)
 }
 
-/// Inflate zlib, gzip or raw deflate bytes, reading at most [`MAX_INFLATED`] bytes out.
-fn inflate_any(data: &[u8]) -> Option<Vec<u8>> {
+/// Inflate zlib, gzip or raw deflate bytes, reading at most `limit` bytes out.
+fn inflate_any(data: &[u8], limit: u64) -> Option<Vec<u8>> {
     use flate2::read::{DeflateDecoder, GzDecoder, ZlibDecoder};
     use std::io::Read;
     let read = |r: &mut dyn Read| {
         let mut out = Vec::new();
-        r.take(MAX_INFLATED).read_to_end(&mut out).ok()?;
+        r.take(limit).read_to_end(&mut out).ok()?;
         (!out.is_empty()).then_some(out)
     };
     match data {
@@ -1705,13 +1738,41 @@ mod tests {
     }
 
     #[test]
+    fn inflation_is_budgeted() {
+        use std::io::Write;
+        let b64 = |data: &[u8]| {
+            const A: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+            let mut s = String::new();
+            for c in data.chunks(3) {
+                let n = c.iter().fold(0u32, |n, &b| n << 8 | u32::from(b)) << (8 * (3 - c.len()));
+                for k in 0..=c.len() {
+                    s.push(A[(n >> (18 - 6 * k) & 63) as usize] as char);
+                }
+            }
+            s
+        };
+        // A payload that inflates 200-fold: its network call comes first.
+        let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
+        z.write_all(b"import socket\nsocket.socket()\n").unwrap();
+        z.write_all(&b"x = 1\n".repeat(40_000)).unwrap();
+        let lit = b64(&z.finish().unwrap());
+        let one = format!("exec(zlib.decompress(b64decode('{lit}')))\n");
+        // Output cut at the budget is still read.
+        let n = py(&one)[NETWORK];
+        assert!(n >= 1);
+        // Copies past the file's budget (16 times its size) are left as strings.
+        let c = py(&one.repeat(100));
+        assert!(c[NETWORK] >= n && c[NETWORK] < 100 * n, "{}", c[NETWORK]);
+    }
+
+    #[test]
     fn base64_text_decoding() {
         assert_eq!(
-            decode_base64_text("aW1wb3J0IG9zCg==", false).as_deref(),
+            decode_base64_text("aW1wb3J0IG9zCg==", None).as_deref(),
             Some("import os\n")
         );
         assert_eq!(
-            decode_base64_text("aW1wb3J0\\nIG9zCg", false).as_deref(),
+            decode_base64_text("aW1wb3J0\\nIG9zCg", None).as_deref(),
             Some("import os\n")
         );
         // Not base64, too short, or binary once decoded.
@@ -1719,13 +1780,13 @@ mod tests {
         let z = "eJzLzC3ILypRKM5Pzk4t4YJQehBKQ1MvOT8vLzW5RENDKbUsM0cvtSIxtyAnVUlHwQQINDW5AM3KFM4=";
         let g = "H4sIAAAAAAAC/8vMLcgvKlEozk/OTi3hglB6EEpDUy85Py8vNblEQ0MptSwzRy+1IjG3ICdVSUfBBAg0NbkABS4RFz4AAAA=";
         for s in [z, g] {
-            let text = decode_base64_text(s, true).unwrap();
+            let text = decode_base64_text(s, Some(MAX_INFLATED)).unwrap();
             assert!(text.starts_with("import socket\n"));
-            assert_eq!(decode_base64_text(s, false), None);
+            assert_eq!(decode_base64_text(s, None), None);
         }
-        assert_eq!(decode_base64_text("not base64 at all!", false), None);
-        assert_eq!(decode_base64_text("aGk=", false), None);
-        assert_eq!(decode_base64_text("AAECAwQFBgcICQoLDA0ODw==", false), None);
+        assert_eq!(decode_base64_text("not base64 at all!", None), None);
+        assert_eq!(decode_base64_text("aGk=", None), None);
+        assert_eq!(decode_base64_text("AAECAwQFBgcICQoLDA0ODw==", None), None);
     }
 
     #[test]
