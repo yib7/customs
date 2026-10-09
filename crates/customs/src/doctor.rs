@@ -23,6 +23,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::cli::env_vars;
+use crate::util::{redact_url, redact_urls};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -54,12 +55,14 @@ pub struct Finding {
     pub fix: String,
 }
 
+/// A finding; URLs in it lose their credentials and query (index URLs often carry a
+/// token), since doctor output lands in terminals, CI logs and JSON reports.
 fn finding(level: Level, subject: &str, detail: String, fix: &str) -> Finding {
     Finding {
         level,
         subject: subject.to_string(),
-        detail,
-        fix: fix.to_string(),
+        detail: redact_urls(&detail),
+        fix: redact_urls(fix),
     }
 }
 
@@ -1020,7 +1023,7 @@ pub async fn run(opts: DoctorOptions) -> i32 {
     if opts.json {
         let doc = json!({
             "dir": opts.dir.display().to_string(),
-            "server": opts.server,
+            "server": redact_url(&opts.server),
             "bypasses": bypasses,
             "findings": findings,
         });
@@ -1433,5 +1436,51 @@ command = "customs hook codex"
             "models_loaded": true, "untrained": false}));
         assert_eq!(monitor.level, Level::Warn);
         assert!(monitor.fix.contains("enforce"), "{monitor:?}");
+    }
+
+    #[test]
+    fn findings_never_show_url_credentials() {
+        let d = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let url = "https://u:s3cret@corp.example/simple?token=t0k";
+        write(
+            home.path(),
+            ".config/pip/pip.conf",
+            &format!(
+                "[global]
+extra-index-url = {url}
+"
+            ),
+        );
+        write(
+            d.path(),
+            "requirements.txt",
+            &format!(
+                "--index-url {url}
+x==1
+"
+            ),
+        );
+        write(
+            d.path(),
+            "uv.toml",
+            &format!(
+                "[[index]]
+name = \"corp\"
+url = \"{url}\"
+"
+            ),
+        );
+        let mut env = full_env();
+        env.insert("PIP_INDEX_URL", url.to_string());
+        env.insert("PIP_EXTRA_INDEX_URL", url.to_string());
+        let f = run_with(d.path(), Some(home.path()), env);
+        assert!(bypasses(&f).len() >= 5, "{f:#?}");
+        let text = render(d.path(), &f);
+        let json = serde_json::to_string(&f).unwrap();
+        for out in [&text, &json] {
+            assert!(!out.contains("s3cret") && !out.contains("t0k"), "{out}");
+        }
+        assert!(text.contains("https://***@corp.example/simple"), "{text}");
     }
 }

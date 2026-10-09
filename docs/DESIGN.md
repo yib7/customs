@@ -862,7 +862,8 @@ resolved again through the proxy and `uv sync --locked` refused to run. `customs
 [DIR]` checks a project and the current environment for each of these (unset or
 different variables, scoped registries, extra indexes and find-links in pip and uv
 settings or requirements files, non-PyPI Pipfile sources, Poetry, lockfile URLs off the
-proxy) and exits 1 when it finds a way around the proxy. It also reports where the
+proxy) and exits 1 when it finds a way around the proxy. URLs in its output, text or
+JSON, show user names and passwords as `***` and lose their query strings. It also reports where the
 Claude Code hook is registered and warns when its matcher covers only `Bash`, which
 leaves the file edits of section 9.2 unchecked (likewise for the Cursor, Gemini CLI and
 Codex hooks), and warns about MCP servers in the project's or the user's agent
