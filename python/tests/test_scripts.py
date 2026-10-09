@@ -55,3 +55,81 @@ def test_replay_summary_numbers_are_json_safe():
     replay = _load("replay")
     assert replay.finite(float("nan")) is None
     assert json.dumps({"x": replay.finite(0.5)}, allow_nan=False) == '{"x": 0.5}'
+
+
+def test_live_watch_worker_survives_a_failed_scan():
+    import queue
+    import threading
+    import urllib.error
+
+    live = _load("live_watch")
+    pending: queue.Queue = queue.Queue()
+    inflight = live.Inflight()
+    rows: list[dict] = []
+
+    def scan(item):
+        if item[1] == "down":
+            raise urllib.error.URLError("connection refused")
+        return {"name": item[1], "version": item[2], "status": 200}
+
+    threading.Thread(
+        target=live.work_loop, args=(pending, scan, rows.append, inflight), daemon=True
+    ).start()
+    for ser, name in ((101, "down"), (102, "up")):
+        inflight.add(ser)
+        pending.put((0, name, "1.0", 1700000000, ser))
+    joined = threading.Thread(target=pending.join, daemon=True)
+    joined.start()
+    joined.join(timeout=10)
+    assert not joined.is_alive(), "pending.join() hung after a failed scan"
+    assert [r["name"] for r in rows] == ["down", "up"]
+    assert rows[0]["status"] is None and "URLError" in rows[0]["error"]
+    assert inflight.safe(200) == 200
+
+
+def test_live_watch_resumes_before_the_oldest_unscanned_release():
+    live = _load("live_watch")
+    inflight = live.Inflight()
+    inflight.add(50)
+    inflight.add(40)
+    inflight.add(40)
+    assert inflight.safe(60) == 39
+    inflight.done(40)
+    assert inflight.safe(60) == 39
+    inflight.done(40)
+    assert inflight.safe(60) == 49
+    inflight.done(50)
+    assert inflight.safe(60) == 60
+
+
+def test_live_watch_report_writes_the_copy_the_evaluation_report_reads(monkeypatch, tmp_path):
+    live = _load("live_watch")
+    out = tmp_path / "live"
+    out.mkdir()
+    rows = [
+        {
+            "name": "a",
+            "version": "1",
+            "published": 1700000000,
+            "new_project": True,
+            "risk": 0.9,
+            "model_decision": "block",
+        },
+        {
+            "name": "b",
+            "version": "1",
+            "published": 1700000600,
+            "new_project": False,
+            "risk": None,
+            "model_decision": None,
+            "error": "URLError: down",
+        },
+    ]
+    (out / "scans.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    up = {"checked_at": "2026-01-01T00:00:00+00:00", "status": {"a": 404, "b": 200}, "ossf": []}
+    (out / "followups.jsonl").write_text(json.dumps(up) + "\n", encoding="utf-8")
+    monkeypatch.setenv("CUSTOMS_DATA", str(tmp_path / "data"))
+    summary = live.report(out)
+    copy = json.loads((tmp_path / "data" / "work" / "live_study.json").read_text(encoding="utf-8"))
+    assert copy == summary
+    assert (summary["releases"], summary["scanned"], summary["removed_total"]) == (2, 1, 1)

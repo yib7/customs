@@ -15,20 +15,27 @@ malicious-packages reports.
 
 `watch` follows PyPI's changelog serial (XML-RPC `changelog_since_serial`), which lists
 every release event, so nothing is sampled. A release is scanned a few minutes after it
-appears so its files have finished uploading.
+appears so its files have finished uploading. A scan that fails (a network error, a
+server that is down) is written to `scans.jsonl` as an error row rather than dropped, and
+`state.json` keeps the serial just before the oldest release still waiting, so a restarted
+`watch` lists the unscanned ones again. `report` also copies its summary to
+`$CUSTOMS_DATA/work/live_study.json`, where `customs_ml.report` reads it.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import queue
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
 import urllib.request
 import xmlrpc.client
+from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -74,6 +81,53 @@ def get_status(url: str, timeout: float = 30) -> int:
 # ------------------------------------------------------------------ watch
 
 
+class Inflight:
+    """Changelog serials of queued releases whose scan has not finished."""
+
+    def __init__(self) -> None:
+        self._serials: Counter[int] = Counter()
+        self._lock = threading.Lock()
+
+    def add(self, serial: int) -> None:
+        with self._lock:
+            self._serials[serial] += 1
+
+    def done(self, serial: int) -> None:
+        with self._lock:
+            self._serials[serial] -= 1
+            if self._serials[serial] <= 0:
+                del self._serials[serial]
+
+    def safe(self, serial: int) -> int:
+        """The serial to resume from: ``serial``, or just before the oldest unscanned one."""
+        with self._lock:
+            return min(self._serials) - 1 if self._serials else serial
+
+
+def work_loop(pending: queue.Queue, scan, record, inflight: Inflight) -> None:
+    """Scan queued releases forever. A failed scan is recorded as an error row; every item
+    is marked done, so ``pending.join()`` returns and the worker lives on."""
+    while True:
+        item = pending.get()
+        try:
+            row = scan(item)
+        except Exception as e:  # noqa: BLE001 - network errors, recorded per release
+            _, name, version, ts, _ = item
+            row = {
+                "name": name,
+                "version": version,
+                "published": ts,
+                "scanned_at": now(),
+                "status": None,
+                "error": f"{type(e).__name__}: {e}"[:300],
+            }
+        try:
+            record(row)
+        finally:
+            inflight.done(item[-1])
+            pending.task_done()
+
+
 def watch(out: Path, server: str, workers: int, hours: float) -> None:
     out.mkdir(parents=True, exist_ok=True)
     scans = out / "scans.jsonl"
@@ -95,51 +149,55 @@ def watch(out: Path, server: str, workers: int, hours: float) -> None:
     pending: queue.Queue = queue.Queue()
     lock = threading.Lock()
     created: dict[str, float] = {}
+    inflight = Inflight()
 
-    def worker() -> None:
-        while True:
-            due, name, version, ts = pending.get()
-            wait = due - time.time()
-            if wait > 0:
-                time.sleep(wait)
-            t0 = time.time()
-            code, body = post_json(
-                f"{server}/api/check",
-                {
-                    "ecosystem": "pypi",
-                    "name": name,
-                    "version": version,
-                    "client": "live-study",
-                },
-            )
-            v = body.get("verdict", body) if isinstance(body, dict) else {}
-            row = {
+    def scan(item: tuple) -> dict:
+        due, name, version, ts, _ = item
+        wait = due - time.time()
+        if wait > 0:
+            time.sleep(wait)
+        t0 = time.time()
+        code, body = post_json(
+            f"{server}/api/check",
+            {
+                "ecosystem": "pypi",
                 "name": name,
                 "version": version,
-                "published": ts,
-                "new_project": name in created,
-                "scanned_at": now(),
-                "status": code,
-                "error": body.get("error") if code >= 400 else None,
-                "artifact": v.get("artifact"),
-                "risk": v.get("risk"),
-                "model_decision": v.get("model_decision"),
-                "scores": v.get("scores"),
-                "reasons": [r.get("label") or r.get("feature") for r in v.get("reasons", [])][:6],
-                "evidence": [
-                    {k: e.get(k) for k in ("file", "line", "indicator", "snippet")}
-                    for e in v.get("evidence", [])[:4]
-                ],
-                "install_surface": v.get("install_surface", [])[:20],
-                "scanned_ms": v.get("scanned_ms"),
-                "seconds": round(time.time() - t0, 2),
-            }
-            with lock, scans.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(row) + "\n")
-            pending.task_done()
+                "client": "live-study",
+            },
+        )
+        v = body.get("verdict", body) if isinstance(body, dict) else {}
+        return {
+            "name": name,
+            "version": version,
+            "published": ts,
+            "new_project": name in created,
+            "scanned_at": now(),
+            "status": code,
+            "error": body.get("error") if code >= 400 else None,
+            "artifact": v.get("artifact"),
+            "risk": v.get("risk"),
+            "model_decision": v.get("model_decision"),
+            "scores": v.get("scores"),
+            "reasons": [r.get("label") or r.get("feature") for r in v.get("reasons", [])][:6],
+            "evidence": [
+                {k: e.get(k) for k in ("file", "line", "indicator", "snippet")}
+                for e in v.get("evidence", [])[:4]
+            ],
+            "install_surface": v.get("install_surface", [])[:20],
+            "scanned_ms": v.get("scanned_ms"),
+            "seconds": round(time.time() - t0, 2),
+        }
+
+    def record(row: dict) -> None:
+        row.setdefault("new_project", row["name"] in created)
+        with lock, scans.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(row) + "\n")
 
     for _ in range(workers):
-        threading.Thread(target=worker, daemon=True).start()
+        threading.Thread(
+            target=work_loop, args=(pending, scan, record, inflight), daemon=True
+        ).start()
 
     stop_at = time.time() + hours * 3600
     print(
@@ -159,8 +217,11 @@ def watch(out: Path, server: str, workers: int, hours: float) -> None:
                 created[name] = ts
             if action == "new release" and version and (name, version) not in seen:
                 seen.add((name, version))
-                pending.put((ts + DELAY, name, version, ts))
-        state["serial"] = serial
+                inflight.add(ser)
+                pending.put((ts + DELAY, name, version, ts, ser))
+        # Resume from before the oldest release still waiting for its scan, so a restart
+        # lists it again (`seen` skips the ones already scanned).
+        state["serial"] = inflight.safe(serial)
         state["queued"] = len(seen)
         state_path.write_text(json.dumps(state), encoding="utf-8")
         print(
@@ -169,6 +230,7 @@ def watch(out: Path, server: str, workers: int, hours: float) -> None:
         )
         time.sleep(60)
     pending.join()
+    state["serial"] = serial
     state["stopped"] = now()
     state_path.write_text(json.dumps(state), encoding="utf-8")
 
@@ -351,8 +413,13 @@ def report(out: Path) -> dict:
             if last["status"].get(n) == 404
         },
     }
-    (out / "report.json").write_text(json.dumps(summary, indent=1), encoding="utf-8")
-    print(json.dumps(summary, indent=1))
+    text = json.dumps(summary, indent=1)
+    (out / "report.json").write_text(text, encoding="utf-8")
+    # The copy customs_ml.report reads for docs/EVALUATION.md.
+    data = Path(os.environ.get("CUSTOMS_DATA") or Path(tempfile.gettempdir()) / "customs-data")
+    (data / "work").mkdir(parents=True, exist_ok=True)
+    (data / "work" / "live_study.json").write_text(text, encoding="utf-8")
+    print(text)
     return summary
 
 
