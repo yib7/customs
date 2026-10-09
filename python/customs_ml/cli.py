@@ -35,7 +35,7 @@ def cmd_ossf(args) -> None:
     print(f"{len(df)} reports -> {out}")
 
 
-def _datadog_listing() -> list[str]:
+def _datadog_listing(repo_url: str = DATADOG_REPO) -> list[str]:
     """List sample paths with a blobless clone (no sample content is downloaded)."""
     with tempfile.TemporaryDirectory() as td:
         subprocess.run(
@@ -47,19 +47,32 @@ def _datadog_listing() -> list[str]:
                 "1",
                 "--filter=blob:none",
                 "--no-checkout",
-                DATADOG_REPO,
+                repo_url,
                 td,
             ],
             check=True,
         )
+        # quotepath off and -z: otherwise git C-quotes non-ASCII paths and they fail SAMPLE_RE.
         out = subprocess.run(
-            ["git", "-C", td, "ls-tree", "-r", "--name-only", "HEAD"],
+            [
+                "git",
+                "-c",
+                "core.quotepath=off",
+                "-C",
+                td,
+                "ls-tree",
+                "-r",
+                "-z",
+                "--name-only",
+                "HEAD",
+            ],
             check=True,
             capture_output=True,
             text=True,
             encoding="utf-8",
+            errors="replace",
         ).stdout
-    return [p for p in out.split("\n") if malicious.SAMPLE_RE.search(p)]
+    return [p for p in out.split("\0") if malicious.SAMPLE_RE.search(p)]
 
 
 def pick_samples(paths: list[str], cap_intent: int, cap_compromised: int, seed: int) -> list[str]:
