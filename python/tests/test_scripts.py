@@ -133,3 +133,37 @@ def test_live_watch_report_writes_the_copy_the_evaluation_report_reads(monkeypat
     copy = json.loads((tmp_path / "data" / "work" / "live_study.json").read_text(encoding="utf-8"))
     assert copy == summary
     assert (summary["releases"], summary["scanned"], summary["removed_total"]) == (2, 1, 1)
+
+
+def test_installer_e2e_env_ignores_the_users_installer_config(monkeypatch, tmp_path):
+    e2e = _load("installer_e2e")
+    monkeypatch.setenv("PIP_EXTRA_INDEX_URL", "https://pypi.org/simple")
+    monkeypatch.setenv("UV_INDEX_URL", "https://pypi.org/simple")
+    monkeypatch.setenv("npm_config_registry", "https://registry.npmjs.org/")
+    env = e2e.isolated_env(tmp_path)
+    assert "PIP_EXTRA_INDEX_URL" not in env and "UV_INDEX_URL" not in env
+    assert "npm_config_registry" not in env
+    assert env["PIP_CONFIG_FILE"] == e2e.os.devnull and env["UV_NO_CONFIG"] == "1"
+    user, glob = env["npm_config_userconfig"], env["npm_config_globalconfig"]
+    assert user != glob  # npm refuses to load one file as both
+    for f in (user, glob):
+        assert Path(f).read_text(encoding="utf-8") == ""
+    assert env["PATH"] == e2e.os.environ["PATH"]
+
+
+def test_installer_e2e_reads_the_bound_port_from_the_server_log(tmp_path):
+    e2e = _load("installer_e2e")
+    log = tmp_path / "server.log"
+    assert e2e.listening_url(log) is None
+    log.write_text(
+        "2026-01-01T00:00:00Z  INFO customs::cli: customs listening; run `customs env` for "
+        "client settings addr=127.0.0.1:41234\n",
+        encoding="utf-8",
+    )
+    assert e2e.listening_url(log) == "http://127.0.0.1:41234"
+    log.write_text(
+        '{"fields":{"message":"customs listening; run `customs env` for client settings",'
+        '"addr":"127.0.0.1:5000"}}\n',
+        encoding="utf-8",
+    )
+    assert e2e.listening_url(log) == "http://127.0.0.1:5000"
