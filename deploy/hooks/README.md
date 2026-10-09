@@ -180,7 +180,8 @@ Notes:
   tested anywhere in the tool name.
 - Codex hooks cannot ask for confirmation, so where the other agents get `ask`, Codex gets
   `deny` with the reason and a note to check with the user, who can run the command
-  themselves. The hook reads every file in an `apply_patch` edit, including deletions.
+  themselves. The hook reads every file in an `apply_patch` edit, including deletions, and
+  checks the packages of MCP servers the patch adds.
 - Codex asks you to review a new or changed hook before it runs it: open `/hooks` in Codex
   and trust the Customs entry once.
 - `customs doctor` reports each registration it finds, and warns when a matcher leaves out

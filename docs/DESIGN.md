@@ -1209,7 +1209,10 @@ answers Codex CLI's `PreToolUse`, whose input has Claude Code's shape: `Bash` ca
 `apply_patch` carries the patch text. The hook splits the patch on its `*** Add File`,
 `*** Update File` and `*** Delete File` headers and runs the edit check on each file, so a
 patch that deletes `.codex/hooks.json` or removes the hook lines from `.codex/config.toml`
-is caught. Codex rejects `ask` as unsupported and treats an output it rejects as a failed
+is caught. A patch that adds or updates an MCP server configuration is applied in memory
+(an `Update File` section's hunks to the file on disk, matched the way `apply_patch`
+matches them) and the servers in the result are checked like an edit's; when a hunk does
+not apply, the servers are unknown and the hook asks. Codex rejects `ask` as unsupported and treats an output it rejects as a failed
 hook, which lets the tool run, so the Codex hook turns `ask` into `deny` and tells the
 agent to check with the user. Each check records the agent as its client
 (`claude-code-hook`, `cursor-hook`, `gemini-hook`, `codex-hook`).

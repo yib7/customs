@@ -71,9 +71,12 @@ pub enum ToolCall {
         path: String,
         input: Value,
     },
-    /// Several files edited at once (a Codex `apply_patch`): each path with its new lines.
+    /// Several files edited at once (a Codex `apply_patch`): each path with its new lines,
+    /// and the whole patch.
     Patch {
         files: Vec<(String, Value)>,
+        patch: String,
+        cwd: Option<PathBuf>,
     },
 }
 
@@ -483,6 +486,8 @@ pub fn parse_input(input: &str, agent: Agent) -> anyhow::Result<Option<ToolCall>
                 (Some("Bash"), Some(command)) => Some(ToolCall::Shell { command, cwd }),
                 (Some("apply_patch"), Some(patch)) => Some(ToolCall::Patch {
                     files: patch_files(&patch),
+                    patch,
+                    cwd,
                 }),
                 _ => None,
             }
@@ -519,28 +524,15 @@ pub async fn evaluate_call(
                 .into_iter()
                 .collect();
             let targets = mcp_targets(path, input);
-            if targets.is_empty() {
-                return Ok((!tampering.is_empty()).then(|| tamper_decision(None, &tampering)));
-            }
-            let results = check_with(&targets, opts, client).await;
-            let decision = decide(&results, opts.fail_closed).map(|d| HookDecision {
-                reason: format!(
-                    "This edit adds MCP servers that the agent starts itself, outside this hook.\n{}",
-                    d.reason
-                ),
-                ..d
-            });
-            if tampering.is_empty() {
-                return Ok(decision);
-            }
-            return Ok(Some(tamper_decision(decision, &tampering)));
+            return Ok(edit_decision(&targets, &tampering, opts, client).await);
         }
-        ToolCall::Patch { files } => {
-            let reasons: Vec<String> = files
+        ToolCall::Patch { files, patch, cwd } => {
+            let tampering: Vec<String> = files
                 .iter()
                 .filter_map(|(path, input)| tamper::edit_reason(path, input, &opts.server))
                 .collect();
-            return Ok((!reasons.is_empty()).then(|| tamper_decision(None, &reasons)));
+            let targets = patch_mcp_targets(patch, cwd.as_deref());
+            return Ok(edit_decision(&targets, &tampering, opts, client).await);
         }
         ToolCall::Shell { command, cwd } => (command.clone(), cwd.clone()),
         // Read as the POSIX lexer understands it: backslashes separate paths, a backtick
@@ -577,6 +569,32 @@ pub async fn evaluate_call(
         return Ok(decision);
     }
     Ok(Some(tamper_decision(decision, &tampering)))
+}
+
+/// The decision for a file edit: the MCP server packages it adds (`targets`), checked like
+/// an install, and its tampering findings.
+async fn edit_decision(
+    targets: &[Target],
+    tampering: &[String],
+    opts: &HookOptions,
+    client: &str,
+) -> Option<HookDecision> {
+    let decision = if targets.is_empty() {
+        None
+    } else {
+        let results = check_with(targets, opts, client).await;
+        decide(&results, opts.fail_closed).map(|d| HookDecision {
+            reason: format!(
+                "This edit adds MCP servers that the agent starts itself, outside this hook.\n{}",
+                d.reason
+            ),
+            ..d
+        })
+    };
+    if tampering.is_empty() {
+        return decision;
+    }
+    Some(tamper_decision(decision, tampering))
 }
 
 /// Check `targets`, connecting to the server or building an in-process engine only when a
@@ -660,6 +678,171 @@ fn mcp_targets(path: &str, input: &Value) -> Vec<Target> {
             name: d.name,
         })
         .collect()
+}
+
+/// What an `apply_patch` patch does to one file.
+#[derive(Debug, PartialEq)]
+enum PatchOp {
+    Add,
+    Update,
+    Delete,
+}
+
+/// One file's part of an `apply_patch` patch: its path, where it moves to, and its lines.
+#[derive(Debug)]
+struct PatchSection {
+    op: PatchOp,
+    path: String,
+    move_to: Option<String>,
+    lines: Vec<String>,
+}
+
+fn patch_sections(patch: &str) -> Vec<PatchSection> {
+    let mut sections: Vec<PatchSection> = Vec::new();
+    for line in patch.lines() {
+        let line = line.trim_end_matches('\r');
+        let header = [
+            ("*** Add File:", PatchOp::Add),
+            ("*** Update File:", PatchOp::Update),
+            ("*** Delete File:", PatchOp::Delete),
+        ]
+        .into_iter()
+        .find_map(|(h, op)| line.strip_prefix(h).map(|p| (op, p.trim().to_string())));
+        if let Some((op, path)) = header {
+            sections.push(PatchSection {
+                op,
+                path,
+                move_to: None,
+                lines: Vec::new(),
+            });
+        } else if let Some(to) = line.strip_prefix("*** Move to:") {
+            if let Some(s) = sections.last_mut() {
+                s.move_to = Some(to.trim().to_string());
+            }
+        } else if line.starts_with("*** ") {
+            // `*** Begin Patch`, `*** End Patch`, `*** End of File`.
+        } else if let Some(s) = sections.last_mut() {
+            s.lines.push(line.to_string());
+        }
+    }
+    sections
+}
+
+/// Where `old` occurs in `file` from line `from` on, compared exactly, then without
+/// trailing and then without surrounding white space, the way `apply_patch` matches.
+fn find_lines(file: &[String], old: &[String], from: usize) -> Option<usize> {
+    if old.len() > file.len() {
+        return None;
+    }
+    let same: [fn(&str, &str) -> bool; 3] = [
+        |a, b| a == b,
+        |a, b| a.trim_end() == b.trim_end(),
+        |a, b| a.trim() == b.trim(),
+    ];
+    same.iter().find_map(|eq| {
+        (from..=file.len() - old.len()).find(|&i| {
+            file[i..i + old.len()]
+                .iter()
+                .zip(old)
+                .all(|(a, b)| eq(a, b))
+        })
+    })
+}
+
+/// `original` with an Update section's hunks applied. `None` when a hunk does not match.
+fn apply_hunks(original: &str, lines: &[String]) -> Option<String> {
+    // Each hunk: the `@@` line it follows, the lines it expects, the lines it leaves.
+    let mut hunks: Vec<(String, Vec<String>, Vec<String>)> = Vec::new();
+    for l in lines {
+        if let Some(anchor) = l.strip_prefix("@@") {
+            hunks.push((anchor.trim().to_string(), Vec::new(), Vec::new()));
+            continue;
+        }
+        if hunks.is_empty() {
+            hunks.push((String::new(), Vec::new(), Vec::new()));
+        }
+        let (_, old, new) = hunks.last_mut()?;
+        let mut chars = l.chars();
+        match chars.next() {
+            Some('+') => new.push(chars.as_str().to_string()),
+            Some('-') => old.push(chars.as_str().to_string()),
+            Some(' ') => {
+                old.push(chars.as_str().to_string());
+                new.push(chars.as_str().to_string());
+            }
+            None => {
+                old.push(String::new());
+                new.push(String::new());
+            }
+            Some(_) => return None,
+        }
+    }
+    let mut file: Vec<String> = original.lines().map(str::to_string).collect();
+    let mut cursor = 0;
+    for (anchor, old, new) in hunks {
+        if !anchor.is_empty() {
+            cursor = 1 + (cursor..file.len()).find(|&i| file[i].trim() == anchor)?;
+        }
+        if old.is_empty() {
+            // Lines added with no context go at the end.
+            file.extend(new);
+            cursor = file.len();
+            continue;
+        }
+        let at = find_lines(&file, &old, cursor)?;
+        cursor = at + new.len();
+        file.splice(at..at + old.len(), new);
+    }
+    let mut text = file.join("\n");
+    text.push('\n');
+    Some(text)
+}
+
+/// Packages that MCP servers added by an `apply_patch` patch would launch: each MCP
+/// configuration the patch adds or updates is read as the patch would leave it. A hunk
+/// that does not apply to the file on disk leaves the servers unknown, so it asks.
+fn patch_mcp_targets(patch: &str, cwd: Option<&std::path::Path>) -> Vec<Target> {
+    use crate::audit::mcp;
+    let resolve = |p: &str| match cwd {
+        Some(c) => c.join(p),
+        None => PathBuf::from(p),
+    };
+    let mut targets = Vec::new();
+    for s in patch_sections(patch) {
+        let dest = s.move_to.as_deref().unwrap_or(&s.path);
+        let path = resolve(dest);
+        if s.op == PatchOp::Delete || !mcp::is_mcp_config(&path) {
+            continue;
+        }
+        let text = match s.op {
+            PatchOp::Add => Some(
+                s.lines
+                    .iter()
+                    .map(|l| format!("{}\n", l.strip_prefix('+').unwrap_or(l)))
+                    .collect(),
+            ),
+            _ => match std::fs::read_to_string(resolve(&s.path)) {
+                // `apply_patch` cannot update a file that is not there: nothing changes.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(_) => None,
+                Ok(t) => apply_hunks(&t, &s.lines),
+            },
+        };
+        match text {
+            Some(text) => targets.extend(mcp_targets(
+                &path.to_string_lossy(),
+                &json!({ "content": text }),
+            )),
+            None => targets.push(Target::Unverifiable {
+                ecosystem: customs_scan::Ecosystem::Npm,
+                spec: dest.to_string(),
+                reason: "an MCP server configuration changed by a patch Customs could not \
+                         apply to the file, so the servers it adds were not read"
+                    .into(),
+            }),
+        }
+    }
+    targets
 }
 
 /// Merge tampering reasons into the install decision: a deny stays a deny, and anything
@@ -1005,7 +1188,7 @@ mod tests {
             })
         );
         let patch = r#"{"hook_event_name":"PreToolUse","tool_name":"apply_patch","tool_input":{"command":"*** Begin Patch\n*** Update File: src/a.py\n@@\n-x = 1\n+x = 2\n*** Add File: .npmrc\n+registry=https://registry.npmjs.org/\n*** End Patch"}}"#;
-        let Some(ToolCall::Patch { files }) = parse_input(patch, Agent::Codex).unwrap() else {
+        let Some(ToolCall::Patch { files, .. }) = parse_input(patch, Agent::Codex).unwrap() else {
             panic!("not a patch")
         };
         let paths: Vec<&str> = files.iter().map(|(p, _)| p.as_str()).collect();
@@ -1192,7 +1375,10 @@ mod tests {
         .unwrap()
         .unwrap();
         assert!(d.reason.contains("PIP_INDEX_URL"), "{}", d.reason);
-        assert_eq!(evaluate(&ps("Get-ChildItem C:\\"), &opts).await.unwrap(), None);
+        assert_eq!(
+            evaluate(&ps("Get-ChildItem C:\\"), &opts).await.unwrap(),
+            None
+        );
     }
 
     #[tokio::test]
@@ -1227,7 +1413,78 @@ mod tests {
         let git = bash("pip install requests git+https://github.com/a/b");
         let d3 = evaluate(&git, &opts(false)).await.unwrap().unwrap();
         assert_eq!(d3.decision, "ask");
-        assert!(d3.reason.contains("git+https://github.com/a/b"), "{}", d3.reason);
+        assert!(
+            d3.reason.contains("git+https://github.com/a/b"),
+            "{}",
+            d3.reason
+        );
+    }
+
+    #[tokio::test]
+    async fn codex_patch_adding_mcp_server_is_checked() {
+        let d = tempfile::tempdir().unwrap();
+        let npm = |name: &str| Target::Package {
+            ecosystem: Ecosystem::Npm,
+            name: name.into(),
+            version: None,
+        };
+        // A new file.
+        let add = "*** Begin Patch\n*** Add File: .mcp.json\n+{\"mcpServers\": {\n+  \"evil\": {\"command\": \"npx\", \"args\": [\"-y\", \"evil-mcp\"]}\n+}}\n*** End Patch";
+        assert_eq!(
+            patch_mcp_targets(add, Some(d.path())),
+            vec![npm("evil-mcp")]
+        );
+        // A hunk on an existing file: only the server it adds.
+        std::fs::create_dir(d.path().join(".codex")).unwrap();
+        std::fs::write(
+            d.path().join(".codex/config.toml"),
+            "model = \"m\"\n\n[mcp_servers.ok]\ncommand = \"npx\"\nargs = [\"-y\", \"ok-mcp\"]\n",
+        )
+        .unwrap();
+        let update = "*** Begin Patch\n*** Update File: .codex/config.toml\n@@ [mcp_servers.ok]\n command = \"npx\"\n args = [\"-y\", \"ok-mcp\"]\n+\n+[mcp_servers.evil]\n+command = \"npx\"\n+args = [\"-y\", \"evil-mcp\"]\n*** End Patch";
+        assert_eq!(
+            patch_mcp_targets(update, Some(d.path())),
+            vec![npm("evil-mcp")]
+        );
+        // A hunk that does not apply leaves the servers unknown: ask.
+        let stale = "*** Begin Patch\n*** Update File: .codex/config.toml\n@@\n-model = \"other\"\n+model = \"m\"\n+[mcp_servers.x]\n*** End Patch";
+        assert!(matches!(
+            patch_mcp_targets(stale, Some(d.path())).as_slice(),
+            [Target::Unverifiable { .. }]
+        ));
+        // A file that is not there cannot be updated.
+        let missing = "*** Begin Patch
+*** Update File: .cursor/mcp.json
+@@
++x
+*** End Patch";
+        assert!(patch_mcp_targets(missing, Some(d.path())).is_empty());
+        // Other files are not MCP configurations.
+        let other = "*** Begin Patch\n*** Add File: src/mcp.ts\n+npx -y evil-mcp\n*** End Patch";
+        assert!(patch_mcp_targets(other, Some(d.path())).is_empty());
+
+        // End to end: with no checker and --fail-closed, the patch is denied.
+        let config = d.path().join("customs.toml");
+        std::fs::write(&config, "mode = = 'broken'\n").unwrap();
+        let opts = HookOptions {
+            server: "http://127.0.0.1:1".into(),
+            fail_closed: true,
+            local: LocalOptions {
+                config: Some(config),
+                models: None,
+                data_dir: Some(d.path().join("data")),
+            },
+        };
+        let input = json!({"hook_event_name": "PreToolUse", "tool_name": "apply_patch",
+                           "cwd": d.path(), "tool_input": {"command": add}})
+        .to_string();
+        let out = evaluate_for(&input, &opts, Agent::Codex)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(out.decision, "deny");
+        assert!(out.reason.contains("npm:evil-mcp"), "{}", out.reason);
+        assert!(out.reason.contains("MCP servers"), "{}", out.reason);
     }
 
     #[tokio::test]
