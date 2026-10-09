@@ -49,8 +49,8 @@ def second_source_note(stage: dict | None) -> str:
     if stage is None:
         return note + (
             " **Caveat:** the dev half was de-duplicated against training malware only, not "
-            "against validation or test malware, so dev-half archives that near-duplicate "
-            "test malware were trained on. Every in-domain test number from models trained "
+            "against validation or test malware, so any dev-half archive that near-duplicates "
+            "test malware was trained on. Every in-domain test number from models trained "
             "with the dev half (the shipped models: headline, components, GuardDog, slices "
             "including `novel_campaigns`, misses, the *after* columns, end to end, retrain "
             "variance, calibration; and the *Plus MalRegistry dev half* in-domain columns) may "

@@ -239,6 +239,12 @@ sent held-out test packages through the proxy. `web/scripts/demo-gif.mjs` record
 | Benign false positives at block, popular packages | 0 of 2,064 (top and mid tiers) |
 | Registry-confirmed malware (the registry removed the version), blocked | 71.8% of 3,396, ROC AUC 0.979 |
 
+*Caveat:* the shipped models also trained on the MalRegistry dev half, which was
+de-duplicated against training malware but not against validation or test malware, so the
+in-domain test numbers here and in the table at the top may be inflated by an amount not
+yet measured (re-measuring needs the dataset and a retrain; see
+[`docs/EVALUATION.md`](docs/EVALUATION.md)).
+
 **Label check.** The malware labels come from a collector's analysis. npm and PyPI remove
 confirmed malware within days, and 704 of the 4,100 flagged test versions were still
 published in October 2026. That group mixes proof-of-concept and dependency-confusion
