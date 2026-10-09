@@ -63,7 +63,7 @@ runs:
     - name: Restore Customs binary
       id: bin-cache
       if: inputs.cache == 'true'
-      uses: actions/cache@v4
+      uses: actions/cache@v6
       with:
         path: ${{ steps.key.outputs.dir }}/bin
         key: ${{ steps.key.outputs.bin }}
@@ -79,7 +79,7 @@ runs:
 
     - name: Restore scan cache
       if: inputs.cache == 'true'
-      uses: actions/cache@v4
+      uses: actions/cache@v6
       with:
         # The verdict database (and its WAL); downloaded archives are not cached.
         path: ${{ steps.key.outputs.dir }}/data/customs.db*
@@ -118,7 +118,7 @@ runs:
 
     - name: Upload SARIF
       if: inputs.upload-sarif == 'true' && steps.audit.outputs.sarif == 'true'
-      uses: github/codeql-action/upload-sarif@v3
+      uses: github/codeql-action/upload-sarif@v4
       with:
         sarif_file: ${{ inputs.sarif-file }}
         category: customs
