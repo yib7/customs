@@ -1,6 +1,5 @@
 //! `Pipfile.lock`: JSON with `default` and `develop` maps of name to `{"version": "==x"}`.
 
-use std::collections::HashMap;
 use std::path::Path;
 
 use customs_scan::Ecosystem;
@@ -12,7 +11,8 @@ use crate::hook::parse::looks_like_url;
 pub(super) fn parse(text: &str, file: &Path, out: &mut Parsed) -> Result<(), String> {
     let doc: Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
     let lines = json_key_lines(text);
-    let sources: HashMap<&str, &str> = doc
+    // In order: the first is pipenv's default index.
+    let sources: Vec<(&str, &str)> = doc
         .pointer("/_meta/sources")
         .and_then(Value::as_array)
         .into_iter()
@@ -53,17 +53,32 @@ pub(super) fn parse(text: &str, file: &Path, out: &mut Parsed) -> Result<(), Str
                 );
                 continue;
             }
-            if let Some(url) = field("index").and_then(|i| sources.get(i)) {
-                if !known_registry(url) {
-                    out.skip(
-                        file,
-                        line,
-                        &spec,
-                        SkipKind::CustomIndex,
-                        format!("from a custom package index ({})", host_of(url)),
-                    );
-                    continue;
-                }
+            // Without an `index`, pipenv installs from the first source.
+            let url = match field("index") {
+                Some(i) => match sources.iter().find(|(n, _)| *n == i) {
+                    Some((_, url)) => Some(*url),
+                    None => {
+                        out.skip(
+                            file,
+                            line,
+                            &spec,
+                            SkipKind::CustomIndex,
+                            format!("from package index '{i}', which _meta.sources does not list"),
+                        );
+                        continue;
+                    }
+                },
+                None => sources.first().map(|(_, url)| *url),
+            };
+            if let Some(url) = url.filter(|u| !known_registry(u)) {
+                out.skip(
+                    file,
+                    line,
+                    &spec,
+                    SkipKind::CustomIndex,
+                    format!("from a custom package index ({})", host_of(url)),
+                );
+                continue;
             }
             match version.strip_prefix("==").filter(|v| !v.is_empty()) {
                 Some(v) => out.dep(Ecosystem::Pypi, name, v, file, line),
@@ -163,5 +178,39 @@ mod tests {
         assert_eq!(kind(50), SkipKind::Source);
         // Editable does not make a git checkout the project's own code.
         assert_eq!(kind(54), SkipKind::Source);
+    }
+    #[test]
+    fn no_index_uses_the_first_source() {
+        // pipenv installs entries without an `index` from the first source.
+        let lock = r#"{
+    "_meta": {"sources": [{"name": "corp", "url": "https://pypi.corp.example/simple"}]},
+    "default": {
+        "tool": {"version": "==1.0"},
+        "other": {"index": "gone", "version": "==2.0"}
+    }
+}"#;
+        let mut p = Parsed::default();
+        parse(lock, Path::new("Pipfile.lock"), &mut p).unwrap();
+        assert!(p.deps.is_empty(), "{:?}", p.deps);
+        p.skipped.sort_by_key(|s| s.line);
+        assert_eq!(p.skipped.len(), 2, "{:?}", p.skipped);
+        for s in &p.skipped {
+            assert_eq!(s.kind, SkipKind::CustomIndex, "{s:?}");
+        }
+        assert!(
+            p.skipped[0].reason.contains("pypi.corp.example"),
+            "{:?}",
+            p.skipped[0]
+        );
+        // An index the sources do not name could be anything.
+        assert!(p.skipped[1].reason.contains("gone"), "{:?}", p.skipped[1]);
+        // PyPI as the first source changes nothing.
+        let lock = lock.replace(
+            "https://pypi.corp.example/simple",
+            "https://pypi.org/simple",
+        );
+        let mut p = Parsed::default();
+        parse(&lock, Path::new("Pipfile.lock"), &mut p).unwrap();
+        assert_eq!(p.deps.len(), 1, "{:?}", p.deps);
     }
 }

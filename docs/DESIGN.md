@@ -1401,7 +1401,7 @@ a pull request before anything is installed. PATHS are lockfiles or directories
 |---|---|
 | `requirements*.txt` | `name==version` / `===` lines; `-r` includes relative to the file; markers, extras, `--hash` and `\` continuations handled; UTF-16 with a byte order mark is read; a remote `-r` URL is an error. An index other than PyPI (`-i`, `--index-url`, `--extra-index-url`, `-f`/`--find-links`, `--no-index`) anywhere in the include tree lists every pin as not checked, since pip may take any of them from that index |
 | `poetry.lock`, `uv.lock` | `[[package]]` `name` and `version` |
-| `Pipfile.lock` | `default` and `develop`, `"version": "==x"` |
+| `Pipfile.lock` | `default` and `develop`, `"version": "==x"`; the entry's `index`, or the first of `_meta.sources` when it names none, must be PyPI, and an index the sources do not list leaves the entry unchecked |
 | `package-lock.json`, `npm-shrinkwrap.json` | v2/v3 `packages` (node_modules paths, nested and scoped, `name` for aliases); v1 `dependencies` tree |
 | `pnpm-lock.yaml` | `packages:` keys (v5 `/a/1.0.0`, v6 `/a@1.0.0(peer@1)`, v9 `a@1.0.0`), read line by line |
 | `yarn.lock` | classic: entry headers with `version` and `resolved`; berry: `resolution` names the package and version Yarn fetches (a different `version` field is a mismatch) and its `__archiveUrl` is checked like `resolved` |
