@@ -1,14 +1,7 @@
 import { act, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { afterEach, describe, expect, it } from 'vitest';
-import { cleanup } from '@testing-library/react';
-import { INITIAL_POLICY } from '../mock/fixtures';
+import { describe, expect, it } from 'vitest';
 import { renderApp } from '../test/render';
-
-afterEach(() => {
-  cleanup();
-  if (window.__customsMock) window.__customsMock.server.policy = structuredClone(INITIAL_POLICY);
-});
 
 describe('Policy page', () => {
   it('validates thresholds on the client before saving', async () => {
@@ -52,11 +45,10 @@ describe('Policy page', () => {
   });
 
   it('asks for the admin token when the server requires one', async () => {
-    const mock = window.__customsMock!.server;
+    const mock = renderApp('/policy').server;
     mock.adminToken = 'team-token-0123456789';
     try {
       const user = userEvent.setup();
-      renderApp('/policy');
       const age = await screen.findByRole('textbox', { name: 'Minimum age (days)' });
       await user.clear(age);
       await user.type(age, '5');
@@ -85,7 +77,6 @@ describe('Policy page', () => {
       expect(log.querySelector('li')).toHaveTextContent('with the admin token');
       expect(mock.policyChanges.filter((c) => c.changes.some((f) => f.field === 'min_age_days' && f.after === 5))).toHaveLength(1);
     } finally {
-      mock.adminToken = null;
       sessionStorage.clear();
     }
   });

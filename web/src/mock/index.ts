@@ -27,10 +27,18 @@ declare global {
 
 const READY = { CONNECTING: 0, OPEN: 1, CLOSED: 2 } as const;
 
-export function installMocks(opts: { latencyMs?: number; autoEmitMs?: number } = {}): MockControls {
-  if (window.__customsMock) return window.__customsMock;
+/** The browser's own fetch, kept from the first install so a fresh mock does not wrap an old one. */
+let nativeFetch: typeof window.fetch | null = null;
+
+/**
+ * Installs the mock API once and returns its controls. `fresh` replaces an installed mock
+ * with a new server in its initial state (tests use it so no state leaks between them).
+ */
+export function installMocks(opts: { latencyMs?: number; autoEmitMs?: number; fresh?: boolean } = {}): MockControls {
+  if (window.__customsMock && !opts.fresh) return window.__customsMock;
   const server = new MockServer();
-  const realFetch = window.fetch.bind(window);
+  nativeFetch ??= window.fetch.bind(window);
+  const realFetch = nativeFetch;
   const streams = new Set<MockEventSource>();
   let streamAvailable = true;
 
