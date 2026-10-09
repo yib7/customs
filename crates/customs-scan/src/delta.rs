@@ -84,7 +84,9 @@ pub fn delta(prev: &Contents, cur: &Contents) -> (Contents, DeltaStats) {
         .filter(|e| e.depth == 0)
         .map(|e| (e.path.as_str(), e))
         .collect();
-    let mut top: Vec<&Entry> = cur.entries.iter().filter(|e| e.depth == 0).collect();
+    // Installers keep the last copy of a duplicated path: walk backwards so the stable
+    // sort and `dedup_by` keep it, as `prev_index` does.
+    let mut top: Vec<&Entry> = cur.entries.iter().rev().filter(|e| e.depth == 0).collect();
     top.sort_by(|a, b| a.path.cmp(&b.path));
     top.dedup_by(|a, b| a.path == b.path);
     let mut stats = DeltaStats {
@@ -346,5 +348,34 @@ mod tests {
         assert_eq!(paths, ["b.bin"]);
         assert_eq!(s.n_modified, 2);
         assert_eq!(s.added_bytes, 3 + 2);
+    }
+
+    #[test]
+    fn duplicate_paths_keep_the_last_copy() {
+        let prev = contents(&[(
+            "setup.py",
+            b"setup()
+",
+        )]);
+        let cur = contents(&[
+            (
+                "setup.py",
+                b"setup()
+",
+            ),
+            (
+                "setup.py",
+                b"import os; os.system('x')
+",
+            ),
+        ]);
+        let (d, s) = delta(&prev, &cur);
+        assert_eq!(d.entries.len(), 1);
+        assert_eq!(
+            d.entries[0].data,
+            b"import os; os.system('x')
+"
+        );
+        assert_eq!((s.n_modified, s.cur_files), (1, 1));
     }
 }
