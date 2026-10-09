@@ -1,13 +1,15 @@
 //! Archives too large to scan (DESIGN.md section 4.7): what they would run at install,
 //! read by streaming entry headers from disk instead of holding the archive in memory.
 
+use std::cell::Cell;
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
+use std::rc::Rc;
 
 use serde_json::Value;
 
-use crate::archive::{normalize_path, sniff_format, Format};
+use crate::archive::{node_tar_path, normalize_path, sniff_format, Format};
 use crate::surface::NPM_INSTALL_HOOKS;
 use crate::Ecosystem;
 
@@ -45,42 +47,117 @@ fn wheel_pth(path: &Path) -> Option<Vec<String>> {
     )
 }
 
+/// Decompressed bytes [`npm_hooks`] reads before giving up on an archive.
+const MAX_UNPACKED_BYTES: u64 = 4 << 30;
+/// Past the first MiB, the decompressed size may be at most this many times the
+/// compressed bytes read so far.
+const MAX_RATIO: u64 = 250;
+
 /// npm install hooks declared in the root `package.json`, plus the implicit
 /// `node-gyp rebuild` of a root `binding.gyp`.
 fn npm_hooks(path: &Path) -> Option<Vec<String>> {
+    npm_hooks_capped(path, MAX_UNPACKED_BYTES)
+}
+
+/// A reader that counts the bytes passing through it.
+struct Counted<R> {
+    inner: R,
+    n: Rc<Cell<u64>>,
+}
+
+impl<R: Read> Read for Counted<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let k = self.inner.read(buf)?;
+        self.n.set(self.n.get() + k as u64);
+        Ok(k)
+    }
+}
+
+/// A decompressed stream that fails once it passes `cap` bytes, or once it outgrows
+/// the compressed bytes behind it by more than [`MAX_RATIO`].
+struct Capped<R> {
+    inner: R,
+    out: u64,
+    packed: Rc<Cell<u64>>,
+    cap: u64,
+}
+
+impl<R: Read> Read for Capped<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let k = self.inner.read(buf)?;
+        self.out += k as u64;
+        let ratio = self.out > 1 << 20 && self.out / MAX_RATIO > self.packed.get();
+        if self.out > self.cap || ratio {
+            return Err(std::io::Error::other("decompressed size over the cap"));
+        }
+        Ok(k)
+    }
+}
+
+/// [`npm_hooks`] with the decompressed-size cap as a parameter. Paths are read the way
+/// node-tar extracts them for npm: the first component stripped, then any root; every
+/// copy of a duplicated `package.json` counts, and entries after a zero block are read.
+fn npm_hooks_capped(path: &Path, cap: u64) -> Option<Vec<String>> {
     let mut f = File::open(path).ok()?;
     let mut head = [0u8; 512];
     let n = f.read(&mut head).ok()?;
     f.seek(SeekFrom::Start(0)).ok()?;
-    let reader: Box<dyn Read> = match sniff_format(&head[..n])? {
-        Format::Gzip => Box::new(flate2::read::MultiGzDecoder::new(BufReader::new(f))),
-        Format::Tar => Box::new(BufReader::new(f)),
+    let packed = Rc::new(Cell::new(0));
+    let file = Counted {
+        inner: BufReader::new(f),
+        n: packed.clone(),
+    };
+    let inner: Box<dyn Read> = match sniff_format(&head[..n])? {
+        Format::Gzip => Box::new(flate2::read::MultiGzDecoder::new(file)),
+        Format::Tar => Box::new(file),
         _ => return None,
     };
-    let mut pj: Option<Value> = None;
+    let reader = Capped {
+        inner,
+        out: 0,
+        packed,
+        cap,
+    };
+    let mut manifests: Vec<Value> = Vec::new();
     let mut gyp = false;
     let mut tar = tar::Archive::new(reader);
+    tar.set_ignore_zeros(true);
     for entry in tar.entries().ok()? {
         let mut e = entry.ok()?;
-        let Some(p) = normalize_path(&String::from_utf8_lossy(&e.path_bytes())) else {
+        let kind = e.header().entry_type();
+        if kind.is_dir() || kind.is_symlink() || kind.is_hard_link() {
+            continue;
+        }
+        let Some(p) = node_tar_path(&String::from_utf8_lossy(&e.path_bytes())) else {
             continue;
         };
-        // npm tarballs hold one top-level directory (usually `package/`).
-        let Some((_, rest)) = p.split_once('/') else {
-            continue;
-        };
-        if rest == "binding.gyp" {
+        if p == "binding.gyp" {
             gyp = true;
-        } else if rest == "package.json" && pj.is_none() {
+        } else if p == "package.json" {
             let mut text = String::new();
             (&mut e)
                 .take(MAX_MANIFEST_BYTES)
                 .read_to_string(&mut text)
                 .ok()?;
-            pj = Some(serde_json::from_str(text.trim_start_matches('\u{feff}')).ok()?);
+            manifests.push(serde_json::from_str(text.trim_start_matches('\u{feff}')).ok()?);
         }
     }
-    let pj = pj?;
+    if manifests.is_empty() {
+        return None;
+    }
+    let mut out: Vec<String> = Vec::new();
+    for pj in &manifests {
+        for label in manifest_hooks(pj, gyp) {
+            if !out.contains(&label) {
+                out.push(label);
+            }
+        }
+    }
+    Some(out)
+}
+
+/// The install hooks one copy of `package.json` declares.
+fn manifest_hooks(pj: &Value, gyp: bool) -> Vec<String> {
     let scripts = pj.get("scripts").and_then(Value::as_object);
     let has = |h: &str| {
         scripts
@@ -97,7 +174,7 @@ fn npm_hooks(path: &Path) -> Option<Vec<String>> {
     if gyp && gypfile && !has("install") && !has("preinstall") {
         out.push("binding.gyp (implicit node-gyp rebuild)".into());
     }
-    Some(out)
+    out
 }
 
 #[cfg(test)]
@@ -187,6 +264,86 @@ mod tests {
             install_time_code(&p, Ecosystem::Npm, "a-1.0.0.tgz"),
             vec!["unreadable archive"]
         );
+    }
+
+    /// A gzipped tar written header by header, so paths are kept exactly as given.
+    fn tgz_raw(blocks: &[(&str, &[u8])], zero_block_after: Option<usize>) -> Vec<u8> {
+        let mut t = Vec::new();
+        for (i, (p, d)) in blocks.iter().enumerate() {
+            let mut h = tar::Header::new_gnu();
+            h.as_old_mut().name[..p.len()].copy_from_slice(p.as_bytes());
+            h.set_size(d.len() as u64);
+            h.set_mode(0o644);
+            h.set_entry_type(tar::EntryType::Regular);
+            h.set_cksum();
+            t.extend_from_slice(h.as_bytes());
+            t.extend_from_slice(d);
+            t.resize(t.len().div_ceil(512) * 512, 0);
+            if zero_block_after == Some(i) {
+                t.extend([0u8; 512]);
+            }
+        }
+        t.extend([0u8; 1024]);
+        let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+        e.write_all(&t).unwrap();
+        e.finish().unwrap()
+    }
+
+    const HOOK: &[u8] = br#"{"name":"a","scripts":{"postinstall":"node x.js"}}"#;
+
+    #[test]
+    fn npm_hooks_follow_what_node_tar_extracts() {
+        let label = vec!["package.json:scripts.postinstall".to_string()];
+        // A second copy of the manifest, in the same or another top-level directory.
+        for second in ["package/package.json", "zzz/package.json"] {
+            let p = tmp(
+                "dup.tgz",
+                &tgz_raw(
+                    &[("package/package.json", br#"{"name":"a"}"#), (second, HOOK)],
+                    None,
+                ),
+            );
+            assert_eq!(install_time_code(&p, Ecosystem::Npm, "a-1.0.0.tgz"), label);
+        }
+        // Absolute paths keep their place after the first component is stripped.
+        let p = tmp("abs.tgz", &tgz_raw(&[("/package.json", HOOK)], None));
+        assert_eq!(install_time_code(&p, Ecosystem::Npm, "a-1.0.0.tgz"), label);
+    }
+
+    #[test]
+    fn hooks_after_a_zero_block_are_seen() {
+        let p = tmp(
+            "zero.tgz",
+            &tgz_raw(
+                &[
+                    ("package/package.json", br#"{"name":"a"}"#),
+                    ("package/package.json", HOOK),
+                ],
+                Some(0),
+            ),
+        );
+        assert_eq!(
+            install_time_code(&p, Ecosystem::Npm, "a-1.0.0.tgz"),
+            vec!["package.json:scripts.postinstall"]
+        );
+    }
+
+    #[test]
+    fn gzip_bomb_fails_closed() {
+        let zeros = vec![0u8; 4 * 1024 * 1024];
+        let bytes = tgz_raw(
+            &[("package/package.json", HOOK), ("package/z.bin", &zeros)],
+            None,
+        );
+        let p = tmp("bomb.tgz", &bytes);
+        assert_eq!(npm_hooks_capped(&p, 1 << 20), None);
+        // Over the ratio cap even below the total cap.
+        assert_eq!(npm_hooks_capped(&p, u64::MAX), None);
+        let p = tmp(
+            "small.tgz",
+            &tgz_raw(&[("package/package.json", HOOK)], None),
+        );
+        assert!(npm_hooks_capped(&p, 1 << 20).is_some());
     }
 
     #[test]
