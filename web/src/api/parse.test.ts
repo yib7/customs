@@ -77,9 +77,11 @@ describe('parseVerdict', () => {
     expect(v.policy_hits).toEqual([]);
   });
 
-  it('derives the decision from policy hits when missing', () => {
-    const v = parseVerdict({ name: 'x', policy_hits: [{ rule: 'deny', severity: 'block', detail: '' }] });
-    expect(v.decision).toBe('block');
+  it('rejects a verdict without a known decision instead of guessing one', () => {
+    // An allow-list hit has severity allow; a guess from the hits would show the package as allowed.
+    const hits = [{ rule: 'allow', severity: 'allow', detail: 'on the allow list' }];
+    expect(() => parseVerdict({ name: 'x', policy_hits: hits })).toThrow(ParseError);
+    expect(() => parseVerdict({ name: 'x', decision: 'maybe', policy_hits: hits })).toThrow(ParseError);
   });
 
   it('accepts a wrapped verdict with an id', () => {

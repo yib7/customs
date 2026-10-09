@@ -194,8 +194,10 @@ export function parseVerdict(v: unknown): Verdict {
   if (!isRecord(body)) throw new ParseError('verdict is not an object');
   const name = asString(body.name);
   if (!name) throw new ParseError('verdict has no package name');
-  const policyHits = compact(asArray(body.policy_hits).map(parsePolicyHit));
-  const decision = parseDecision(body.decision) ?? mostSevere(policyHits.map((h) => h.severity)) ?? 'warn';
+  // Never guess a missing decision: allow-list hits carry severity allow, so a guess could
+  // show a package as allowed.
+  const decision = parseDecision(body.decision);
+  if (!decision) throw new ParseError('verdict has no decision');
   const reasons = compact(asArray(body.reasons).map(parseReason));
   reasons.sort((a, b) => Math.abs(b.contribution) - Math.abs(a.contribution));
   return {
@@ -208,7 +210,7 @@ export function parseVerdict(v: unknown): Verdict {
     decision,
     risk: asProbability(body.risk),
     scores: parseScores(body.scores),
-    policy_hits: policyHits,
+    policy_hits: compact(asArray(body.policy_hits).map(parsePolicyHit)),
     reasons,
     evidence: compact(asArray(body.evidence).map(parseEvidence)),
     scanned_ms: asNumber(body.scanned_ms),
@@ -218,16 +220,6 @@ export function parseVerdict(v: unknown): Verdict {
     model_decision: parseDecision(body.model_decision),
     mode: body.mode === 'enforce' || body.mode === 'monitor' ? body.mode : null,
   };
-}
-
-const SEVERITY: Record<Decision, number> = { allow: 0, warn: 1, block: 2 };
-
-export function mostSevere(decisions: Decision[]): Decision | null {
-  let best: Decision | null = null;
-  for (const d of decisions) {
-    if (best === null || SEVERITY[d] > SEVERITY[best]) best = d;
-  }
-  return best;
 }
 
 export function parseEvent(v: unknown): CustomsEvent | null {
