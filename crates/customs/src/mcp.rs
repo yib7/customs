@@ -6,7 +6,7 @@
 //! messages only; logs go to stderr. Package checks use the same [`Checker`] as
 //! `customs check`: a running server when one answers, otherwise an in-process engine.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -660,29 +660,7 @@ impl McpServer {
             via,
         };
         let cwd = std::env::current_dir().unwrap_or_default();
-        let decision = report.decision();
-        let mut text = format!("Decision: {}. {}\n", decision.as_str(), guidance(decision));
-        if report.failed() > 0 {
-            text.push_str(&format!(
-                "{} check(s) failed, so this result is incomplete.\n",
-                report.failed()
-            ));
-        }
-        text.push('\n');
-        text.push_str(&audit::render_text(&report, &cwd));
-        // Allowed rows and full verdicts would swamp a large lockfile; the text and the
-        // verdict URLs carry the rest.
-        let mut json = audit::render_json(&report, &cwd);
-        if let Some(rows) = json["results"].as_array_mut() {
-            rows.retain(|r| r["status"] != "allow");
-            for r in rows.iter_mut() {
-                if let Some(o) = r.as_object_mut() {
-                    o.remove("verdict");
-                }
-            }
-        }
-        json["decision"] = json!(decision.as_str());
-        Ok(ToolOutput::ok(text, json))
+        Ok(audit_output(&report, &cwd))
     }
 
     async fn scan(&self, a: ScanArchiveArgs) -> Result<ToolOutput, RpcError> {
@@ -742,6 +720,54 @@ impl McpServer {
             Ok(Err(e)) => ToolOutput::error(format!("scan failed: {e:#}")),
             Err(e) => ToolOutput::error(format!("scan failed: {e}")),
         })
+    }
+}
+
+/// The answer of `audit_lockfile`.
+fn audit_output(report: &audit::Report, cwd: &Path) -> ToolOutput {
+    // A package Customs failed to check is unverified, never allowed.
+    let failed = report.failed();
+    let decision = if failed > 0 {
+        report.decision().max(Decision::Warn)
+    } else {
+        report.decision()
+    };
+    let mut text = format!("Decision: {}. ", decision.as_str());
+    if failed > 0 && decision < Decision::Block {
+        text.push_str(&format!(
+            "{failed} package{} could not be checked because Customs failed; treat {} as unverified and ask the user before installing.\n",
+            if failed == 1 { "" } else { "s" },
+            if failed == 1 { "it" } else { "them" }
+        ));
+    } else {
+        text.push_str(guidance(decision));
+        text.push('\n');
+        if failed > 0 {
+            text.push_str(&format!(
+                "{failed} check(s) failed, so this result is incomplete.\n"
+            ));
+        }
+    }
+    text.push('\n');
+    text.push_str(&audit::render_text(report, cwd));
+    // Allowed rows and full verdicts would swamp a large lockfile; the text and the
+    // verdict URLs carry the rest.
+    let mut json = audit::render_json(report, cwd);
+    if let Some(rows) = json["results"].as_array_mut() {
+        rows.retain(|r| r["status"] != "allow");
+        for r in rows.iter_mut() {
+            if let Some(o) = r.as_object_mut() {
+                o.remove("verdict");
+            }
+        }
+    }
+    json["decision"] = json!(decision.as_str());
+    json["failed"] = json!(failed);
+    ToolOutput {
+        text,
+        structured: Some(json),
+        // A block stands on its own; otherwise a failed check leaves the answer incomplete.
+        is_error: failed > 0 && decision < Decision::Block,
     }
 }
 
@@ -1221,6 +1247,36 @@ mod tests {
             cached: false,
             mode: crate::config::Mode::Enforce,
         }
+    }
+
+    #[test]
+    fn audit_lockfile_failed_checks_are_not_allow() {
+        use crate::audit::tests::finding;
+        use crate::audit::Outcome;
+        let mut report = audit::Report {
+            files: vec![PathBuf::from("sub/requirements.txt")],
+            findings: vec![finding(
+                "requests",
+                1,
+                Outcome::Failed("registry unreachable".into()),
+            )],
+            skipped: vec![],
+            via: "in-process".into(),
+        };
+        let out = audit_output(&report, Path::new("."));
+        let s = out.structured.as_ref().unwrap();
+        assert_ne!(s["decision"], "allow", "{s}");
+        assert_eq!(s["failed"], 1, "{s}");
+        assert!(out.is_error, "{}", out.text);
+        assert!(!out.text.starts_with("Decision: allow"), "{}", out.text);
+        assert!(out.text.contains("unverified"), "{}", out.text);
+        // A block stands on its own, failed checks or not.
+        report
+            .findings
+            .push(finding("evil", 2, Outcome::Mismatch("serves evil".into())));
+        let out = audit_output(&report, Path::new("."));
+        assert_eq!(out.structured.as_ref().unwrap()["decision"], "block");
+        assert!(!out.is_error);
     }
 
     #[tokio::test]
