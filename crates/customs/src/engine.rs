@@ -25,7 +25,7 @@ use crate::metrics::Metrics;
 use crate::policy::{effective_thresholds, evaluate, PolicyContext};
 use crate::policy_log::PolicyChange;
 use crate::registry::{FetchError, FileMeta, Registry, VersionMeta};
-use crate::resolve::{exact_version, resolve_version};
+use crate::resolve::{exact_version, pinned_version, resolve_version};
 use crate::store::{ArtifactRow, NewEvent, ScanKey, Store};
 use crate::util::{
     ecosystem_str, normalize_name, now, now_ts, parse_npm_tarball, parse_pypi_filename,
@@ -130,6 +130,8 @@ pub struct MetaFacts {
     pub history: Option<ReleaseHistory>,
     /// The registry marks the version (or the requested file) yanked, or npm deprecated.
     pub yanked: bool,
+    /// Metadata read fresh does not list the version or file, so its age is unknown.
+    pub age_unknown: bool,
     /// An informational hit about how the version was chosen.
     pub note: Option<PolicyHit>,
 }
@@ -445,29 +447,34 @@ impl Engine {
         }
     }
 
-    /// Registry facts for an artifact requested through the proxy. Failures only cost the
-    /// metadata rules, so they are logged and otherwise ignored.
+    /// Registry facts for an artifact requested through the proxy. A failed metadata
+    /// lookup only costs the metadata rules, so it is logged and otherwise ignored; metadata
+    /// that does not list the file is another matter (see [`MetaFacts::age_unknown`]).
     async fn artifact_meta(&self, policy: &Policy, req: &ArtifactRequest) -> MetaFacts {
         let mut facts = MetaFacts {
             exists: true,
             ..Default::default()
         };
         let Some(version) = &req.version else {
+            // A file name that names no version of the package cannot be dated.
+            facts.age_unknown = true;
             return facts;
         };
         // npm needs the packument anyway. For PyPI the per-release document is enough unless
         // a release history rule that applies to PyPI is on; then the project document (also
         // cached for `check`) is read, falling back to the release document when it does not
-        // list the version yet.
+        // list the file. A cached document that lacks the version is fetched again: it may
+        // predate the release.
         let full = match req.ecosystem {
             Ecosystem::Npm => true,
             Ecosystem::Pypi => policy.pypi_history_rules_enabled(),
         };
+        let lists_file = |vm: &VersionMeta| vm.files.iter().any(|f| f.filename == req.filename);
         let mut result: Result<Option<VersionMeta>, FetchError> = Ok(None);
         if full {
             result = self
                 .registry
-                .package_meta(&policy.upstream, req.ecosystem, &req.name)
+                .package_meta_listing(&policy.upstream, req.ecosystem, &req.name, &[version])
                 .await
                 .map(|m| {
                     m.and_then(|m| {
@@ -479,22 +486,37 @@ impl Engine {
         if let Some(h) = facts.history.as_mut() {
             self.lookup_added_dependencies(policy, h).await;
         }
-        if req.ecosystem == Ecosystem::Pypi && !matches!(result, Ok(Some(_))) {
-            result = self
+        if req.ecosystem == Ecosystem::Pypi && !matches!(&result, Ok(Some(vm)) if lists_file(vm)) {
+            // The release document is never cached, so it lists a file uploaded since.
+            match self
                 .registry
                 .pypi_release(&policy.upstream, &req.name, version)
-                .await;
+                .await
+            {
+                Ok(None) | Err(_) if matches!(result, Ok(Some(_))) => {}
+                other => result = other,
+            }
         }
         match result {
             Ok(Some(vm)) => {
-                // Prefer the upload time of this exact file over the release time.
-                let file = vm.files.iter().find(|f| f.filename == req.filename);
-                facts.published = file.and_then(|f| f.upload_time).or(vm.published);
-                facts.yanked = vm.yanked || file.is_some_and(|f| f.yanked);
-                facts.install_scripts = vm.install_scripts;
+                facts.install_scripts = vm.install_scripts.clone();
+                match vm.files.iter().find(|f| f.filename == req.filename) {
+                    // The upload time of this exact file, not the release's: a file added to
+                    // an old release is as new as its upload.
+                    Some(file) => {
+                        facts.published = file.upload_time.or(vm.published);
+                        facts.yanked = vm.yanked || file.yanked;
+                    }
+                    None => {
+                        tracing::debug!(name = %req.name, version, file = %req.filename, "registry metadata does not list the file");
+                        facts.yanked = vm.yanked;
+                        facts.age_unknown = true;
+                    }
+                }
             }
             Ok(None) => {
-                tracing::debug!(name = %req.name, version, "no registry metadata for version")
+                tracing::debug!(name = %req.name, version, "no registry metadata for version");
+                facts.age_unknown = true;
             }
             Err(e) => {
                 tracing::warn!(name = %req.name, version, error = %e, "registry metadata lookup failed")
@@ -706,6 +728,7 @@ impl Engine {
                 history: meta.history.as_ref(),
                 popular_rank: self.models.popular_rank(eco, name),
                 yanked: meta.yanked,
+                age_unknown: meta.age_unknown,
                 now: now(),
             },
         );
@@ -803,6 +826,20 @@ impl Engine {
         self.record(v, EventKind::NonexistentPackage, client)
     }
 
+    /// Package metadata that lists `pins` when the registry does.
+    async fn package_meta_with(
+        &self,
+        policy: &Policy,
+        eco: Ecosystem,
+        name: &str,
+        pins: &[String],
+    ) -> Result<Option<Arc<crate::registry::PackageMeta>>, FetchError> {
+        let need: Vec<&str> = pins.iter().map(String::as_str).collect();
+        self.registry
+            .package_meta_listing(&policy.upstream, eco, name, &need)
+            .await
+    }
+
     /// `POST /api/check`: resolve, fetch, scan, decide. An unpinned spec resolves against
     /// the metadata the proxy serves.
     pub async fn check(
@@ -827,11 +864,12 @@ impl Engine {
     ) -> Result<Verdict, EngineError> {
         let policy = self.policy();
         let name = normalize_name(eco, name);
-        let Some(meta) = self
-            .registry
-            .package_meta(&policy.upstream, eco, &name)
-            .await?
-        else {
+        // A pinned version the cached metadata lacks may have been published since.
+        let pins: Vec<String> = version
+            .and_then(|v| pinned_version(eco, v))
+            .into_iter()
+            .collect();
+        let Some(meta) = self.package_meta_with(&policy, eco, &name, &pins).await? else {
             return self.record_nonexistent(eco, &name, client);
         };
         // Resolve an unpinned spec against the metadata the proxy serves, which leaves out
@@ -878,6 +916,7 @@ impl Engine {
             install_scripts: vm.install_scripts.clone(),
             history,
             yanked: vm.yanked,
+            age_unknown: false,
             note,
         };
         let Some(file) = choose_file(eco, &vm.files) else {
@@ -939,11 +978,12 @@ impl Engine {
     ) -> Result<ReleaseDiff, EngineError> {
         let policy = self.policy();
         let name = normalize_name(eco, name);
-        let Some(meta) = self
-            .registry
-            .package_meta(&policy.upstream, eco, &name)
-            .await?
-        else {
+        let pins: Vec<String> = [from, to]
+            .into_iter()
+            .flatten()
+            .filter_map(|v| pinned_version(eco, v))
+            .collect();
+        let Some(meta) = self.package_meta_with(&policy, eco, &name, &pins).await? else {
             return Err(EngineError::NotFound(format!(
                 "'{name}' does not exist on {}",
                 crate::util::registry_name(eco)
@@ -1129,13 +1169,18 @@ fn local_verdict(
 ) -> Verdict {
     use sha2::{Digest, Sha256};
     let sha = hex::encode(Sha256::digest(bytes));
+    let given = name.is_some();
     let name = name
         .map(str::to_string)
         .or(guessed.as_ref().map(|g| g.0.clone()))
         .unwrap_or_else(|| filename.to_string());
-    let version = guessed
-        .map(|g| g.1)
-        .or_else(|| parse_npm_tarball(&name, filename));
+    let version = guessed.map(|g| g.1).or_else(|| {
+        if given {
+            parse_npm_tarball(&name, filename)
+        } else {
+            crate::util::guess_npm_tarball_version(filename)
+        }
+    });
     let facts = MetaFacts {
         exists: true,
         ..Default::default()

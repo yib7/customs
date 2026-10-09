@@ -988,6 +988,17 @@ only in enforce mode with `min_age_severity = "block"`: allow-listed versions st
 unless also denied, a package whose versions are all young keeps them (the install then
 fails with the block reason instead of "no matching version"), and a pinned young version
 is still blocked when fetched. Metadata fetch errors fail open (nothing held back).
+
+Package metadata is cached for five minutes, so a release published meanwhile would be
+missing from it. A cached document that does not list a version the page offers, the
+archive requested, or a pinned `check` names is fetched again (a document refetched for a
+miss is reused for 5 s, so a version that does not exist cannot turn every request into
+an upstream one). A PyPI file the project document does not list is looked up in the
+uncached release document, and the age comes from that file's own upload time, not the
+release's: a wheel uploaded today to a two-year-old release is a day-old file and not
+`[established]`. A version or file that fresh metadata still does not list (or a file name
+that names no version of the package) has no known publish time and hits `min_age_days`
+(and `block_install_scripts_from_new`) as if it were young.
 `scripts/installer_e2e.py` checks this with real pip, uv, npm, pnpm, yarn and bun.
 
 `POST /api/check` resolves an unpinned or ranged version the same way by default

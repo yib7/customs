@@ -29,6 +29,42 @@ struct MockState {
     base: String,
     hits: Mutex<HashMap<String, usize>>,
     file_delay_ms: AtomicUsize,
+    /// When set, archive downloads wait for a permit (one per download).
+    file_gate: Mutex<Option<Arc<tokio::sync::Semaphore>>>,
+    /// Files added while a test runs.
+    extra_pypi: Mutex<Vec<ExtraFile>>,
+    extra_npm: Mutex<Vec<ExtraFile>>,
+}
+
+/// A file a test adds to the mock registry after it started. An npm file of a listed
+/// version must be named `{bare}-{version}.tgz`, the name the packument's tarball URL
+/// gives it.
+#[derive(Clone)]
+struct ExtraFile {
+    name: String,
+    version: String,
+    filename: String,
+    bytes: Vec<u8>,
+    /// Upload (PyPI) or publish (npm) time.
+    time: String,
+    /// npm: extra version document fields.
+    doc: Value,
+    /// Whether the registry metadata lists it (the archive is served either way).
+    listed: bool,
+}
+
+impl ExtraFile {
+    fn new(name: &str, version: &str, filename: &str, bytes: &[u8], time: String) -> Self {
+        Self {
+            name: name.into(),
+            version: version.into(),
+            filename: filename.into(),
+            bytes: bytes.to_vec(),
+            time,
+            doc: json!({}),
+            listed: true,
+        }
+    }
 }
 
 impl MockState {
@@ -132,7 +168,7 @@ async fn simple_page(
     if headers.get("accept").and_then(|a| a.to_str().ok())
         == Some("application/vnd.pypi.simple.v1+json")
     {
-        let files: Vec<Value> = pypi_packages()
+        let mut files: Vec<Value> = pypi_packages()
             .into_iter()
             .filter(|p| p.0 == project)
             .map(|(n, v, _, t)| {
@@ -142,6 +178,11 @@ async fn simple_page(
                 json!({"filename": file_name(n, v), "upload-time": t, "provenance": prov})
             })
             .collect();
+        for f in m.extra_pypi.lock().unwrap().iter() {
+            if f.name == project && f.listed {
+                files.push(json!({"filename": f.filename, "upload-time": f.time}));
+            }
+        }
         if files.is_empty() {
             return (StatusCode::NOT_FOUND, "Not Found").into_response();
         }
@@ -151,11 +192,19 @@ async fn simple_page(
         )
             .into_response();
     }
-    let links: Vec<String> = pypi_packages()
+    let mut names: Vec<String> = pypi_packages()
         .into_iter()
         .filter(|p| p.0 == project)
-        .map(|(n, v, _, _)| {
-            let f = file_name(n, v);
+        .map(|(n, v, _, _)| file_name(n, v))
+        .collect();
+    for f in m.extra_pypi.lock().unwrap().iter() {
+        if f.name == project && f.listed {
+            names.push(f.filename.clone());
+        }
+    }
+    let links: Vec<String> = names
+        .iter()
+        .map(|f| {
             format!(
                 r#"<a href="{}/files/packages/ab/cd/{f}#sha256=00">{f}</a><br/>"#,
                 m.base
@@ -184,19 +233,44 @@ fn pypi_file_json(m: &MockState, n: &str, v: &str, t: &str, bytes: &[u8]) -> Val
     })
 }
 
+fn extra_pypi_file_json(m: &MockState, f: &ExtraFile) -> Value {
+    json!({
+        "filename": f.filename,
+        "url": format!("{}/files/packages/ab/cd/{}", m.base, f.filename),
+        "upload_time_iso_8601": f.time,
+        "packagetype": if f.filename.ends_with(".whl") { "bdist_wheel" } else { "sdist" },
+        "size": f.bytes.len(),
+        "digests": {"sha256": "00"},
+        "yanked": false,
+    })
+}
+
+/// The releases of `name` as `(version, files)`, in the order they were added.
+fn pypi_releases(m: &MockState, name: &str) -> Vec<(String, Vec<Value>)> {
+    let mut out: Vec<(String, Vec<Value>)> = Vec::new();
+    let mut add = |v: &str, f: Value| match out.iter_mut().find(|(x, _)| x == v) {
+        Some((_, files)) => files.push(f),
+        None => out.push((v.to_string(), vec![f])),
+    };
+    for (n, v, b, t) in pypi_packages().into_iter().filter(|p| p.0 == name) {
+        add(v, pypi_file_json(m, n, v, &t, b));
+    }
+    for f in m.extra_pypi.lock().unwrap().iter() {
+        if f.name == name && f.listed {
+            add(&f.version, extra_pypi_file_json(m, f));
+        }
+    }
+    out
+}
+
 async fn pypi_json(State(m): State<Mock>, Path(name): Path<String>) -> Response {
-    let pkgs: Vec<_> = pypi_packages()
-        .into_iter()
-        .filter(|p| p.0 == name)
-        .collect();
-    if pkgs.is_empty() {
+    let rels = pypi_releases(&m, &name);
+    if rels.is_empty() {
         return (StatusCode::NOT_FOUND, Json(json!({"message": "Not Found"}))).into_response();
     }
-    let mut releases = serde_json::Map::new();
-    for (n, v, b, t) in &pkgs {
-        releases.insert(v.to_string(), json!([pypi_file_json(&m, n, v, t, b)]));
-    }
-    let latest = pkgs.last().unwrap().1;
+    let latest = rels.last().unwrap().0.clone();
+    let releases: serde_json::Map<String, Value> =
+        rels.into_iter().map(|(v, f)| (v, json!(f))).collect();
     Json(json!({"info": {"name": name, "version": latest}, "releases": releases})).into_response()
 }
 
@@ -204,20 +278,28 @@ async fn pypi_version_json(
     State(m): State<Mock>,
     Path((name, version)): Path<(String, String)>,
 ) -> Response {
-    match pypi_packages()
+    match pypi_releases(&m, &name)
         .into_iter()
-        .find(|p| p.0 == name && p.1 == version)
+        .find(|(v, _)| *v == version)
     {
-        Some((n, v, b, t)) => Json(
-            json!({"info": {"name": n, "version": v}, "urls": [pypi_file_json(&m, n, v, &t, b)]}),
-        )
-        .into_response(),
+        Some((v, files)) => {
+            Json(json!({"info": {"name": name, "version": v}, "urls": files})).into_response()
+        }
         None => (StatusCode::NOT_FOUND, "{}").into_response(),
+    }
+}
+
+/// Wait for the test to release one download, when it holds them back.
+async fn pass_gate(m: &MockState) {
+    let gate = m.file_gate.lock().unwrap().clone();
+    if let Some(g) = gate {
+        g.acquire().await.unwrap().forget();
     }
 }
 
 async fn files(State(m): State<Mock>, Path(path): Path<String>) -> Response {
     m.hit(&path);
+    pass_gate(&m).await;
     let delay = m.file_delay_ms.load(Ordering::SeqCst);
     if delay > 0 {
         tokio::time::sleep(Duration::from_millis(delay as u64)).await;
@@ -227,6 +309,15 @@ async fn files(State(m): State<Mock>, Path(path): Path<String>) -> Response {
         if file_name(n, v) == file {
             return b.to_vec().into_response();
         }
+    }
+    if let Some(f) = m
+        .extra_pypi
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|f| f.filename == file)
+    {
+        return f.bytes.clone().into_response();
     }
     StatusCode::NOT_FOUND.into_response()
 }
@@ -381,22 +472,46 @@ async fn npm_search(uri: axum::http::Uri) -> Response {
 async fn npm_doc(State(m): State<Mock>, Path(rest): Path<String>) -> Response {
     if let Some((name, file)) = rest.split_once("/-/") {
         m.hit(&format!("npm:{file}"));
+        pass_gate(&m).await;
         for (n, v, b, _, _) in npm_packages() {
             let bare = n.rsplit('/').next().unwrap();
             if n == name && file == format!("{bare}-{v}.tgz") {
                 return b.to_vec().into_response();
             }
         }
+        if let Some(f) = m
+            .extra_npm
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|f| f.name == name && f.filename == file)
+        {
+            return f.bytes.clone().into_response();
+        }
         return StatusCode::NOT_FOUND.into_response();
     }
     let name = rest.replace("%2f", "/").replace("%2F", "/");
-    let rows: Vec<_> = npm_packages().into_iter().filter(|p| p.0 == name).collect();
+    let mut rows: Vec<(String, String, String, Value)> = npm_packages()
+        .into_iter()
+        .filter(|p| p.0 == name)
+        .map(|(n, v, _, t, extra)| (n.to_string(), v.to_string(), t, extra))
+        .collect();
+    for f in m.extra_npm.lock().unwrap().iter() {
+        if f.name == name && f.listed {
+            rows.push((
+                f.name.clone(),
+                f.version.clone(),
+                f.time.clone(),
+                f.doc.clone(),
+            ));
+        }
+    }
     if rows.is_empty() {
         return (StatusCode::NOT_FOUND, Json(json!({"error": "Not found"}))).into_response();
     }
     let mut time = serde_json::Map::new();
     let mut versions = serde_json::Map::new();
-    for (n, v, _, t, extra) in &rows {
+    for (n, v, t, extra) in &rows {
         let bare = n.rsplit('/').next().unwrap();
         let mut doc = extra.clone();
         doc["name"] = json!(n);
@@ -409,7 +524,7 @@ async fn npm_doc(State(m): State<Mock>, Path(rest): Path<String>) -> Response {
         time.insert(v.to_string(), json!(t));
         versions.insert(v.to_string(), doc);
     }
-    time.insert("created".into(), json!(rows[0].3));
+    time.insert("created".into(), json!(rows[0].2));
     Json(json!({
         "name": name,
         "dist-tags": {"latest": rows.last().unwrap().1},
@@ -2853,5 +2968,145 @@ async fn scan_cache_ignores_summaries_from_an_older_scanner() {
     assert_eq!(v["cached"], false, "{v}");
     assert!(rules_of(&v).contains(&"agent_bypass".to_string()), "{v}");
     assert_eq!(h.scans.load(Ordering::SeqCst), 1);
+    h.stop().await;
+}
+
+fn now_rfc3339() -> String {
+    Utc::now().to_rfc3339()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_release_published_while_metadata_is_cached_is_still_young() {
+    let h = Harness::start(|_| {}).await;
+    // The proxy's tarball path: the packument is cached, then a release with an install
+    // script appears.
+    assert_eq!(h.get("/npm/plainlib").await.status(), 200);
+    let mut f = ExtraFile::new(
+        "plainlib",
+        "0.2.0",
+        "plainlib-0.2.0.tgz",
+        b"benign plain 0.2.0",
+        now_rfc3339(),
+    );
+    f.doc = json!({"scripts": {"postinstall": "node x.js"}});
+    h.mock.extra_npm.lock().unwrap().push(f);
+    let r = h.get("/npm/plainlib/-/plainlib-0.2.0.tgz").await;
+    assert_eq!(r.status(), 403);
+    let err: Value = r.json().await.unwrap();
+    let msg = err["error"].as_str().unwrap();
+    assert!(msg.contains("min_age_days: published"), "{msg}");
+    assert!(msg.contains("block_install_scripts_from_new"), "{msg}");
+
+    // The packument the proxy serves leaves the new release out.
+    assert_eq!(h.get("/npm/@scope/lib").await.status(), 200);
+    h.mock.extra_npm.lock().unwrap().push(ExtraFile::new(
+        "@scope/lib",
+        "1.3.0",
+        "lib-1.3.0.tgz",
+        b"benign scoped 1.3.0",
+        now_rfc3339(),
+    ));
+    let r = h.get("/npm/@scope/lib").await;
+    assert_eq!(
+        r.headers()
+            .get("x-customs-hidden-versions")
+            .map(|v| v.to_str().unwrap()),
+        Some("1")
+    );
+    let doc: Value = r.json().await.unwrap();
+    assert!(doc["versions"].get("1.3.0").is_none(), "{doc}");
+    assert_eq!(doc["dist-tags"]["latest"], "1.2.3");
+
+    // A check pinned to the new release finds it instead of failing to resolve.
+    let (s, _) = h.check("npm", "lure-dep", None).await;
+    assert_eq!(s, 200);
+    h.mock.extra_npm.lock().unwrap().push(ExtraFile::new(
+        "lure-dep",
+        "0.0.2",
+        "lure-dep-0.0.2.tgz",
+        b"benign lure 0.0.2",
+        now_rfc3339(),
+    ));
+    let (s, v) = h.check("npm", "lure-dep", Some("0.0.2")).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["version"], "0.0.2");
+    assert!(rules_of(&v).contains(&"min_age_days".to_string()), "{v}");
+
+    // PyPI: the simple page marks a release the cached project document lacks.
+    let html = h.get("/pypi/simple/goodpkg/").await.text().await.unwrap();
+    assert!(!html.contains("data-yanked"), "{html}");
+    h.mock.extra_pypi.lock().unwrap().push(ExtraFile::new(
+        "goodpkg",
+        "1.2.0",
+        "goodpkg-1.2.0.tar.gz",
+        b"benign archive v1.2",
+        now_rfc3339(),
+    ));
+    let html = h.get("/pypi/simple/goodpkg/").await.text().await.unwrap();
+    let line = html
+        .lines()
+        .find(|l| l.contains(">goodpkg-1.2.0.tar.gz<"))
+        .unwrap_or_else(|| panic!("{html}"));
+    assert!(line.contains("data-yanked"), "{html}");
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_added_to_an_old_release_is_not_established() {
+    let h = Harness::start(|_| {}).await;
+    // six 1.16.0 is an established release; its project document is now cached.
+    let r = h.get(&pypi_file_path("six", "1.16.0")).await;
+    assert_eq!(r.headers()["x-customs-decision"], "allow");
+    // A wheel uploaded to that release today is as new as its upload.
+    h.mock.extra_pypi.lock().unwrap().push(ExtraFile::new(
+        "six",
+        "1.16.0",
+        "six-1.16.0-py3-none-any.whl",
+        b"EVIL wheel uploaded today",
+        now_rfc3339(),
+    ));
+    let r = h
+        .get("/pypi/files/packages/ab/cd/six-1.16.0-py3-none-any.whl")
+        .await;
+    assert_eq!(r.status(), 403);
+    let body = r.text().await.unwrap();
+    assert!(body.contains("min_age_days: published"), "{body}");
+    assert!(!body.contains("established"), "{body}");
+    // A file the registry does not list at all has no known age.
+    let mut f = ExtraFile::new(
+        "six",
+        "1.16.0",
+        "six-1.16.0-py2-none-any.whl",
+        b"benign unlisted",
+        now_rfc3339(),
+    );
+    f.listed = false;
+    h.mock.extra_pypi.lock().unwrap().push(f);
+    let r = h
+        .get("/pypi/files/packages/ab/cd/six-1.16.0-py2-none-any.whl")
+        .await;
+    assert_eq!(r.status(), 403);
+    let body = r.text().await.unwrap();
+    assert!(body.contains("publish time unknown"), "{body}");
+    // An npm tarball named for another package is not a version of this one.
+    let mut f = ExtraFile::new(
+        "plainlib",
+        "0.1.0",
+        "evil-0.1.0.tgz",
+        b"benign evil",
+        now_rfc3339(),
+    );
+    f.listed = false;
+    h.mock.extra_npm.lock().unwrap().push(f);
+    let r = h.get("/npm/plainlib/-/evil-0.1.0.tgz").await;
+    assert_eq!(r.status(), 403);
+    let err: Value = r.json().await.unwrap();
+    assert!(
+        err["error"]
+            .as_str()
+            .unwrap()
+            .contains("publish time unknown"),
+        "{err}"
+    );
     h.stop().await;
 }

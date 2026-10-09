@@ -162,12 +162,11 @@ async fn packument(
         .unwrap_or("application/json");
     // The release-age metadata is fetched alongside the page, not after it.
     let held_back = async {
-        match version {
-            None => super::young_versions(state, Ecosystem::Npm, name).await,
-            Some(_) => Default::default(),
+        if version.is_none() {
+            super::prefetch_age_meta(state, Ecosystem::Npm, name).await;
         }
     };
-    let (page, hidden) = tokio::join!(
+    let (page, ()) = tokio::join!(
         state
             .engine
             .registry
@@ -209,7 +208,18 @@ async fn packument(
     }
     match serde_json::from_slice::<Value>(&page.body) {
         Ok(mut v) => {
-            let n = crate::cooldown::filter_packument(&mut v, &hidden);
+            let n = match version {
+                None => {
+                    let listed: Vec<String> = v
+                        .get("versions")
+                        .and_then(Value::as_object)
+                        .map(|o| o.keys().cloned().collect())
+                        .unwrap_or_default();
+                    let hidden = super::young_versions(state, Ecosystem::Npm, name, &listed).await;
+                    crate::cooldown::filter_packument(&mut v, &hidden)
+                }
+                Some(_) => 0,
+            };
             rewrite_packument(&mut v, &proxy_base(headers));
             let mut resp = ([(header::CONTENT_TYPE, ct)], v.to_string()).into_response();
             if n > 0 {

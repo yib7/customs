@@ -34,6 +34,9 @@ pub struct PolicyContext<'a> {
     pub popular_rank: Option<usize>,
     /// The registry marks this version yanked (PyPI) or deprecated (npm).
     pub yanked: bool,
+    /// The registry metadata, read fresh, does not list this version or file, so its
+    /// publish time is unknown. The age rules treat it as young.
+    pub age_unknown: bool,
     pub now: DateTime<Utc>,
 }
 
@@ -76,7 +79,7 @@ impl PolicyOutcome {
 /// ecosystem, at least `min_age_days` old, and not yanked.
 fn established_hit(policy: &Policy, ctx: &PolicyContext<'_>) -> Option<PolicyHit> {
     let e = &policy.established;
-    if !e.enabled || ctx.yanked {
+    if !e.enabled || ctx.yanked || ctx.age_unknown {
         return None;
     }
     let rank = ctx.popular_rank.filter(|r| *r < e.top as usize)?;
@@ -149,20 +152,32 @@ pub fn evaluate(policy: &Policy, ctx: &PolicyContext<'_>) -> PolicyOutcome {
     }
 
     let min_age = chrono::Duration::days(policy.min_age_days as i64);
+    // `(how old, as a clause after "was")`, when the version counts as young.
     let young = match ctx.published {
-        Some(p) if policy.min_age_days > 0 => {
+        _ if policy.min_age_days == 0 => None,
+        Some(p) => {
             let age = ctx.now - p;
-            (age < min_age).then_some(age)
+            (age < min_age).then(|| {
+                (
+                    format!("published {} ago", human_duration(age)),
+                    format!("was published {} ago", human_duration(age)),
+                )
+            })
         }
-        _ => None,
+        // A version or file the metadata does not list may have been published a moment
+        // ago, so it is not given the benefit of the doubt.
+        None if ctx.age_unknown => Some((
+            "publish time unknown: the registry metadata does not list this file".to_string(),
+            "its publish time is unknown".to_string(),
+        )),
+        None => None,
     };
-    if let Some(age) = young {
+    if let Some((age, clause)) = young {
         hits.push(PolicyHit {
             rule: "min_age_days".into(),
             severity: policy.min_age_severity.decision(),
             detail: format!(
-                "published {} ago (policy: {} day{})",
-                human_duration(age),
+                "{age} (policy: {} day{})",
                 policy.min_age_days,
                 if policy.min_age_days == 1 { "" } else { "s" }
             ),
@@ -175,9 +190,8 @@ pub fn evaluate(policy: &Policy, ctx: &PolicyContext<'_>) -> PolicyOutcome {
                 rule: "block_install_scripts_from_new".into(),
                 severity: Decision::Block,
                 detail: format!(
-                    "runs install scripts ({}) and was published {} ago",
+                    "runs install scripts ({}) and {clause}",
                     ctx.install_scripts.join(", "),
-                    human_duration(age)
                 ),
             });
         }
@@ -471,6 +485,7 @@ mod tests {
             history: None,
             popular_rank: None,
             yanked: false,
+            age_unknown: false,
             now: Utc::now(),
         }
     }
@@ -690,6 +705,37 @@ mod tests {
             ..policy()
         };
         assert!(evaluate(&p3, &c).hits.is_empty());
+    }
+
+    #[test]
+    fn an_unknown_publish_time_counts_as_young() {
+        let mut c = ctx(Ecosystem::Npm, "fresh", Some("2.0.0"));
+        c.age_unknown = true;
+        c.install_scripts = vec!["postinstall".into()];
+        let o = evaluate(&policy(), &c);
+        let rules: Vec<&str> = o.hits.iter().map(|h| h.rule.as_str()).collect();
+        assert_eq!(
+            rules,
+            vec!["min_age_days", "block_install_scripts_from_new"]
+        );
+        assert_eq!(
+            o.hits[0].detail,
+            "publish time unknown: the registry metadata does not list this file (policy: 3 days)"
+        );
+        assert!(o.hits[1].detail.contains("its publish time is unknown"));
+        assert_eq!(o.decide(Decision::Allow), Decision::Block);
+        // Nor does a popular name make it established.
+        let mut p = popular(400);
+        p.published = None;
+        p.age_unknown = true;
+        let o = evaluate(&policy(), &p);
+        assert!(!o.established);
+        // The rule switched off leaves it alone.
+        let off = Policy {
+            min_age_days: 0,
+            ..policy()
+        };
+        assert!(evaluate(&off, &c).hits.is_empty());
     }
 
     #[test]

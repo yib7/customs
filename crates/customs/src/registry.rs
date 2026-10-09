@@ -23,6 +23,10 @@ use crate::metrics::Metrics;
 use crate::util::{ecosystem_str, normalize_name};
 
 const META_TTL: Duration = Duration::from_secs(300);
+/// A cached document that was itself refetched for a missing version is served for this
+/// long before another miss refetches it, so requests for a version that does not exist
+/// cannot turn every lookup into an upstream request.
+const META_REFRESH_GAP: Duration = Duration::from_secs(5);
 
 #[derive(Debug, thiserror::Error)]
 pub enum FetchError {
@@ -116,6 +120,19 @@ impl PackageMeta {
     pub fn version(&self, v: &str) -> Option<&VersionMeta> {
         self.versions.iter().find(|x| x.version == v)
     }
+
+    /// Whether the document lists version `v` (PyPI: any spelling with the same PEP 440
+    /// value, as `1.0` for `1.0.0`).
+    pub fn lists(&self, v: &str) -> bool {
+        self.version(v).is_some()
+            || (self.ecosystem == Ecosystem::Pypi
+                && crate::resolve::Pep440::parse(v).is_some_and(|want| {
+                    self.versions.iter().any(|x| {
+                        crate::resolve::Pep440::parse(&x.version)
+                            .is_some_and(|have| have.cmp(&want).is_eq())
+                    })
+                }))
+    }
 }
 
 /// Result of downloading an artifact into a file.
@@ -128,7 +145,15 @@ pub struct Download {
 pub struct Registry {
     client: reqwest::Client,
     metrics: Arc<Metrics>,
-    meta: Mutex<HashMap<String, (Instant, Arc<PackageMeta>)>>,
+    meta: Mutex<HashMap<String, MetaEntry>>,
+}
+
+/// A cached package document.
+struct MetaEntry {
+    fetched: Instant,
+    meta: Arc<PackageMeta>,
+    /// Fetched because the copy before it did not list a version a caller needed.
+    refreshed: bool,
 }
 
 fn parse_time(v: &Value) -> Option<DateTime<Utc>> {
@@ -255,15 +280,33 @@ impl Registry {
         eco: Ecosystem,
         name: &str,
     ) -> Result<Option<Arc<PackageMeta>>, FetchError> {
+        self.package_meta_listing(upstream, eco, name, &[]).await
+    }
+
+    /// [`Registry::package_meta`] for a caller that needs the versions in `need`: a cached
+    /// document that does not list one of them predates its release and is fetched again
+    /// (at most once per [`META_REFRESH_GAP`] while the version stays missing).
+    pub async fn package_meta_listing(
+        &self,
+        upstream: &Upstream,
+        eco: Ecosystem,
+        name: &str,
+        need: &[&str],
+    ) -> Result<Option<Arc<PackageMeta>>, FetchError> {
         let key = format!("{}:{}", ecosystem_str(eco), normalize_name(eco, name));
-        if let Some((t, m)) = self
+        let mut refreshed = false;
+        if let Some(e) = self
             .meta
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(&key)
         {
-            if t.elapsed() < META_TTL {
-                return Ok(Some(m.clone()));
+            let age = e.fetched.elapsed();
+            if age < META_TTL {
+                if need.iter().all(|v| e.meta.lists(v)) || (e.refreshed && age < META_REFRESH_GAP) {
+                    return Ok(Some(e.meta.clone()));
+                }
+                refreshed = true;
             }
         }
         let parsed = match eco {
@@ -290,10 +333,14 @@ impl Registry {
         }
         .ok_or_else(|| FetchError::Other(format!("unexpected metadata format for {key}")))?;
         let m = Arc::new(parsed);
-        self.meta
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(key, (Instant::now(), m.clone()));
+        self.meta.lock().unwrap_or_else(|e| e.into_inner()).insert(
+            key,
+            MetaEntry {
+                fetched: Instant::now(),
+                meta: m.clone(),
+                refreshed,
+            },
+        );
         Ok(Some(m))
     }
 

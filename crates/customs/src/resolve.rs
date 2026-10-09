@@ -43,14 +43,30 @@ pub fn resolve_version(meta: &PackageMeta, spec: Option<&str>) -> Result<String,
 /// The version `spec` names exactly (`1.2.3`, `==1.2.3`, `=1.2.3`, npm `v1.2.3`), when
 /// `meta` has it.
 pub fn exact_version(meta: &PackageMeta, spec: Option<&str>) -> Option<String> {
-    let spec = spec?.trim();
+    let exact = strip_exact(meta.ecosystem, spec?);
+    meta.version(exact).map(|_| exact.to_string())
+}
+
+/// `spec` without the `==`, `=` or npm `v` that may mark an exact version.
+fn strip_exact(eco: Ecosystem, spec: &str) -> &str {
+    let spec = spec.trim();
     let exact = spec.strip_prefix("==").unwrap_or(spec).trim();
     let exact = exact.strip_prefix('=').unwrap_or(exact).trim();
-    let exact = exact
+    exact
         .strip_prefix('v')
-        .filter(|_| meta.ecosystem == Ecosystem::Npm)
-        .unwrap_or(exact);
-    meta.version(exact).map(|_| exact.to_string())
+        .filter(|_| eco == Ecosystem::Npm)
+        .unwrap_or(exact)
+}
+
+/// The version `spec` pins (`1.2.3`, `==1.2.3`, `=1.2.3`, npm `v1.2.3`), whether or not
+/// any metadata lists it yet; `None` for ranges, tags and anything unparseable.
+pub fn pinned_version(eco: Ecosystem, spec: &str) -> Option<String> {
+    let exact = strip_exact(eco, spec);
+    let ok = match eco {
+        Ecosystem::Npm => semver::Version::parse(exact).is_ok(),
+        Ecosystem::Pypi => Pep440::parse(exact).is_some(),
+    };
+    ok.then(|| exact.to_string())
 }
 
 fn newest(meta: &PackageMeta, ok: impl Fn(&str) -> bool) -> Option<String> {
