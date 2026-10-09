@@ -1,7 +1,8 @@
 # Claude Code hook
 
 `customs hook claude-code` is a [PreToolUse hook](https://code.claude.com/docs/en/hooks)
-for the `Bash` tool and the file-editing tools. Before Claude Code runs a shell command,
+for the `Bash` tool (and the `PowerShell` tool on Windows) and the file-editing tools.
+Before Claude Code runs a shell command,
 the hook finds package installs in it, checks every package, and answers:
 
 | Outcome | Hook output |
@@ -30,7 +31,7 @@ The hook always exits 0 and speaks JSON on stdout, for example:
 {
   "hooks": {
     "PreToolUse": [
-      { "matcher": "Bash|Edit|Write|MultiEdit|NotebookEdit",
+      { "matcher": "Bash|PowerShell|Edit|Write|MultiEdit|NotebookEdit",
         "hooks": [ { "type": "command", "command": "customs hook claude-code", "timeout": 60 } ] }
     ]
   }
@@ -125,7 +126,7 @@ with the reason, so you confirm them:
   line into `.npmrc`, `pip.conf`, `.yarnrc.yml`, `bunfig.toml` or `uv.toml`. Values that
   point at the Customs server are fine.
 
-The matcher `Bash|Edit|Write|MultiEdit|NotebookEdit` in the settings above is what lets
+The matcher `Bash|PowerShell|Edit|Write|MultiEdit|NotebookEdit` in the settings above is what lets
 the hook see file edits. A command that builds itself at run time (`echo ... | base64 -d
 | sh`) is beyond any static check, so treat this as a tripwire for the obvious routes, not
 a sandbox; the proxy's own `PUT /api/policy` also refuses requests a browser page could

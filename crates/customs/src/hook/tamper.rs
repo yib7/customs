@@ -98,6 +98,22 @@ fn split_program(words: &[String]) -> (Vec<&str>, Option<(&str, &[String])>) {
     (assigned, None)
 }
 
+/// PowerShell environment assignments, `$env:NAME = value` or `$env:NAME=value`.
+fn powershell_env(words: &[String]) -> Option<(&str, &str)> {
+    let name = words.first()?;
+    let name = name
+        .get(..5)
+        .filter(|p| p.eq_ignore_ascii_case("$env:"))
+        .map(|_| &name[5..])?;
+    match name.split_once('=') {
+        Some((k, v)) => Some((k, v)),
+        None if words.get(1).is_some_and(|w| w == "=") => {
+            Some((name, words.get(2).map_or("", String::as_str)))
+        }
+        None => None,
+    }
+}
+
 fn is_assignment(w: &str) -> bool {
     w.split_once('=').is_some_and(|(k, _)| {
         !k.is_empty()
@@ -198,7 +214,8 @@ pub fn command_reasons(command: &str, server: &str) -> Vec<String> {
                     .into_iter()
                     .flatten(),
             )
-            .filter_map(|w| w.split_once('='));
+            .filter_map(|w| w.split_once('='))
+            .chain(powershell_env(words));
         for (k, v) in assigned {
             if REGISTRY_VARS.contains(&k.to_ascii_lowercase().as_str())
                 && !points_at_customs(v, server)

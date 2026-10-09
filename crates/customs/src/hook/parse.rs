@@ -845,11 +845,6 @@ pub fn powershell_text(s: &str) -> String {
     out
 }
 
-/// Parse a PowerShell command line (Claude Code's `PowerShell` tool).
-pub fn parse_powershell(cmd: &str, cwd: &Path) -> Vec<Install> {
-    parse_command(&powershell_text(cmd), cwd)
-}
-
 /// The command a runner starts (`poetry run CMD`, `conda run -n env CMD`): the runner's
 /// options (`with_value` take a value) and an optional `--` are skipped. One word holding
 /// spaces is a command line (`pixi run 'pip install x'`).

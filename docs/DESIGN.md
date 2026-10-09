@@ -1093,8 +1093,9 @@ both to proxied downloads and to `POST /api/check`.
 
 ## 9. Claude Code integration
 
-`customs hook claude-code` is a PreToolUse command hook for the `Bash` tool. It parses the
-command for package installs (`pip install`, `pip3 install`, `python -m pip install`,
+`customs hook claude-code` is a PreToolUse command hook for the `Bash` tool and, on
+Windows, the `PowerShell` tool, whose commands are read with backslashes as path separators
+and backticks as escapes. It parses the command for package installs (`pip install`, `pip3 install`, `python -m pip install`,
 `uv pip install`, `uv add`, `poetry add`, `pixi add --pypi`, `pipx install`, the PEP 723
 inline dependencies of a script run by `uv run` or `pipx run` or named by `pip install
 --requirements-from-script`, `npm install|i|add|install-test|it`, `pnpm add|install`, `yarn add`, `bun add`, `npx <pkg>`, `uvx <pkg>`, and the scaffolding

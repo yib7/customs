@@ -62,6 +62,11 @@ pub enum ToolCall {
         command: String,
         cwd: Option<PathBuf>,
     },
+    /// A command for PowerShell (Claude Code's `PowerShell` tool on Windows).
+    PowerShell {
+        command: String,
+        cwd: Option<PathBuf>,
+    },
     Edit {
         path: String,
         input: Value,
@@ -403,6 +408,12 @@ pub fn parse_input(input: &str, agent: Agent) -> anyhow::Result<Option<ToolCall>
                     command,
                     cwd: input.cwd.map(PathBuf::from),
                 }),
+                Some("PowerShell") => {
+                    str_at(&tool_input, "command").map(|command| ToolCall::PowerShell {
+                        command,
+                        cwd: input.cwd.map(PathBuf::from),
+                    })
+                }
                 Some("Edit" | "Write" | "MultiEdit" | "NotebookEdit") => {
                     let path = ["file_path", "notebook_path"]
                         .iter()
@@ -533,8 +544,12 @@ pub async fn evaluate_call(
                 .collect();
             return Ok((!reasons.is_empty()).then(|| tamper_decision(None, &reasons)));
         }
-        ToolCall::Shell { command, cwd } => (command.as_str(), cwd.clone()),
+        ToolCall::Shell { command, cwd } => (command.clone(), cwd.clone()),
+        // Read as the POSIX lexer understands it: backslashes separate paths, a backtick
+        // escapes (see `parse::powershell_text`).
+        ToolCall::PowerShell { command, cwd } => (parse::powershell_text(command), cwd.clone()),
     };
+    let command = command.as_str();
     let tampering = tamper::command_reasons(command, &opts.server);
     let cwd = cwd
         .or_else(|| std::env::current_dir().ok())
@@ -1120,6 +1135,46 @@ mod tests {
         let run = expand_projects(vec![project(true)]);
         assert_eq!(labels(&run), vec!["pypi:flask (3.0.0)"]);
         assert_eq!(run.locked, vec![false]);
+    }
+
+    #[tokio::test]
+    async fn powershell_tool_is_checked() {
+        let opts = HookOptions {
+            server: "http://127.0.0.1:1".into(),
+            fail_closed: false,
+            local: LocalOptions::default(),
+        };
+        let ps = |cmd: &str| {
+            json!({"hook_event_name": "PreToolUse", "tool_name": "PowerShell",
+                   "tool_input": {"command": cmd}, "cwd": "/tmp"})
+            .to_string()
+        };
+        assert!(matches!(
+            parse_input(&ps("pip install x"), Agent::ClaudeCode).unwrap(),
+            Some(ToolCall::PowerShell { ref command, .. }) if command == "pip install x"
+        ));
+        for cmd in [
+            "pip install git+https://github.com/a/b",
+            // Backslashes are path separators and a backtick continues the line.
+            r#"& "C:\Python312\python.exe" -m pip install git+https://github.com/a/b"#,
+            "pip install `\n  git+https://github.com/a/b",
+        ] {
+            let d = evaluate(&ps(cmd), &opts)
+                .await
+                .unwrap()
+                .unwrap_or_else(|| panic!("not flagged: {cmd}"));
+            assert_eq!(d.decision, "ask", "{cmd}");
+            assert!(d.reason.contains("not checked"), "{cmd}: {}", d.reason);
+        }
+        let d = evaluate(
+            &ps("$env:PIP_INDEX_URL = 'https://evil.example/simple'; Get-Date"),
+            &opts,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(d.reason.contains("PIP_INDEX_URL"), "{}", d.reason);
+        assert_eq!(evaluate(&ps("Get-ChildItem C:\\"), &opts).await.unwrap(), None);
     }
 
     #[tokio::test]
