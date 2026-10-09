@@ -405,7 +405,8 @@ cd python && uv sync --extra nn && source .venv/bin/activate
 git clone --depth 1 https://github.com/ossf/malicious-packages /tmp/ossf
 customs-ml ossf --repo /tmp/ossf
 customs-ml malicious && customs-ml benign && customs-ml names
-cargo build --release -p customs-scan       # the scanner the pipeline calls
+cargo build --release -p customs-scan -p customs   # the scanner, and the binary that scores MalRegistry
+python -m customs_ml.external fetch paths.txt     # optional: MalRegistry archive paths, one per line
 customs-ml train && customs-ml report       # trains, evaluates, red-teams, exports to models/
 ```
 

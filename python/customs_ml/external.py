@@ -84,10 +84,22 @@ def _fetch_one(rel: str, out_dir: Path) -> dict:
     return {**row, "error": err}
 
 
+def manifest_path() -> Path:
+    return config.sub("external", "malregistry") / "manifest.jsonl"
+
+
+def fetched() -> bool:
+    """Whether ``fetch`` has written MalRegistry archives (``evaluate`` needs them)."""
+    return manifest_path().exists()
+
+
 def fetch(listing: Path, workers: int = 16) -> Path:
-    out_dir = config.sub("external") / "malregistry"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    manifest = out_dir / "manifest.jsonl"
+    """Download, canonicalize and record every archive in ``listing`` (one path of the
+    MalRegistry repository per line, ``<name>/<version>/<file>``); resumable."""
+    from .pipeline import log
+
+    manifest = manifest_path()
+    out_dir = manifest.parent
     done = set()
     if manifest.exists():
         done = {json.loads(x)["source"] for x in manifest.read_text(encoding="utf-8").splitlines()}
@@ -96,7 +108,7 @@ def fetch(listing: Path, workers: int = 16) -> Path:
         for n, row in enumerate(ex.map(lambda r: _fetch_one(r, out_dir), todo), 1):
             mf.write(json.dumps(row) + "\n")
             if n % 1000 == 0:
-                print(f"{n}/{len(todo)}", flush=True)
+                log(f"{n}/{len(todo)}")
     return manifest
 
 
@@ -210,13 +222,21 @@ def _largest_cluster(g: pd.DataFrame) -> dict:
     }
 
 
-def evaluate() -> dict:
-    from .pipeline import load_table, work
+def evaluate(save_as: str | None = None) -> dict:
+    """Score MalRegistry with the exported models and write ``external_malregistry.json``.
 
-    out_dir = config.sub("external") / "malregistry"
-    ext = pd.read_json(out_dir / "manifest.jsonl", lines=True)
+    While the training table holds no MalRegistry rows, the result is also kept as
+    ``external_malregistry_before_training.json`` (the report's comparison point for the
+    ``malregistry`` stage). ``save_as`` keeps another copy as
+    ``external_malregistry_<save_as>.json``: ``baseline`` is the report's run before the
+    dev-half scanner changes.
+    """
+    from .pipeline import load_table, log, work
+
+    ext = pd.read_json(manifest_path(), lines=True)
     ext = ext[ext.get("path").notna()].drop_duplicates("sha256").reset_index(drop=True)
     df = load_table()
+    dev_in_training = "source" in df and bool((df.source == "malregistry").any())
     df = df[df.augmented.isna()] if "augmented" in df else df
     df = df[df.source.isna()] if "source" in df else df
     df = df.assign(
@@ -311,13 +331,20 @@ def evaluate() -> dict:
         "heldout_largest_cluster": _largest_cluster(nv[nv.half == "heldout"]),
         "name_seen_in_training_data": int(ext.name_seen.sum()),
         "near_duplicate_of_training": int(ext.near_dup.sum()),
+        "dev_half_in_training": dev_in_training,
         "thresholds": ens,
     }
     ext.drop(columns=["tokens"]).to_parquet(work() / "external_malregistry.parquet")
-    (work() / "external_malregistry.json").write_text(
-        json.dumps(summary, indent=1), encoding="utf-8"
-    )
-    print(json.dumps(summary, indent=1))
+    text = json.dumps(summary, indent=1)
+    names = ["external_malregistry.json"]
+    if not dev_in_training:
+        names.append("external_malregistry_before_training.json")
+    if save_as:
+        names.append(f"external_malregistry_{save_as}.json")
+    for name in names:
+        (work() / name).write_text(text, encoding="utf-8")
+    log(f"malregistry: wrote {', '.join(names)}")
+    log(text)
     return summary
 
 
@@ -412,7 +439,6 @@ def adapt(fraction: float = 1.0, seed: int = 0) -> dict:
     """
     import os
 
-    from . import nn as cnn
     from . import pipeline
 
     main = config.data_dir()
@@ -442,7 +468,7 @@ def adapt(fraction: float = 1.0, seed: int = 0) -> dict:
         df.to_parquet(pipeline.work() / "dataset.parquet")
         pipeline.log(f"adapt: +{int((rows.split_temporal == 'train').sum())} training rows")
         pipeline.stage_gbdt()
-        pipeline.stage_cnn(cfg=cnn.Config(max_len=768, epochs=10, patience=3))
+        pipeline.stage_cnn()
         pipeline.stage_ensemble()
         df = pipeline.load_table()
         ens = json.loads((pipeline.work() / "ensemble_temporal.json").read_text(encoding="utf-8"))
@@ -490,7 +516,7 @@ def adapt(fraction: float = 1.0, seed: int = 0) -> dict:
     }
     dest = main / "work" / f"external_adapt_{int(round(fraction * 100))}.json"
     dest.write_text(json.dumps(out, indent=1), encoding="utf-8")
-    print(json.dumps(out, indent=1))
+    pipeline.log(json.dumps(out, indent=1))
     return out
 
 
@@ -521,3 +547,27 @@ def stage_train_rows() -> None:
         json.dumps({"added": int(len(rows)), "dropped_near_heldout": dropped}),
         encoding="utf-8",
     )
+
+
+def main(argv: list[str] | None = None) -> None:
+    import argparse
+
+    ap = argparse.ArgumentParser(prog="python -m customs_ml.external", description=__doc__)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    p = sub.add_parser("fetch", help="download and canonicalize MalRegistry archives")
+    p.add_argument("listing", type=Path, help="one <name>/<version>/<file> path per line")
+    p = sub.add_parser("evaluate", help="score MalRegistry with the exported models")
+    p.add_argument("--save-as", help="also keep the result as external_malregistry_<NAME>.json")
+    p = sub.add_parser("adapt", help="experiment: train on the dev half in a copy of the data")
+    p.add_argument("fraction", type=float, nargs="?", default=1.0)
+    args = ap.parse_args(argv)
+    if args.cmd == "fetch":
+        fetch(args.listing)
+    elif args.cmd == "evaluate":
+        evaluate(args.save_as)
+    else:
+        adapt(args.fraction)
+
+
+if __name__ == "__main__":
+    main()

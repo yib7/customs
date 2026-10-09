@@ -1,6 +1,6 @@
 # Customs: evaluation report
 
-Generated 2026-10-08T10:30:34+00:00 by `python -m customs_ml.report` from the artifacts of `python -m customs_ml.pipeline`. Every number below is on held-out test data with thresholds frozen on the validation split, unless a row says otherwise.
+Generated 2026-10-08T10:30:34+00:00 by `python -m customs_ml.report` from the artifacts of `python -m customs_ml.pipeline all` and the tools each section names. Every number below is on held-out test data with thresholds frozen on the validation split, unless a row says otherwise.
 
 ## Data
 
@@ -194,7 +194,7 @@ The time-split test above uses one collector's malware. MalRegistry (the PyPI ma
 
 Novel malware from another collector is much harder than the time-split test set. Thresholds move between retrains, so the comparisons below are made at matched false positive rates on the benign test split.
 
-**Dev-half error analysis.** Most dev misses carried clear behavior indicators, but none on the install surface: the payload sat in a module that `setup.py` imports, or after a long run of blanks on one line, or in decoded data executed on the line that decodes it. The scanner now follows the package's own imports from setup-time files and has features for the other two. (Following imports from `__init__.py` as well was tried and made things worse: it pulls each benign library onto the install surface.)
+**Dev-half error analysis.** Most dev misses carried clear behavior indicators, but none on the install surface: the payload sat in a module that `setup.py` imports, or after a long run of blanks on one line, or in decoded data executed on the line that decodes it. The scanner now follows the package's own imports from setup-time files and has features for the other two. (Following imports from `__init__.py` as well lowers detection: it pulls each benign library onto the install surface.) The *before* columns are the same evaluation with the scanner as it was before these changes, kept with `python -m customs_ml.external evaluate --save-as baseline`.
 
 | FPR | Dev, before | Dev, after | Held-out, before | Held-out, after |
 |---:|---:|---:|---:|---:|
@@ -345,7 +345,7 @@ The tree model and the CNN retrained with 5 seeds (7, 11, 23, 42, 101) on identi
 
 ROC AUC and recall at warn barely move between seeds. Everything at 0.1% FPR is a tail statistic: the block threshold rests on two or three of about 2,000 benign validation packages, and the threshold-free row on four of 4,217 benign test packages, so both move several points between retrains: recall at block spans 8.4 points across these seeds, and a difference at the block rate between two runs needs to exceed that before it says anything about the model. Training is reproducible: the same seed in a fresh process (different string hash seed) produces bit-identical tree and CNN outputs, after the CNN vocabulary stopped breaking document-frequency ties by set order.
 
-Averaging the tree and CNN logits of several seeds before stacking (seed bagging), over every subset of the seeds of each size:
+Averaging the tree and CNN logits of several seeds before stacking (seed bagging, `python -m customs_ml.variance bag`), over every subset of the seeds of each size:
 
 | Seeds averaged | Subsets | Recall at block (min to max) | FPR at block (min to max) | Recall at warn | ROC AUC |
 |---:|---:|---:|---:|---:|---:|

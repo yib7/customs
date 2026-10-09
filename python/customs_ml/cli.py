@@ -143,24 +143,12 @@ def cmd_names(args) -> None:
 
 
 def cmd_train(args) -> None:
-    from . import nn as cnn
-    from . import pipeline, robustness
+    from . import external, pipeline
 
-    pipeline.main(["table", "cluster", "split", "gbdt", "ablation"])
-    pipeline.stage_cnn(cfg=cnn.Config(max_len=768, epochs=10, patience=3))
-    pipeline.main(["names", "ensemble", "evaluate", "export"])
-    robustness.run(n=800)
-    if args.augment:
-        work = pipeline.work()
-        for f in ("eval", "robustness", "ensemble", "ablation"):
-            src = work / f"{f}_{pipeline.SCHEME}.json"
-            (work / f"baseline_{src.name}").write_text(
-                src.read_text(encoding="utf-8"), encoding="utf-8"
-            )
-        pipeline.main(["augment", "gbdt", "ablation"])
-        pipeline.stage_cnn(cfg=cnn.Config(max_len=768, epochs=10, patience=3))
-        pipeline.main(["ensemble", "evaluate", "export"])
-        robustness.run(n=800)
+    malregistry = args.malregistry and external.fetched()
+    if args.malregistry and not malregistry:
+        print("MalRegistry archives not fetched: training without the malregistry stages")
+    pipeline.main(pipeline.plan(augment=args.augment, malregistry=malregistry))
 
 
 def cmd_report(args) -> None:
@@ -190,6 +178,7 @@ def main(argv: list[str] | None = None) -> None:
     sub.add_parser("names", help="build name-model data").set_defaults(fn=cmd_names)
     p = sub.add_parser("train", help="run every training and evaluation stage")
     p.add_argument("--no-augment", dest="augment", action="store_false")
+    p.add_argument("--no-malregistry", dest="malregistry", action="store_false")
     p.set_defaults(fn=cmd_train)
     sub.add_parser("report", help="write docs/EVALUATION.md").set_defaults(fn=cmd_report)
     args = ap.parse_args(argv)

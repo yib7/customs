@@ -10,7 +10,10 @@ Nothing here writes models or touches ``dataset.parquet``: results go to
 models keep the pipeline's fixed seed.
 
     python -m customs_ml.variance 7 11 23 42 101
+    python -m customs_ml.variance bag 7 11 23 42 101
     python -m customs_ml.variance compare old=path/to/models new=path/to/models
+
+``bag`` averages the saved logits of every subset of those seeds (run the seeds first).
 
 ``compare`` scores exported model directories on the current features, which separates
 what a scanner change did to the test data from what retraining did to the model.
@@ -18,6 +21,8 @@ what a scanner change did to the test data from what retraining did to the model
 
 from __future__ import annotations
 
+import dataclasses
+import itertools
 import json
 import sys
 from pathlib import Path
@@ -28,6 +33,7 @@ import pandas as pd
 from . import gbdt, metrics, splits
 from . import nn as cnn
 from .pipeline import (
+    CNN_CONFIG,
     FPR_BLOCK,
     FPR_WARN,
     SCHEME,
@@ -83,7 +89,7 @@ def run_seed(df: pd.DataFrame, seed: int, scheme: str = SCHEME) -> dict:
     cols = feature_cols(df)
     best, *_ = _fit_gbdt(df, split, cols, seed=seed)
     g = gbdt.predict_raw(best, df[cols].to_numpy(dtype=float))
-    cfg = cnn.Config(seed=seed, max_len=768, epochs=10, patience=3)
+    cfg = dataclasses.replace(CNN_CONFIG, seed=seed)
     _, _, c, _, _ = _fit_cnn(df, split, cfg)
     np.savez_compressed(work() / f"seed_logits_{seed}.npz", gbdt=g, cnn=c)
     d = df.copy(deep=False)
@@ -109,6 +115,19 @@ def bagged(df: pd.DataFrame, seeds: list[int], scheme: str = SCHEME) -> dict:
     ens, risk = fit_ensemble(d, scheme)
     thr = {"warn": ens["thresholds"]["warn"], "block": ens["thresholds"]["block"]}
     return {"seeds": seeds, "test": test_metrics(d, risk, thr, scheme)}
+
+
+def bag(seeds: tuple[int, ...] = DEFAULT_SEEDS, scheme: str = SCHEME) -> dict:
+    """Seed bagging over every subset of ``seeds`` of each size, from the logits ``run``
+    saved; writes ``work/seed_bagging.json`` (the report's bagging table)."""
+    df = load_table()
+    out = {}
+    for k in range(1, len(seeds) + 1):
+        runs = [bagged(df, list(c), scheme) for c in itertools.combinations(seeds, k)]
+        out[str(k)] = {"n": len(runs), "spread": summarize_runs(runs)}
+        log(f"bagging {k} seeds: {len(runs)} subsets")
+    (work() / "seed_bagging.json").write_text(json.dumps(out, indent=1), encoding="utf-8")
+    return out
 
 
 def summarize_runs(runs: list[dict]) -> dict:
@@ -172,6 +191,9 @@ def compare(models: dict[str, Path], scheme: str = SCHEME) -> dict:
 def main(argv: list[str]) -> None:
     if argv[:1] == ["compare"]:
         compare({a.split("=", 1)[0]: Path(a.split("=", 1)[1]) for a in argv[1:]})
+        return
+    if argv[:1] == ["bag"]:
+        bag(tuple(int(a) for a in argv[1:]) or DEFAULT_SEEDS)
         return
     seeds = tuple(int(a) for a in argv) or DEFAULT_SEEDS
     res = run(seeds)

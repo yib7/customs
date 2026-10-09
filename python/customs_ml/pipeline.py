@@ -4,7 +4,7 @@ Each stage caches its output under ``$CUSTOMS_DATA/work`` so stages can be re-ru
 
     python -m customs_ml.pipeline table cluster split gbdt cnn names ensemble evaluate export
 
-``all`` runs every stage in order.
+``all`` runs the stages in the order the shipped models were built with (``plan``).
 """
 
 from __future__ import annotations
@@ -183,10 +183,14 @@ def _fit_cnn(df: pd.DataFrame, split: pd.Series, cfg: cnn.Config):
     return model, cnn.export(model, vocab, cfg), cnn.predict_logits(model, X), hist, docs
 
 
+# The shipped CNN reads the first 768 install-surface tokens (docs/DESIGN.md, section 10).
+CNN_CONFIG = cnn.Config(max_len=768, epochs=10, patience=3)
+
+
 def stage_cnn(scheme: str = SCHEME, cfg: cnn.Config | None = None) -> None:
     df = load_table()
     split = df[f"split_{scheme}"]
-    cfg = cfg or cnn.Config()
+    cfg = cfg or CNN_CONFIG
     _, exported, logits, hist, _ = _fit_cnn(df, split, cfg)
     cnn.save(exported, work() / f"code_nn_{scheme}.json")
     (work() / f"cnn_history_{scheme}.json").write_text(json.dumps(hist), encoding="utf-8")
@@ -412,30 +416,112 @@ def stage_ensemble(scheme: str = SCHEME) -> None:
     df.to_parquet(work() / "dataset.parquet")
 
 
-def main(argv: list[str]) -> None:
-    stages = {
+BASELINE_ARTIFACTS = ("eval", "robustness", "ensemble", "ablation")
+
+
+def stage_baseline(scheme: str = SCHEME) -> None:
+    """Keep the current results as ``baseline_*`` (the report's *before* columns)."""
+    for f in BASELINE_ARTIFACTS:
+        src = work() / f"{f}_{scheme}.json"
+        (work() / f"baseline_{src.name}").write_text(
+            src.read_text(encoding="utf-8"), encoding="utf-8"
+        )
+
+
+def _stages() -> dict:
+    from . import augment, evaluate, external, robustness
+
+    return {
         "table": stage_table,
         "refresh": stage_refresh,
         "cluster": stage_cluster,
         "split": stage_split,
         "gbdt": stage_gbdt,
+        "ablation": stage_ablation,
         "cnn": stage_cnn,
         "names": stage_names,
         "ensemble": stage_ensemble,
-        "ablation": stage_ablation,
+        "evaluate": evaluate.run,
+        "export": evaluate.export,
+        "robustness": lambda: robustness.run(n=800),
+        "baseline": stage_baseline,
+        "augment": augment.stage_augment,
+        "external": external.evaluate,
+        "malregistry": external.stage_train_rows,
     }
-    from . import augment, external
 
-    stages["augment"] = augment.stage_augment
-    stages["malregistry"] = external.stage_train_rows
-    try:
-        from . import evaluate
 
-        stages["evaluate"] = evaluate.run
-        stages["export"] = evaluate.export
-    except ImportError:
-        pass
-    todo = list(stages) if argv == ["all"] else argv
+STAGES = (
+    "table",
+    "refresh",
+    "cluster",
+    "split",
+    "gbdt",
+    "ablation",
+    "cnn",
+    "names",
+    "ensemble",
+    "evaluate",
+    "export",
+    "robustness",
+    "baseline",
+    "augment",
+    "external",
+    "malregistry",
+)
+FIRST_PASS = [
+    "table",
+    "cluster",
+    "split",
+    "gbdt",
+    "ablation",
+    "cnn",
+    "names",
+    "ensemble",
+    "evaluate",
+    "export",
+    "robustness",
+]
+RETRAIN = ["gbdt", "ablation", "cnn", "ensemble", "evaluate", "export", "robustness"]
+
+
+def plan(augment: bool = True, malregistry: bool = True) -> list[str]:
+    """The stage order the shipped models were built with.
+
+    A first pass on the primary corpus; its results are kept as ``baseline_*``; the
+    augmentation stage adds disguised copies of training malware and every model is
+    retrained; ``external`` scores MalRegistry with the exported models (needs the
+    archives from ``python -m customs_ml.external fetch`` and a release build of the
+    binary); ``malregistry`` adds the dev half to training, every model is retrained, and
+    ``external`` scores the held-out half again with the final models. ``refresh`` is not
+    part of it (it is for rescanning after a scanner change).
+    """
+    out = list(FIRST_PASS)
+    if augment:
+        out += ["baseline", "augment", *RETRAIN]
+    if malregistry:
+        out += ["external", "malregistry", *RETRAIN, "external"]
+    return out
+
+
+def main(argv: list[str]) -> None:
+    import argparse
+
+    ap = argparse.ArgumentParser(prog="python -m customs_ml.pipeline", description=__doc__)
+    ap.add_argument("stages", nargs="+", choices=[*STAGES, "all"], metavar="STAGE")
+    args = ap.parse_args(argv)
+    if args.stages == ["all"]:
+        from . import external
+
+        fetched = external.fetched()
+        if not fetched:
+            log("MalRegistry archives not fetched: running without the external stages")
+        todo = plan(malregistry=fetched)
+    elif "all" in args.stages:
+        ap.error("`all` runs every stage and takes no other stage names")
+    else:
+        todo = args.stages
+    stages = _stages()
     for s in todo:
         log("== stage", s)
         stages[s]()

@@ -1372,6 +1372,13 @@ the data directory gets the dev half (all of its clusters, or a random fraction)
 training malware, every model is retrained, and the held-out half is scored code-only.
 The pipeline stage `malregistry` does the same for the shipped models, after `augment`
 (augmentation draws only from the primary corpus). The held-out half never enters training.
+`python -m customs_ml.pipeline all` and `customs-ml train` run the stages in the order the
+shipped models were built with (`pipeline.plan`): a first pass on the primary corpus
+(kept as `baseline_*`), `augment` and a retrain, then, once `python -m customs_ml.external
+fetch` has downloaded MalRegistry, `external` (scores it with the exported models and keeps
+that result as `external_malregistry_before_training.json`), `malregistry`, a retrain and
+`external` again. `python -m customs_ml.external evaluate --save-as baseline` keeps a run
+for a later before-and-after comparison, as was done before the scanner changes above.
 Novelty and halves are decided against training malware only, so before dev-half rows
 join training they are clustered again against all corpus malware (`place_rows`): a row
 takes the corpus cluster id of the malware it near-duplicates, and a row whose cluster
