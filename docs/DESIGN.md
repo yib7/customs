@@ -882,6 +882,13 @@ scan size limit. An upgrade that changes the scanner therefore rescans instead o
 summaries that lack its new findings, and rows of an earlier scanner are dropped at startup.
 Concurrent requests for the same artifact URL share one download and one scan.
 
+The database (`<data-dir>/customs.db`) records its schema version in SQLite's
+`user_version`; a database written by a newer customs, or a file that is not a customs
+database, stops startup with an error naming the file and saying to move it aside. Each
+verdict and the event that produced it are written in one transaction. Verdicts and events
+are the audit trail behind the dashboard and are never pruned, so the database grows with
+use; only scan-cache rows of an earlier scanner are dropped.
+
 ### 7.1 Notifications
 
 `customs serve --notify-url URL` (or `CUSTOMS_NOTIFY_URL`) posts verdicts at or above

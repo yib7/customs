@@ -769,21 +769,21 @@ impl Engine {
         kind: EventKind,
         client: Option<String>,
     ) -> Result<Verdict, EngineError> {
-        let id = self.store.insert_verdict(&v).map_err(internal)?;
-        v.id = Some(id);
-        let event = self
+        let new_event = NewEvent {
+            ecosystem: v.ecosystem,
+            name: v.name.clone(),
+            version: v.version.clone(),
+            client,
+            kind,
+            decision: Some(v.decision),
+            risk: v.risk,
+            verdict_id: None,
+        };
+        let (id, event) = self
             .store
-            .insert_event(NewEvent {
-                ecosystem: v.ecosystem,
-                name: v.name.clone(),
-                version: v.version.clone(),
-                client,
-                kind,
-                decision: Some(v.decision),
-                risk: v.risk,
-                verdict_id: Some(id),
-            })
+            .insert_verdict_with_event(&v, new_event)
             .map_err(internal)?;
+        v.id = Some(id);
         self.metrics
             .verdict(v.decision.as_str(), ecosystem_str(v.ecosystem));
         self.metrics.event(kind.as_str());
