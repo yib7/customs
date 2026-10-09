@@ -32,7 +32,8 @@ fn wheel_pth(path: &Path) -> Option<Vec<String>> {
     let zip = zip::ZipArchive::new(BufReader::new(File::open(path).ok()?)).ok()?;
     Some(
         zip.file_names()
-            .filter_map(normalize_path)
+            .filter_map(Result::ok)
+            .filter_map(|n| normalize_path(&n))
             .filter(|n| {
                 let n = n
                     .split_once(".data/purelib/")

@@ -468,7 +468,12 @@ fn read_zip(
     }
     for i in 0..zip.len() {
         admit_entry(budget, opts)?;
-        let name = zip.name_for_index(i).and_then(normalize_path);
+        // zip decodes names as UTF-8 or else CP437, which maps every byte, so the error
+        // case does not occur in practice.
+        let name = zip
+            .name_for_index(i)
+            .and_then(Result::ok)
+            .and_then(|n| normalize_path(&n));
         let mut f = match zip.by_index(i) {
             Ok(f) => f,
             Err(e) => {
