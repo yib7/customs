@@ -1398,14 +1398,14 @@ a pull request before anything is installed. PATHS are lockfiles or directories
 
 | File | Pins taken from |
 |---|---|
-| `requirements*.txt` | `name==version` / `===` lines; `-r` includes relative to the file; markers, extras, `--hash` and `\` continuations handled |
+| `requirements*.txt` | `name==version` / `===` lines; `-r` includes relative to the file; markers, extras, `--hash` and `\` continuations handled; UTF-16 with a byte order mark is read; a remote `-r` URL is an error. An index other than PyPI (`-i`, `--index-url`, `--extra-index-url`, `-f`/`--find-links`, `--no-index`) anywhere in the include tree lists every pin as not checked, since pip may take any of them from that index |
 | `poetry.lock`, `uv.lock` | `[[package]]` `name` and `version` |
 | `Pipfile.lock` | `default` and `develop`, `"version": "==x"` |
 | `package-lock.json`, `npm-shrinkwrap.json` | v2/v3 `packages` (node_modules paths, nested and scoped, `name` for aliases); v1 `dependencies` tree |
 | `pnpm-lock.yaml` | `packages:` keys (v5 `/a/1.0.0`, v6 `/a@1.0.0(peer@1)`, v9 `a@1.0.0`), read line by line |
-| `yarn.lock` | classic and berry entry headers with `version` (berry `resolution` names the installed package) |
+| `yarn.lock` | classic: entry headers with `version` and `resolved`; berry: `resolution` names the package and version Yarn fetches (a different `version` field is a mismatch) and its `__archiveUrl` is checked like `resolved` |
 | `bun.lock` | `packages` entries: `name@version` first (the real name for aliases), then the tarball URL, empty for the default registry; trailing commas allowed. `bun.lockb` is binary and refused with a hint to write `bun.lock` |
-| `deno.lock` | v4/v5 `npm` map (v3: `packages.npm`), keys `name@version` with `_peer@version` suffixes, `tarball` when the registry is not the default; `jsr` packages and `remote` modules listed as not checked |
+| `deno.lock` | v4/v5 `npm` map (v3: `packages.npm`, v2: `npm.packages`; other versions are an error), keys `name@version` with `_peer@version` suffixes, `tarball` when the registry is not the default; `jsr` packages and `remote` modules listed as not checked |
 | MCP server configurations | `mcpServers` in `.mcp.json`, `.cursor/mcp.json`, `.gemini/settings.json`, `claude_desktop_config.json`, `mcp_config.json` (Windsurf) and `~/.claude.json` (also per project); `servers` in `.vscode/mcp.json`; `[mcp_servers.*]` in `.codex/config.toml`. `command` and `args` go through the hook's command parser, so `npx`, `bunx`, `pnpm dlx`, `uvx` and `pipx run` name their packages; `docker` servers are listed as not checked, and so are `uv run --directory` projects (audit that project's lockfile) and any server whose launcher Customs does not recognise, so no server goes unlisted. Only a program on disk (a path, or `node`, `python`, `deno`, `bun` and similar running a local file or `python -m`) is skipped silently |
 
 A directory search also looks in `.cursor`, `.vscode`, `.gemini` and `.codex` without
