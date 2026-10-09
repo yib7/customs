@@ -1202,9 +1202,14 @@ mod tests {
     use customs_model::{Reason, Scores, Thresholds};
 
     fn server() -> Arc<McpServer> {
+        // A port that was free a moment ago: no server, and no network either. A fixed
+        // port (the discard port 9) breaks the tests whenever something listens there.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .and_then(|l| l.local_addr())
+            .map(|a| a.port())
+            .unwrap();
         McpServer::new(McpOptions {
-            // Nothing listens on the discard port: no server, and no network either.
-            server: "http://127.0.0.1:9".into(),
+            server: format!("http://127.0.0.1:{port}"),
             local: LocalOptions::default(),
         })
     }
