@@ -1451,8 +1451,11 @@ the registry lacks is reported as unavailable instead of resolving to another on
 verdict cache makes repeated audits cheap.
 
 Exit codes: 1 when a package meets `--fail-on` (`block` by default, `warn`, or `never`; an
-unavailable version counts as warn and a mismatch as block), otherwise 2 when a check failed (network, server) or
-on usage and parse errors, otherwise 0. `--format text` prints a summary line and a table
+unavailable version counts as warn and a mismatch as block), otherwise 2 when a check failed (network, server), a file
+could not be read, or on usage errors, otherwise 0. A file that cannot be parsed does not
+stop the audit: the others are still checked and the report lists it under "Could not
+read" (JSON `errors`, SARIF `toolExecutionNotifications`). MCP configurations are read as
+JSON with comments and trailing commas, as VS Code and Gemini CLI write them. `--format text` prints a summary line and a table
 of non-allowed packages; `json` prints every result with its full verdict; `sarif` prints
 SARIF 2.1.0 with one run (driver `Customs`), rules `customs/model-block`,
 `customs/model-warn`, `customs/unavailable`, `customs/lockfile-mismatch` and one per policy rule that appears

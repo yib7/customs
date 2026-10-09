@@ -371,8 +371,10 @@ pub fn parse_lockfile(path: &Path) -> Result<Parsed, String> {
     Ok(out)
 }
 
-/// Parse every lockfile and merge the pins; `Err` lists every file that failed.
-pub fn collect(files: &[PathBuf]) -> Result<Parsed, Vec<String>> {
+/// Parse every lockfile and merge the pins, with an error for each file that could not be
+/// read. A broken file does not hide the others; the report lists it and the audit counts
+/// as incomplete.
+pub fn collect(files: &[PathBuf]) -> (Parsed, Vec<String>) {
     let mut all = Parsed::default();
     let mut errors = Vec::new();
     for f in files {
@@ -385,11 +387,8 @@ pub fn collect(files: &[PathBuf]) -> Result<Parsed, Vec<String>> {
             Err(e) => errors.push(e),
         }
     }
-    if !errors.is_empty() {
-        return Err(errors);
-    }
     all.dedup();
-    Ok(all)
+    (all, errors)
 }
 
 // ------------------------------------------------------------------ parser helpers
@@ -540,6 +539,55 @@ impl KeyLines<'_> {
             }
         }
     }
+}
+
+/// JSON with comments, as VS Code and Gemini CLI read their settings: `//` and `/* */`
+/// comments outside strings and trailing commas are blanked out, so serde_json accepts the
+/// text. Line numbers are unchanged.
+fn jsonc(text: &str) -> String {
+    let b = text.as_bytes();
+    let mut out = b.to_vec();
+    let mut in_str = false;
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        if in_str {
+            match c {
+                b'\\' => i += 1,
+                b'"' => in_str = false,
+                _ => {}
+            }
+            i += 1;
+            continue;
+        }
+        let end = match (c, b.get(i + 1)) {
+            (b'"', _) => {
+                in_str = true;
+                i += 1;
+                continue;
+            }
+            (b'/', Some(b'/')) => b[i..]
+                .iter()
+                .position(|&c| c == b'\n')
+                .map_or(b.len(), |n| i + n),
+            (b'/', Some(b'*')) => b[i + 2..]
+                .windows(2)
+                .position(|w| w == b"*/")
+                .map_or(b.len(), |n| i + 2 + n + 2),
+            _ => {
+                i += 1;
+                continue;
+            }
+        };
+        // Whole characters are replaced, so the text stays UTF-8.
+        for o in &mut out[i..end] {
+            if *o != b'\n' {
+                *o = b' ';
+            }
+        }
+        i = end;
+    }
+    bun::strip_trailing_commas(&String::from_utf8(out).expect("still UTF-8"))
 }
 
 fn key_line(lines: &HashMap<Vec<String>, usize>, path: &[&str]) -> usize {
@@ -796,6 +844,8 @@ pub struct Report {
     pub files: Vec<PathBuf>,
     pub findings: Vec<Finding>,
     pub skipped: Vec<Skipped>,
+    /// Files that could not be read, one message each (naming the file).
+    pub errors: Vec<String>,
     /// Where verdicts came from (`server ...`, `in-process`).
     pub via: String,
 }
@@ -808,7 +858,8 @@ impl Report {
             .count()
     }
 
-    /// 1 when a finding meets `fail_on`, else 2 when any check failed, else 0.
+    /// 1 when a finding meets `fail_on`, else 2 when any check failed or a file could not
+    /// be read, else 0.
     pub fn exit_code(&self, fail_on: FailOn) -> i32 {
         let threshold = match fail_on {
             FailOn::Warn => Some(Decision::Warn),
@@ -824,11 +875,7 @@ impl Report {
                 return 1;
             }
         }
-        if self
-            .findings
-            .iter()
-            .any(|f| matches!(f.outcome, Outcome::Failed(_)))
-        {
+        if self.incomplete() > 0 {
             return 2;
         }
         0
@@ -889,6 +936,11 @@ impl Report {
     pub fn failed(&self) -> usize {
         self.count("failed")
     }
+
+    /// Failed checks plus unreadable files: what the result does not cover.
+    pub fn incomplete(&self) -> usize {
+        self.failed() + self.errors.len()
+    }
 }
 
 pub struct AuditOptions {
@@ -916,15 +968,10 @@ pub async fn run(opts: AuditOptions) -> i32 {
             return 2;
         }
     };
-    let parsed = match collect(&files) {
-        Ok(p) => p,
-        Err(errors) => {
-            for e in errors {
-                eprintln!("customs audit: {e}");
-            }
-            return 2;
-        }
-    };
+    let (parsed, errors) = collect(&files);
+    for e in &errors {
+        eprintln!("customs audit: {e}");
+    }
     let mismatched = mismatch_findings(parsed.mismatches);
     let (mut findings, via) = if parsed.deps.is_empty() {
         (Vec::new(), "nothing to check".to_string())
@@ -954,6 +1001,7 @@ pub async fn run(opts: AuditOptions) -> i32 {
         files,
         findings,
         skipped: parsed.skipped,
+        errors,
         via,
     };
     for f in &report.findings {
@@ -1079,7 +1127,17 @@ pub fn render_text(r: &Report, cwd: &Path) -> String {
     if !r.skipped.is_empty() {
         s.push_str(&format!(", {} not checked", r.skipped.len()));
     }
+    if !r.errors.is_empty() {
+        let n = r.errors.len();
+        s.push_str(&format!(", {n} unreadable file{}", plural(n)));
+    }
     s.push('\n');
+    if !r.errors.is_empty() {
+        s.push_str("\nCould not read (the audit is incomplete):\n");
+        for e in &r.errors {
+            s.push_str(&format!("  {e}\n"));
+        }
+    }
 
     let rank = |f: &Finding| match f.status() {
         "mismatch" | "block" => 0,
@@ -1222,7 +1280,9 @@ pub fn render_json(r: &Report, cwd: &Path) -> Value {
             "unavailable": r.count("unavailable"),
             "failed": r.count("failed"),
             "not_checked": r.skipped.len(),
+            "unreadable": r.errors.len(),
         },
+        "errors": r.errors,
         "results": results,
         "not_checked": skipped,
     })
@@ -1357,7 +1417,8 @@ pub(crate) mod tests {
         let twice = find_lockfiles(&[d.to_path_buf(), d.join("requirements.txt")], false).unwrap();
         assert_eq!(twice.len(), 2);
 
-        let parsed = collect(&flat).unwrap();
+        let (parsed, errors) = collect(&flat);
+        assert!(errors.is_empty(), "{errors:?}");
         assert_eq!(parsed.deps.len(), 2);
         assert!(parsed.deps[0].file.ends_with("requirements-dev.txt"));
         assert_eq!(parsed.deps[0].line, 1);
@@ -1395,12 +1456,84 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn commented_vscode_mcp_json_is_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join(".vscode/mcp.json");
+        std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+        // VS Code and Gemini CLI read these files as JSON with comments.
+        std::fs::write(
+            &f,
+            r#"{
+  // Servers for this workspace.
+  "servers": {
+    /* the docs server */
+    "docs": {
+      "command": "npx",
+      "args": ["-y", "docs-mcp@1.2.3", "--url=http://x//y"], // pinned
+    },
+  },
+}
+"#,
+        )
+        .unwrap();
+        let p = parse_lockfile(&f).unwrap();
+        assert_eq!(pins(&p), vec![("docs-mcp".into(), "1.2.3".into(), 5)]);
+    }
+
+    #[test]
     fn parse_errors_name_the_file() {
         let dir = tempfile::tempdir().unwrap();
         let f = dir.path().join("package-lock.json");
         std::fs::write(&f, "{ not json").unwrap();
-        let e = collect(&[f]).unwrap_err();
+        let (_, e) = collect(&[f]);
         assert!(e[0].contains("package-lock.json"), "{e:?}");
+        // TOML errors keep their position.
+        let f = dir.path().join(".codex/config.toml");
+        std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+        std::fs::write(&f, "[mcp_servers.x]\ncommand = \n").unwrap();
+        let (_, e) = collect(&[f]);
+        assert!(e[0].contains("line 2"), "{e:?}");
+    }
+
+    #[test]
+    fn a_broken_file_does_not_hide_the_others() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        std::fs::write(d.join("requirements.txt"), "flask>=2\na==1.0\n").unwrap();
+        std::fs::create_dir_all(d.join(".gemini")).unwrap();
+        std::fs::write(d.join(".gemini/settings.json"), "{ \"mcpServers\": ").unwrap();
+        let files = find_lockfiles(&[d.to_path_buf()], false).unwrap();
+        let (parsed, errors) = collect(&files);
+        assert_eq!(pins(&parsed), vec![("a".into(), "1.0".into(), 2)]);
+        assert_eq!(parsed.skipped.len(), 1);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("settings.json"), "{errors:?}");
+        let report = Report {
+            files,
+            findings: vec![],
+            skipped: parsed.skipped,
+            errors,
+            via: "test".into(),
+        };
+        // An unreadable file leaves the audit incomplete, like a failed check.
+        assert_eq!(report.exit_code(FailOn::Never), 2);
+        let t = render_text(&report, d);
+        assert!(
+            t.lines().next().unwrap().ends_with("1 unreadable file"),
+            "{t}"
+        );
+        assert!(t.contains("Could not read"), "{t}");
+        assert!(t.contains(".gemini/settings.json"), "{t}");
+        let j = render_json(&report, d);
+        assert_eq!(j["summary"]["unreadable"], 1);
+        assert!(j["errors"][0].as_str().unwrap().contains("settings.json"));
+        let s = sarif::to_sarif(&report, d);
+        let inv = &s["runs"][0]["invocations"][0];
+        assert_eq!(inv["executionSuccessful"], false);
+        assert!(inv["toolExecutionNotifications"][0]["message"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("settings.json"));
     }
 
     #[test]
@@ -1618,6 +1751,7 @@ pub(crate) mod tests {
                 finding("lodash", 2, Outcome::Mismatch("lockfile installs x".into())),
             ],
             skipped: vec![],
+            errors: vec![],
             via: "test".into(),
         };
         assert_eq!(report.exit_code(FailOn::Block), 1);
@@ -1642,6 +1776,7 @@ pub(crate) mod tests {
             files: vec![],
             findings,
             skipped: vec![],
+            errors: vec![],
             via: "test".into(),
         };
         let block = finding("x", 1, checked(verdict("x", Decision::Block, None)));
@@ -1680,6 +1815,7 @@ pub(crate) mod tests {
                 kind: SkipKind::Unpinned,
                 reason: "not pinned".into(),
             }],
+            errors: vec![],
             via: "in-process".into(),
         };
         let t = render_text(&report, cwd);

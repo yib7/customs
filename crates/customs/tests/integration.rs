@@ -2821,3 +2821,29 @@ async fn a_network_facing_server_without_a_token_refuses_policy_changes() {
     assert_eq!(r.status(), 200);
     h.stop().await;
 }
+
+// ---- Phase 3A: AUDIT ----
+
+#[test]
+fn cli_audit_lists_what_it_can_read_past_a_broken_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    // Nothing pinned, so nothing is checked and no registry is needed.
+    std::fs::write(d.join("requirements.txt"), "flask>=2\n").unwrap();
+    std::fs::create_dir_all(d.join(".gemini")).unwrap();
+    std::fs::write(d.join(".gemini/settings.json"), "{ \"mcpServers\": ").unwrap();
+    std::fs::create_dir_all(d.join(".vscode")).unwrap();
+    std::fs::write(
+        d.join(".vscode/mcp.json"),
+        "{\n  // comments are allowed here\n  \"servers\": {\"x\": {\"command\": \"weird-launcher\"},},\n}\n",
+    )
+    .unwrap();
+    let (stdout, err, code) = run_audit(d, &[]);
+    // An unreadable file leaves the audit incomplete: exit 2, but the rest is reported.
+    assert_eq!(code, 2, "{stdout}\n{err}");
+    assert!(err.contains(".gemini"), "{err}");
+    assert!(stdout.contains("1 unreadable file"), "{stdout}");
+    assert!(stdout.contains("Could not read"), "{stdout}");
+    assert!(stdout.contains("requirements.txt:1  flask>=2"), "{stdout}");
+    assert!(stdout.contains("launcher not recognised"), "{stdout}");
+}

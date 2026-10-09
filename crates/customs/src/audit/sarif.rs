@@ -335,15 +335,21 @@ pub fn to_sarif(report: &Report, cwd: &Path) -> Value {
         })
         .collect();
     let failures: Vec<Value> = report
-        .findings
+        .errors
         .iter()
-        .filter_map(|f| match &f.outcome {
+        .map(|e| {
+            json!({
+                "level": "error",
+                "message": { "text": format!("could not read {e}") },
+            })
+        })
+        .chain(report.findings.iter().filter_map(|f| match &f.outcome {
             Outcome::Failed(m) => Some(json!({
                 "level": "error",
                 "message": { "text": format!("checking {} failed: {m}", f.dep.label()) },
             })),
             _ => None,
-        })
+        }))
         .collect();
     json!({
         "$schema": SCHEMA,
@@ -401,6 +407,7 @@ mod tests {
                 finding("swap", 9, Outcome::Mismatch("lockfile installs x".into())),
             ],
             skipped: vec![],
+            errors: vec![],
             via: "test".into(),
         };
         let s = to_sarif(&report, Path::new("/work"));

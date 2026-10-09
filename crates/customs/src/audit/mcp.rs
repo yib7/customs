@@ -15,7 +15,7 @@ use std::path::Path;
 use customs_scan::Ecosystem;
 use serde_json::Value;
 
-use super::{json_key_lines, key_line, Parsed, SkipKind};
+use super::{json_key_lines, jsonc, key_line, Parsed, SkipKind};
 use crate::hook::parse::{looks_like_path, looks_like_url, parse_command, Target};
 
 /// File names read as MCP configurations. `settings.json` and `config.toml` count only
@@ -111,7 +111,8 @@ fn is_exact(eco: Ecosystem, v: &str) -> bool {
 pub fn parse(text: &str, path: &Path, out: &mut Parsed) -> Result<(), String> {
     let is_toml = path.extension().is_some_and(|e| e == "toml");
     let servers = if is_toml {
-        let doc: toml::Value = toml::from_str(text).map_err(|e| e.message().to_string())?;
+        let doc: toml::Value =
+            toml::from_str(text).map_err(|e| e.to_string().trim_end().to_string())?;
         let v = serde_json::to_value(doc).map_err(|e| e.to_string())?;
         let header_line = |p: &[&str]| {
             let name = p.last().copied().unwrap_or("");
@@ -124,8 +125,10 @@ pub fn parse(text: &str, path: &Path, out: &mut Parsed) -> Result<(), String> {
         };
         servers_in(&v["mcp_servers"], &["mcp_servers"], &header_line)
     } else {
-        let v: Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
-        let lines = json_key_lines(text);
+        // `.vscode/mcp.json` and `.gemini/settings.json` are JSON with comments.
+        let text = jsonc(text);
+        let v: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+        let lines = json_key_lines(&text);
         let at = |p: &[&str]| key_line(&lines, p);
         let mut all = servers_in(&v["mcpServers"], &["mcpServers"], &at);
         // VS Code.

@@ -638,10 +638,7 @@ impl McpServer {
             Ok(f) => f,
             Err(e) => return Ok(ToolOutput::error(e)),
         };
-        let parsed = match audit::collect(&files) {
-            Ok(p) => p,
-            Err(errors) => return Ok(ToolOutput::error(errors.join("\n"))),
-        };
+        let (parsed, errors) = audit::collect(&files);
         let mut findings = audit::mismatch_findings(parsed.mismatches);
         let via = if parsed.deps.is_empty() {
             "nothing to check".to_string()
@@ -657,6 +654,7 @@ impl McpServer {
             files,
             findings,
             skipped: parsed.skipped,
+            errors,
             via,
         };
         let cwd = std::env::current_dir().unwrap_or_default();
@@ -727,24 +725,38 @@ impl McpServer {
 fn audit_output(report: &audit::Report, cwd: &Path) -> ToolOutput {
     // A package Customs failed to check is unverified, never allowed.
     let failed = report.failed();
-    let decision = if failed > 0 {
+    let unreadable = report.errors.len();
+    let incomplete = report.incomplete() > 0;
+    let decision = if incomplete {
         report.decision().max(Decision::Warn)
     } else {
         report.decision()
     };
     let mut text = format!("Decision: {}. ", decision.as_str());
-    if failed > 0 && decision < Decision::Block {
+    if incomplete && decision < Decision::Block {
+        let mut gaps = Vec::new();
+        if failed > 0 {
+            gaps.push(format!(
+                "{failed} package{} could not be checked because Customs failed",
+                if failed == 1 { "" } else { "s" }
+            ));
+        }
+        if unreadable > 0 {
+            gaps.push(format!(
+                "{unreadable} file{} could not be read",
+                if unreadable == 1 { "" } else { "s" }
+            ));
+        }
         text.push_str(&format!(
-            "{failed} package{} could not be checked because Customs failed; treat {} as unverified and ask the user before installing.\n",
-            if failed == 1 { "" } else { "s" },
-            if failed == 1 { "it" } else { "them" }
+            "{}; treat what they install as unverified and ask the user before installing.\n",
+            gaps.join(" and ")
         ));
     } else {
         text.push_str(guidance(decision));
         text.push('\n');
-        if failed > 0 {
+        if incomplete {
             text.push_str(&format!(
-                "{failed} check(s) failed, so this result is incomplete.\n"
+                "{failed} check(s) failed and {unreadable} file(s) could not be read, so this result is incomplete.\n"
             ));
         }
     }
@@ -766,8 +778,9 @@ fn audit_output(report: &audit::Report, cwd: &Path) -> ToolOutput {
     ToolOutput {
         text,
         structured: Some(json),
-        // A block stands on its own; otherwise a failed check leaves the answer incomplete.
-        is_error: failed > 0 && decision < Decision::Block,
+        // A block stands on its own; otherwise a failed check or an unreadable file leaves
+        // the answer incomplete.
+        is_error: incomplete && decision < Decision::Block,
     }
 }
 
@@ -1261,6 +1274,7 @@ mod tests {
                 Outcome::Failed("registry unreachable".into()),
             )],
             skipped: vec![],
+            errors: vec![],
             via: "in-process".into(),
         };
         let out = audit_output(&report, Path::new("."));
@@ -1277,6 +1291,14 @@ mod tests {
         let out = audit_output(&report, Path::new("."));
         assert_eq!(out.structured.as_ref().unwrap()["decision"], "block");
         assert!(!out.is_error);
+
+        // An unreadable configuration is no more an allow than a failed check.
+        report.findings.clear();
+        report.errors = vec![".gemini/settings.json: EOF while parsing".into()];
+        let out = audit_output(&report, Path::new("."));
+        assert_eq!(out.structured.as_ref().unwrap()["decision"], "warn");
+        assert!(out.is_error);
+        assert!(out.text.contains("could not be read"), "{}", out.text);
     }
 
     #[tokio::test]

@@ -36,7 +36,7 @@ pub(super) fn parse(text: &str, file: &Path, out: &mut Parsed) -> Result<(), Str
 
 /// `text` with every comma that closes an object or array blanked out, so serde_json
 /// accepts it. Line numbers are unchanged.
-fn strip_trailing_commas(text: &str) -> String {
+pub(super) fn strip_trailing_commas(text: &str) -> String {
     let b = text.as_bytes();
     let mut out = b.to_vec();
     let mut in_str = false;
