@@ -6,8 +6,10 @@ from customs_ml import cli
 
 
 def _git(*args, cwd):
+    # Independent of the user's git config: no signing prompt, no hooks.
+    hermetic = ["-c", "commit.gpgsign=false", "-c", "core.hooksPath=", "-c", "init.templateDir="]
     subprocess.run(
-        ["git", "-c", "user.name=t", "-c", "user.email=t@t", *args],
+        ["git", "-c", "user.name=t", "-c", "user.email=t@t", *hermetic, *args],
         cwd=cwd,
         check=True,
         capture_output=True,
