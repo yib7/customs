@@ -1532,6 +1532,50 @@ async fn dashboard_serving() {
     h.stop().await;
 }
 
+/// Installer and proxy settings a spawned binary must not inherit from the developer.
+const INHERITED_PREFIXES: [&str; 5] = ["CUSTOMS_", "PIP_", "UV_", "NPM_CONFIG_", "YARN_"];
+const INHERITED_VARS: [&str; 5] = [
+    "PIPENV_PYPI_MIRROR",
+    "PDM_PYPI_URL",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+];
+
+/// The real binary, isolated from the machine it runs on: `data_dir` is its data directory,
+/// whose `policy.toml` (unless the test wrote one) points every upstream at `registry` (the
+/// mock) or at a closed port; it gets the dev models and none of the caller's `CUSTOMS_*`,
+/// installer index or proxy variables. A check that misses the server and falls back to an
+/// in-process engine therefore stays offline and writes only below `data_dir`.
+fn customs_cmd(data_dir: &std::path::Path, registry: Option<&str>) -> std::process::Command {
+    std::fs::create_dir_all(data_dir).unwrap();
+    let policy = data_dir.join("policy.toml");
+    if !policy.exists() {
+        let b = registry.unwrap_or("http://127.0.0.1:9");
+        std::fs::write(
+            &policy,
+            format!(
+                "[upstream]\npypi_simple = \"{b}/simple\"\npypi_files = \"{b}/files\"\npypi_json = \"{b}/pypi\"\nnpm = \"{b}/npm\"\n"
+            ),
+        )
+        .unwrap();
+    }
+    let mut c = std::process::Command::new(env!("CARGO_BIN_EXE_customs"));
+    for (k, _) in std::env::vars_os() {
+        let upper = k.to_string_lossy().to_ascii_uppercase();
+        if INHERITED_PREFIXES.iter().any(|p| upper.starts_with(p))
+            || INHERITED_VARS.contains(&upper.as_str())
+        {
+            c.env_remove(&k);
+        }
+    }
+    c.env("CUSTOMS_DATA_DIR", data_dir).env(
+        "CUSTOMS_MODELS",
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../models/dev"),
+    );
+    c
+}
+
 /// Run the real binary as Claude Code would.
 fn run_hook(
     server: &str,
@@ -1559,11 +1603,10 @@ fn run_hook_input(
     extra: &[&str],
 ) -> (String, String, i32) {
     use std::io::Write;
-    use std::process::{Command, Stdio};
-    let mut child = Command::new(env!("CARGO_BIN_EXE_customs"))
+    use std::process::Stdio;
+    let mut child = customs_cmd(&cwd.join("hook-data"), None)
         .args(["hook", "claude-code", "--server", server])
         .args(extra)
-        .env("CUSTOMS_DATA_DIR", cwd.join("hook-data"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1885,8 +1928,8 @@ async fn hook_failure_modes() {
         );
         let garbage = {
             use std::io::Write;
-            use std::process::{Command, Stdio};
-            let mut c = Command::new(env!("CARGO_BIN_EXE_customs"))
+            use std::process::Stdio;
+            let mut c = customs_cmd(&cwd.join("garbage-data"), None)
                 .args(["hook", "claude-code"])
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
@@ -1919,9 +1962,11 @@ async fn hook_failure_modes() {
 async fn cli_check_uses_running_server() {
     let h = Harness::start(|_| {}).await;
     let base = h.base.clone();
+    let data = tempfile::tempdir().unwrap();
+    let (data_dir, registry) = (data.path().to_path_buf(), h.mock.base.clone());
     let out = tokio::task::spawn_blocking(move || {
         let run = |args: &[&str]| {
-            let o = std::process::Command::new(env!("CARGO_BIN_EXE_customs"))
+            let o = customs_cmd(&data_dir, Some(&registry))
                 .args(args)
                 .args(["--server", &base])
                 .output()
@@ -1942,6 +1987,12 @@ async fn cli_check_uses_running_server() {
     assert_eq!(out[0].1, 3, "{}", out[0].0);
     assert!(
         out[0].0.starts_with("pypi evilpkg 0.0.1  BLOCK"),
+        "{}",
+        out[0].0
+    );
+    // The server answered, not an in-process fallback.
+    assert!(
+        out[0].0.contains(&format!(", server {})", h.base)),
         "{}",
         out[0].0
     );
@@ -1998,8 +2049,10 @@ async fn diff_shows_what_a_release_adds() {
     assert_eq!(r.status(), 404);
 
     let base = h.base.clone();
+    let data = tempfile::tempdir().unwrap();
+    let (data_dir, registry) = (data.path().to_path_buf(), h.mock.base.clone());
     let (out, code) = tokio::task::spawn_blocking(move || {
-        let o = std::process::Command::new(env!("CARGO_BIN_EXE_customs"))
+        let o = customs_cmd(&data_dir, Some(&registry))
             .args(["diff", "npm", "diffpkg@1.0.1", "--from", "1.0.0"])
             .args(["--server", &base])
             .output()
@@ -2029,11 +2082,10 @@ async fn diff_shows_what_a_release_adds() {
 
 /// Run the real binary's `audit` in `cwd`.
 fn run_audit(cwd: &std::path::Path, args: &[&str]) -> (String, String, i32) {
-    let o = std::process::Command::new(env!("CARGO_BIN_EXE_customs"))
+    let o = customs_cmd(&cwd.join("audit-data"), None)
         .arg("audit")
         .args(args)
         .current_dir(cwd)
-        .env("CUSTOMS_DATA_DIR", cwd.join("audit-data"))
         .output()
         .unwrap();
     (
@@ -2376,7 +2428,7 @@ fn mcp_recv(stdout: &mut impl std::io::BufRead) -> Value {
 #[test]
 fn mcp_server_over_stdio() {
     use std::io::{BufReader, Read};
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
     let dir = tempfile::tempdir().unwrap();
     // Inert text: the scanner only ever lexes it.
     let archive = npm_tgz(&[
@@ -2391,7 +2443,7 @@ fn mcp_server_over_stdio() {
     ]);
     std::fs::write(dir.path().join("left-padd-1.0.0.tgz"), archive).unwrap();
     let models = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../models/dev");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_customs"))
+    let mut child = customs_cmd(&dir.path().join("data"), None)
         .args(["mcp", "--server", "http://127.0.0.1:9", "--models"])
         .arg(&models)
         .arg("--data-dir")
