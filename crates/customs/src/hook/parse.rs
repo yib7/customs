@@ -1588,9 +1588,9 @@ pub fn pypi_args(args: &[String], cwd: &Path) -> Vec<Target> {
                 Some((k, v)) => (k, Some(v)),
                 None => (a, None),
             }
-        } else if a.len() > 2 && ["-r", "-c", "-e", "-i", "-f"].contains(&&a[..2]) {
+        } else if let Some(k) = attached_short(a, &["-r", "-c", "-e", "-i", "-f"]) {
             // Attached short values: `-rrequirements.txt`, `-e.`.
-            (&a[..2], Some(&a[2..]))
+            (k, Some(&a[2..]))
         } else {
             (a, None)
         };
@@ -1640,6 +1640,13 @@ pub fn pypi_args(args: &[String], cwd: &Path) -> Vec<Target> {
         i += 1;
     }
     targets
+}
+
+/// The short option of `a` when it carries its value attached (`-rfile` is `-r`), one of
+/// `names`. Slices by character, so a non-ASCII second character is never split.
+fn attached_short<'a>(a: &'a str, names: &[&str]) -> Option<&'a str> {
+    a.get(..2)
+        .filter(|k| a.len() > 2 && !a.starts_with("--") && names.contains(k))
 }
 
 /// Editable installs of local paths are the user's own code and are skipped; editable
@@ -1782,9 +1789,8 @@ fn requirements_file(path: &Path, shown: &str, depth: usize) -> Vec<Target> {
             let mut parts = line.splitn(2, |c: char| c.is_whitespace() || c == '=');
             let flag = parts.next().unwrap_or("");
             let value = parts.next().unwrap_or("").trim();
-            let (flag, value) = match (flag.len() > 2 && !flag.starts_with("--"), value.is_empty())
-            {
-                (true, true) => (&flag[..2], &flag[2..]),
+            let (flag, value) = match attached_short(flag, &["-r", "-e", "-i", "-f", "-c"]) {
+                Some(k) if value.is_empty() => (k, &flag[2..]),
                 _ => (flag, value),
             };
             match flag {
@@ -3568,5 +3574,22 @@ mod tests {
         assert_eq!(parse_npm_spec("pkg@next"), js("pkg", Some("next")));
         assert!(is_unverifiable(&parse_npm_spec("@scope")));
         assert!(is_unverifiable(&parse_npm_spec("bad name")));
+    }
+
+    #[test]
+    fn non_ascii_short_options_do_not_panic() {
+        assert_eq!(
+            targets("pip install -\u{e9}x; pip install zzevil"),
+            vec![py("zzevil", None)]
+        );
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("req.txt"), "-\u{e9}\nzzevil\n").unwrap();
+        assert_eq!(
+            parse_command("pip install -r req.txt", d.path())
+                .into_iter()
+                .flat_map(|i| i.targets)
+                .collect::<Vec<_>>(),
+            vec![py("zzevil", None)]
+        );
     }
 }

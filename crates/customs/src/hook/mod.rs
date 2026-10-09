@@ -753,7 +753,7 @@ pub async fn run_agent(opts: HookOptions, agent: Agent) -> i32 {
     if let Err(e) = std::io::Read::read_to_string(&mut std::io::stdin(), &mut input) {
         return finish_error(&format!("reading stdin: {e}"), opts.fail_closed, agent);
     }
-    match evaluate_for(&input, &opts, agent).await {
+    match guarded(evaluate_for(&input, &opts, agent)).await {
         Ok(d) => {
             if let Some(out) = HookDecision::render(d.as_ref(), agent) {
                 println!("{out}");
@@ -761,6 +761,26 @@ pub async fn run_agent(opts: HookOptions, agent: Agent) -> i32 {
             0
         }
         Err(e) => finish_error(&e.to_string(), opts.fail_closed, agent),
+    }
+}
+
+/// `fut`, with a panic turned into an error, so that a bug in the hook takes the same
+/// path as any other failure (and `--fail-closed` holds) instead of exiting with no answer,
+/// which agents read as a non-blocking error.
+async fn guarded<T>(
+    fut: impl std::future::Future<Output = anyhow::Result<T>>,
+) -> anyhow::Result<T> {
+    use futures::FutureExt;
+    match std::panic::AssertUnwindSafe(fut).catch_unwind().await {
+        Ok(r) => r,
+        Err(p) => {
+            let msg = p
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| p.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "unknown panic".into());
+            Err(anyhow::anyhow!("internal error: {msg}"))
+        }
     }
 }
 
@@ -1100,6 +1120,21 @@ mod tests {
         let run = expand_projects(vec![project(true)]);
         assert_eq!(labels(&run), vec!["pypi:flask (3.0.0)"]);
         assert_eq!(run.locked, vec![false]);
+    }
+
+    #[tokio::test]
+    async fn a_panic_becomes_an_error() {
+        let ok = guarded(async { Ok::<_, anyhow::Error>(1) }).await;
+        assert_eq!(ok.unwrap(), 1);
+        let e = guarded(async {
+            if true {
+                panic!("boom");
+            }
+            Ok::<i32, anyhow::Error>(0)
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(e.to_string(), "internal error: boom");
     }
 
     #[tokio::test]
