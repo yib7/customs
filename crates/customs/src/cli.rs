@@ -185,7 +185,8 @@ pub struct DiffArgs {
 pub struct AuditArgs {
     /// Lockfiles, or directories to search for them (default: the current directory).
     pub paths: Vec<PathBuf>,
-    /// Search directories recursively, skipping node_modules, .git, .venv and target.
+    /// Search directories recursively, skipping hidden directories, node_modules, target and
+    /// virtual environments.
     #[arg(long, short)]
     pub recursive: bool,
     #[arg(long, value_enum, default_value_t)]

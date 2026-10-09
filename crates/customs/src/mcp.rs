@@ -193,7 +193,7 @@ pub fn tool_definitions() -> Value {
                     },
                     "recursive": {
                         "type": "boolean",
-                        "description": "Also search subdirectories of a directory (node_modules and hidden folders are skipped). Default false."
+                        "description": "Also search subdirectories of a directory (node_modules, virtual environments and hidden folders are skipped). Default false."
                     }
                 },
                 "required": ["path"],

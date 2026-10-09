@@ -1393,8 +1393,9 @@ base model is made at matched false positive rates. It was not adopted (see the 
 
 `customs audit [PATHS...]` checks every dependency a project pins, for CI and for reviewing
 a pull request before anything is installed. PATHS are lockfiles or directories
-(searched for known names; `--recursive` walks subdirectories, skipping `node_modules`,
-`.git`, `.venv` and `target`). Parsing is offline (`crates/customs/src/audit/`):
+(searched for known names; `--recursive` walks subdirectories, skipping hidden ones,
+`node_modules`, `target` and virtual environments: `venv`, `env`, `__pypackages__`,
+`site-packages` and any directory holding a `pyvenv.cfg`). Parsing is offline (`crates/customs/src/audit/`):
 
 | File | Pins taken from |
 |---|---|

@@ -252,8 +252,22 @@ impl LockKind {
     }
 }
 
-/// Directories a recursive search never enters.
-const SKIP_DIRS: &[&str] = &["node_modules", ".git", ".venv", "target"];
+/// Directories a recursive search never enters, besides hidden ones (`.git`, `.venv`,
+/// `.tox`; agent configurations in them are probed directly) and virtual environments
+/// under any name (a `pyvenv.cfg` marks one). Installed and vendored copies are not the
+/// project's dependencies, and one broken file in them would stop the audit.
+const SKIP_DIRS: &[&str] = &[
+    "node_modules",
+    "target",
+    "venv",
+    "env",
+    "__pypackages__",
+    "site-packages",
+];
+
+fn skipped_dir(name: &str, path: &Path) -> bool {
+    name.starts_with('.') || SKIP_DIRS.contains(&name) || path.join("pyvenv.cfg").is_file()
+}
 
 /// Lockfiles named by `paths`: files as given, directories searched for known names.
 pub fn find_lockfiles(paths: &[PathBuf], recursive: bool) -> Result<Vec<PathBuf>, String> {
@@ -306,7 +320,7 @@ fn search_dir(dir: &Path, recursive: bool, out: &mut Vec<PathBuf>) -> std::io::R
         // `file_type` does not follow symlinks, so linked directories cannot loop.
         let ft = e.file_type()?;
         if ft.is_dir() {
-            if recursive && !SKIP_DIRS.contains(&name.as_str()) {
+            if recursive && !skipped_dir(&name, &e.path()) {
                 subdirs.push(e.path());
             }
         } else if LockKind::discoverable(&name) && e.path().is_file() {
@@ -1353,6 +1367,31 @@ pub(crate) mod tests {
         let empty = tempfile::tempdir().unwrap();
         let e = find_lockfiles(&[empty.path().to_path_buf()], false).unwrap_err();
         assert!(e.contains("--recursive"), "{e}");
+    }
+
+    #[test]
+    fn recursive_search_skips_hidden_and_virtualenv_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        for sub in [
+            "venv",
+            "env",
+            ".tox/py311",
+            ".cache/pip",
+            "myenv/lib",
+            "__pypackages__/3.11",
+            "sub",
+        ] {
+            std::fs::create_dir_all(d.join(sub)).unwrap();
+            std::fs::write(d.join(sub).join("requirements.txt"), "a==1.0\n").unwrap();
+        }
+        // A virtual environment under any name is recognised by its marker file.
+        std::fs::write(d.join("myenv/pyvenv.cfg"), "home = /usr/bin\n").unwrap();
+        std::fs::create_dir_all(d.join(".vscode")).unwrap();
+        std::fs::write(d.join(".vscode/mcp.json"), r#"{"servers": {}}"#).unwrap();
+        let found = find_lockfiles(&[d.to_path_buf()], true).unwrap();
+        let rel: Vec<String> = found.iter().map(|f| display_path(f, d)).collect();
+        assert_eq!(rel, vec![".vscode/mcp.json", "sub/requirements.txt"]);
     }
 
     #[test]
