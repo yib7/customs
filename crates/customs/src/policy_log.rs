@@ -97,7 +97,7 @@ pub fn describe(c: &FieldChange) -> String {
 }
 
 /// Whether a change can let through something the old policy stopped: a looser mode,
-/// threshold or rule, a shorter age limit, an allow-list entry, a removed deny-list entry,
+/// threshold or rule, a shorter age limit or history window, an allow-list entry, a removed deny-list entry,
 /// or a new upstream.
 pub fn loosens(c: &FieldChange) -> bool {
     let rank = |v: &Value| match v.as_str() {
@@ -136,6 +136,14 @@ pub fn loosens(c: &FieldChange) -> bool {
         }
         ("dormant_days", a, b) => match (a.as_u64(), b.as_u64()) {
             (Some(x), Some(y)) => y > x,
+            _ => true,
+        },
+        // A shorter window exempts more releases from the history rules; 0 applies them at
+        // any age, the tightest setting.
+        ("history_window_days", a, b) => match (a.as_u64(), b.as_u64()) {
+            (Some(_), Some(0)) => false,
+            (Some(0), Some(_)) => true,
+            (Some(x), Some(y)) => y < x,
             _ => true,
         },
         (_, a, b) => matches!((rank(a), rank(b)), (Some(x), Some(y)) if y < x),
@@ -254,5 +262,20 @@ mod tests {
             vec!["established.enabled: true -> false"]
         );
         assert!(!loosens(&d[0]));
+    }
+
+    #[test]
+    fn shrinking_the_history_window_loosens() {
+        use serde_json::json;
+        let c = |before: Value, after: Value| FieldChange {
+            field: "history_window_days".into(),
+            before,
+            after,
+        };
+        // 0 applies the rules at any age, the tightest setting.
+        assert!(loosens(&c(json!(90), json!(1))));
+        assert!(!loosens(&c(json!(1), json!(90))));
+        assert!(!loosens(&c(json!(90), json!(0))));
+        assert!(loosens(&c(json!(0), json!(30))));
     }
 }
