@@ -1,5 +1,8 @@
 # Customs
 
+[![CI](https://github.com/yib7/new_proj/actions/workflows/ci.yml/badge.svg)](https://github.com/yib7/new_proj/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 **A package firewall for AI coding agents.** Customs sits between `pip`/`uv`/`npm` (and
 agents like Claude Code that run them on your behalf) and the public registries. It
 inspects every package archive before it reaches your machine, scores it with a malware
@@ -8,7 +11,12 @@ what looks dangerous.
 Packages that do not exist (the names an LLM hallucinates and attackers then register)
 are stopped before anything is downloaded.
 
-![Customs dashboard: live feed of installs, with real malware blocked](docs/screenshots/overview-light.png)
+## Screenshots
+
+| | |
+|---|---|
+| ![Overview page: install counts, the block rate and a live feed of recent verdicts](docs/screenshots/overview-light.png) | ![Verdict page for a blocked PyPI package, with the risk score, the reasons and the code that triggered them](docs/screenshots/verdict-light.png) |
+| ![Activity page: every install and check, filterable by decision, ecosystem and kind](docs/screenshots/activity-light.png) | ![Model page: thresholds, held-out test results and the comparison with GuardDog](docs/screenshots/model-light.png) |
 
 **On malware discovered after its training data** (time-split test set of 8,317 packages):
 
@@ -31,7 +39,7 @@ cold scans a second (median 25 ms) and 772 cached verdicts a second. Full report
 
 Coding agents now install dependencies on their own. That opens two holes:
 
-1. **Malicious packages.** Over 230,000 malicious npm and PyPI packages have been reported
+1. **Malicious packages.** Over 230K malicious npm and PyPI packages have been reported
    to the OSSF malicious-packages database. Most run their payload at install time
    (`setup.py`, npm `postinstall`) and steal credentials before anyone reads the code.
 2. **Slopsquatting.** LLMs suggest plausible packages that do not exist; attackers
@@ -76,22 +84,65 @@ flowchart LR
 * **Dashboard** (`web/`): React + TypeScript. Live install feed, verdict explanations with
   per-feature contributions and code evidence, a package checker, and policy editing.
 
-## Quick start
+## Setup
+
+Customs runs on Linux and macOS. You need git, [rustup](https://rustup.rs) (it installs
+the Rust version pinned in `rust-toolchain.toml`) and [Node.js 22](https://nodejs.org)
+with npm. The first build takes a few minutes.
+
+**Step 1.** Clone the repository.
 
 ```sh
-cargo install --path crates/customs        # or: docker compose -f deploy/docker-compose.yml up
-customs serve                              # proxy, API and dashboard on http://127.0.0.1:7878
-eval "$(customs env)"                      # route pip, uv, pipenv, PDM, npm, pnpm, Yarn, Bun and Deno through it
-customs doctor                             # find installs in this project that would still skip the proxy
-
-customs check pypi reqeusts                # BLOCK: does not exist, 1 edit from 'requests'
-customs check npm left-pad                 # ALLOW
-customs scan ./some-package-1.0.tgz        # offline verdict for a local archive
-customs diff npm axios                     # what the newest release changes since the one before
+git clone https://github.com/yib7/new_proj.git customs
+cd customs
 ```
 
-**Claude Code:** merge [`deploy/hooks/claude-code-settings.json`](deploy/hooks/claude-code-settings.json)
-into `~/.claude/settings.json`. Before the agent runs any shell command, the hook finds
+**Step 2.** Build the dashboard.
+
+```sh
+npm --prefix web ci
+npm --prefix web run build
+```
+
+**Step 3.** Build the binary.
+
+```sh
+cargo build --release -p customs
+```
+
+**Step 4.** Start the firewall and leave it running. It serves the registry proxy, the API
+and the dashboard on http://127.0.0.1:7878.
+
+```sh
+./target/release/customs serve
+```
+
+**Step 5.** In a second terminal, from the same directory, check a package name that an
+LLM might invent.
+
+```sh
+./target/release/customs check pypi reqeusts
+```
+
+It prints `BLOCK` with the reason: `reqeusts` does not exist on PyPI. Open
+http://127.0.0.1:7878 to see the verdict in the dashboard.
+
+## Usage
+
+```sh
+eval "$(./target/release/customs env)"   # route pip, uv, pipenv, PDM, npm, pnpm, Yarn, Bun and Deno through it
+./target/release/customs doctor          # find installs in this project that would still skip the proxy
+./target/release/customs check npm left-pad          # ALLOW
+./target/release/customs scan ./some-package-1.0.tgz # offline verdict for a local archive
+./target/release/customs diff npm axios              # what the newest release changes since the one before
+```
+
+`cargo install --path crates/customs` puts `customs` on your `PATH` instead. To run the
+server in Docker with Prometheus beside it: `docker compose -f deploy/docker-compose.yml up`.
+
+**Claude Code:** install the binary (`cargo install --path crates/customs`), then merge
+[`deploy/hooks/claude-code-settings.json`](deploy/hooks/claude-code-settings.json) into
+`~/.claude/settings.json`. Before the agent runs any shell command, the hook finds
 package installs in it (`pip install`, `uv add`, `npm i`, `npx`, requirement files,
 chained commands, wrappers such as `sudo`, `xargs` and `bash -c`, and `python -c` code
 that shells out to pip) and denies the command when a package is blocked, with the reason,
@@ -163,11 +214,18 @@ a URL, or a new dependency that strangers published days before the release
 (`docs/DESIGN.md`, section 8). The install script and dependency rules block by default, and each compares a release
 with the one before it and with the newest release at least a day older, so a burst of
 malicious versions published within hours cannot hide the change. Together they fired on 5
-of 14,897 legitimate releases and lift the share of test-period compromised npm releases
+of 14.9K legitimate releases and lift the share of test-period compromised npm releases
 blocked from 44% to at least 96%: of 17 groups of three or more releases (one npm scope or
 name prefix each), 15 are blocked in full. The rest warn. The provenance, publisher, revival and new-dependency
 rules look only at releases from the last 90 days, since a hijacked release is pulled within
 days; the install script and git or URL dependency rules apply at any age.
+
+## Demo
+
+![Walkthrough: an agent's pip install of a misspelled package is denied by the hook, a blocked malware sample is opened to show its reasons and code, the package checker reports that the misspelled name does not exist, and the model page shows the held-out results](docs/media/demo.gif)
+
+The recording (34 seconds) runs against `customs serve` after `scripts/replay.py --keep`
+sent held-out test packages through the proxy. `web/scripts/demo-gif.mjs` records it.
 
 ## Results
 
@@ -188,8 +246,6 @@ probes the registry left up with collector false positives: 117 of the 155 "bina
 test samples, once the model's worst blind spot, are per-platform prebuilt binaries such
 as `bare-build-win32-x64` that are still served. The model blocks 23.0% of the
 still-published group and 71.8% of the removed one.
-
-![Verdict for a real PyPI stealer, blocked with the code evidence](docs/screenshots/verdict-light.png)
 
 **Red team.** Held-out malware rewritten with evasions, then re-scanned. The first model
 leaned on metadata (an ablation without it drops ROC AUC from 0.976 to 0.941), so training
@@ -262,10 +318,10 @@ methodology, is in [`docs/EVALUATION.md`](docs/EVALUATION.md).
 
 ### How the evaluation avoids fooling itself
 
-* **Real data, both classes.** 20,488 malicious archives from
+* **Real data, both classes.** 20.5K malicious archives from
   [Datadog's malicious-software-packages-dataset](https://github.com/DataDog/malicious-software-packages-dataset),
-  11,630 from MalRegistry (half of its campaigns held out for testing only),
-  and 22,258 benign archives downloaded from PyPI and npm across popularity tiers,
+  11.6K from MalRegistry (half of its campaigns held out for testing only),
+  and 22.3K benign archives downloaded from PyPI and npm across popularity tiers,
   filtered against all 234K OSSF reports.
 * **Identical packaging.** Both classes are repacked into the same deterministic tarball
   format before scanning, so archive quirks cannot leak the label.
@@ -319,14 +375,17 @@ methodology, is in [`docs/EVALUATION.md`](docs/EVALUATION.md).
 | `python/customs_ml` | Dataset build, dedup, splits, training, evaluation, robustness, export |
 | `web/` | Dashboard |
 | `models/` | Trained artifacts (JSON) and parity fixtures |
-| `deploy/` | Docker Compose with Prometheus, Kubernetes manifests |
-| `docs/` | [Design](docs/DESIGN.md), [evaluation](docs/EVALUATION.md) |
+| `deploy/` | Dockerfile, Docker Compose with Prometheus, Kubernetes manifests, example policy, agent hook configs |
+| `scripts/` | Demo, installer end-to-end test, replay and load tests, live PyPI study |
+| `docs/` | [Architecture](docs/ARCHITECTURE.md), [design](docs/DESIGN.md), [evaluation](docs/EVALUATION.md), [changelog](docs/CHANGELOG.md), [credits](docs/CREDITS.md) |
 
 ## Development
 
+The Python side uses [uv](https://docs.astral.sh/uv/) and its lockfile.
+
 ```sh
 cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings
-cd python && pip install -e ".[dev,nn]" && pytest
+cd python && uv sync --extra dev --extra nn && uv run pytest
 cd web && npm ci && npm run lint && npm run test && npm run e2e
 ```
 
@@ -334,7 +393,7 @@ Rebuilding the dataset and models from scratch (downloads about 9 GB, a few hour
 4 cores; everything lands in `$CUSTOMS_DATA`, never in the repository):
 
 ```sh
-cd python && pip install -e ".[nn]"
+cd python && uv sync --extra nn && source .venv/bin/activate
 git clone --depth 1 https://github.com/ossf/malicious-packages /tmp/ossf
 customs-ml ossf --repo /tmp/ossf
 customs-ml malicious && customs-ml benign && customs-ml names
@@ -358,8 +417,8 @@ in [DESIGN.md section 4.8](docs/DESIGN.md#48-hostile-inputs).
 
 What the scanner cannot read, it cannot judge, so unread code fails closed. Padding
 `setup.py` past the 32 MiB per-file limit dropped a test payload's risk from 1.00 to 0.59,
-and 20,001 empty files made any archive unscannable; both now block (`unread_code`,
-`scan_error`), and neither fires on any of the 22,258 benign corpus archives. The same
+and just over 20K empty files made any archive unscannable; both now block (`unread_code`,
+`scan_error`), and neither fires on any of the 22.3K benign corpus archives. The same
 rule covers wheel entries the scanner cannot decode (encrypted, or compressed with a
 method it lacks) and install hooks in archives above the 256 MiB scan limit, which are
 read by streaming the archive's headers. See
@@ -377,6 +436,21 @@ own (`agent_bypass`). The s1ngularity compromise of Nx did this from a postinsta
 so the developer's own agent searched the disk for secrets. Packages that drive an agent
 when they run are not affected: the 14 agent CLIs and orchestrators checked carry 83 such
 flags, none in install-time code.
+
+## Limitations
+
+* The model has false positives on popular packages: the `requests` 2.32.3 sdist scores
+  above the block threshold, and `requests` 2.34.2 and `postcss` 8.5.29 warn. Allow-list
+  them in `customs.toml` until the next retrain.
+* Static analysis only. A payload inside a compiled binary, or fetched at run time from a
+  URL the code never spells out, gives the scanner nothing to read; the policy rules
+  (release age, install scripts in new packages, release history) are the backstop.
+* The hook reads commands, not intentions. A script that is written and run in the same
+  command, JSR and URL imports in Deno code, and code built at run time are not read.
+* PyPI and npm only. No Maven, RubyGems, crates.io or Go modules, and Windows is not
+  tested.
+* Next: a retrain with more benign releases of popular packages, and the same proxy for
+  crates.io.
 
 ## License
 
