@@ -28,7 +28,6 @@ use tokio::net::TcpListener;
 struct MockState {
     base: String,
     hits: Mutex<HashMap<String, usize>>,
-    file_delay_ms: AtomicUsize,
     /// When set, archive downloads wait for a permit (one per download).
     file_gate: Mutex<Option<Arc<tokio::sync::Semaphore>>>,
     /// Files added while a test runs.
@@ -300,10 +299,6 @@ async fn pass_gate(m: &MockState) {
 async fn files(State(m): State<Mock>, Path(path): Path<String>) -> Response {
     m.hit(&path);
     pass_gate(&m).await;
-    let delay = m.file_delay_ms.load(Ordering::SeqCst);
-    if delay > 0 {
-        tokio::time::sleep(Duration::from_millis(delay as u64)).await;
-    }
     let file = path.rsplit('/').next().unwrap_or("");
     for (n, v, b, _) in pypi_packages() {
         if file_name(n, v) == file {
@@ -1324,7 +1319,8 @@ async fn check_resolves_versions() {
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_requests_scan_once() {
     let h = Harness::start(|_| {}).await;
-    h.mock.file_delay_ms.store(400, Ordering::SeqCst);
+    // Hold the one upstream download until all eight requests have joined it.
+    let gate = hold_downloads(&h);
     let path = pypi_file_path("slowpkg", "1.0.0");
     let mut tasks = Vec::new();
     for _ in 0..8 {
@@ -1338,6 +1334,8 @@ async fn concurrent_requests_scan_once() {
             (r.status().as_u16(), id, r.bytes().await.unwrap())
         }));
     }
+    wait_for_metric(&h, "customs_singleflight_joins_total 7").await;
+    gate.add_permits(1);
     let mut ids = Vec::new();
     for t in tasks {
         let (status, id, body) = t.await.unwrap();
