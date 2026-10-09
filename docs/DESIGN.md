@@ -864,7 +864,10 @@ are still checked by the Claude Code hook and `customs audit`, which read the lo
 itself.
 
 Caching: archives are stored by sha256 under `<data-dir>/cache`, verdict inputs (scan and
-model output) in SQLite keyed by (ecosystem, name, version, sha256, model_version).
+model output) in SQLite keyed by (ecosystem, name, version, sha256, model_version), where
+the last column also names the scanner rules, feature schema and summary versions and the
+scan size limit. An upgrade that changes the scanner therefore rescans instead of serving
+summaries that lack its new findings, and rows of an earlier scanner are dropped at startup.
 Concurrent requests for the same artifact URL share one download and one scan.
 
 ### 7.1 Notifications

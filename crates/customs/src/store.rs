@@ -77,6 +77,8 @@ pub struct ScanKey {
     pub name: String,
     pub version: Option<String>,
     pub sha256: String,
+    /// Everything else the cached result depends on: the model version followed by the
+    /// scanner and summary versions and the scan limit (the engine's scan identity).
     pub model_version: String,
 }
 
@@ -390,6 +392,19 @@ impl Store {
         })
     }
 
+    /// Delete scan cache rows whose identity does not end with `suffix` (the current
+    /// scanner, summary version and scan limit). Rows of other model versions with the same
+    /// scanner stay, since another engine on the same data directory may use them.
+    pub fn scan_cache_prune(&self, suffix: &str) -> Result<usize> {
+        self.with(|c| {
+            c.execute(
+                "DELETE FROM scan_cache
+                 WHERE substr(model_version, length(model_version) - length(?1) + 1) != ?1",
+                [suffix],
+            )
+        })
+    }
+
     pub fn artifact_get(&self, url: &str) -> Result<Option<ArtifactRow>> {
         self.with(|c| {
             c.query_row(
@@ -565,5 +580,47 @@ pub fn rule_label(rule: &str) -> String {
         "startup_hook" => ".pth file runs code at every Python start".into(),
         "agent_bypass" => "Install-time code runs an AI agent without permission checks".into(),
         other => other.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key(identity: &str) -> ScanKey {
+        ScanKey {
+            ecosystem: Ecosystem::Pypi,
+            name: "p".into(),
+            version: Some("1.0".into()),
+            sha256: "ab".into(),
+            model_version: identity.into(),
+        }
+    }
+
+    #[test]
+    fn scan_cache_prune_keeps_only_the_current_scanner() {
+        let s = Store::open_in_memory().unwrap();
+        for id in [
+            "m1",
+            "m1|scan:1.1|summary:1|max:9",
+            "m2|scan:1.1|summary:1|max:9",
+            "m1|scan:0.1|summary:1|max:9",
+        ] {
+            s.scan_cache_put(&key(id), "{}").unwrap();
+        }
+        assert_eq!(s.scan_cache_prune("|scan:1.1|summary:1|max:9").unwrap(), 2);
+        assert!(s.scan_cache_get(&key("m1")).unwrap().is_none());
+        assert!(s
+            .scan_cache_get(&key("m1|scan:0.1|summary:1|max:9"))
+            .unwrap()
+            .is_none());
+        assert!(s
+            .scan_cache_get(&key("m1|scan:1.1|summary:1|max:9"))
+            .unwrap()
+            .is_some());
+        assert!(s
+            .scan_cache_get(&key("m2|scan:1.1|summary:1|max:9"))
+            .unwrap()
+            .is_some());
     }
 }

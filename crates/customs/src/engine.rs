@@ -158,8 +158,12 @@ pub struct Outcome {
     pub size: u64,
 }
 
+/// Version of [`ScanSummary`]. Bump when its contents or the scoring for the same archive
+/// change, so summaries cached by an earlier build are not served (see [`Engine::scan_identity`]).
+const SCAN_SUMMARY_VERSION: u32 = 1;
+
 /// What the scan cache stores: everything in a verdict that depends only on the bytes,
-/// the name, and the model version.
+/// the name, the model version, and the scanner.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct ScanSummary {
     risk: Option<f64>,
@@ -233,6 +237,12 @@ impl Engine {
         let cache_dir = cfg.data_dir.join("cache");
         std::fs::create_dir_all(cache_dir.join("tmp"))?;
         let store = Store::open(&cfg.data_dir.join("customs.db"))?;
+        // Summaries from an earlier scanner or summary version are never read again.
+        match store.scan_cache_prune(&scan_suffix(&cfg.limits)) {
+            Ok(0) => {}
+            Ok(n) => tracing::info!(rows = n, "dropped scan results of an earlier scanner"),
+            Err(e) => tracing::warn!(error = %e, "pruning the scan cache failed"),
+        }
         let (events, _) = broadcast::channel(1024);
         let (policy_changes, _) = broadcast::channel(64);
         Ok(Arc::new(Self {
@@ -309,6 +319,17 @@ impl Engine {
 
     fn blob_path(&self, sha256: &str) -> PathBuf {
         self.cache_dir.join(&sha256[..2]).join(sha256)
+    }
+
+    /// What a cached scan summary depends on besides the archive: the models, the scanner
+    /// rules and feature schema, the summary layout, and the scan size limit. Stored in the
+    /// scan cache's `model_version` column, so a new identity needs no schema change.
+    fn scan_identity(&self) -> String {
+        format!(
+            "{}{}",
+            self.models.model_version(),
+            scan_suffix(&self.limits)
+        )
     }
 
     /// Evaluate one artifact; concurrent calls for the same URL share a single evaluation.
@@ -571,7 +592,7 @@ impl Engine {
             name: name.to_string(),
             version: version.map(str::to_string),
             sha256: sha256.to_string(),
-            model_version: self.models.model_version().to_string(),
+            model_version: self.scan_identity(),
         };
         if let Some(json) = self.store.scan_cache_get(&key).map_err(internal)? {
             if let Ok(s) = serde_json::from_str::<ScanSummary>(&json) {
@@ -1129,6 +1150,16 @@ fn local_verdict(
         &s,
         false,
         &facts,
+    )
+}
+
+/// The scanner part of [`Engine::scan_identity`].
+fn scan_suffix(limits: &Limits) -> String {
+    format!(
+        "|scan:{}.{}|summary:{SCAN_SUMMARY_VERSION}|max:{}",
+        customs_scan::SCAN_RULES_VERSION,
+        customs_scan::FEATURE_SCHEMA_VERSION,
+        limits.max_scan_bytes
     )
 }
 

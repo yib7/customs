@@ -2821,3 +2821,37 @@ async fn a_network_facing_server_without_a_token_refuses_policy_changes() {
     assert_eq!(r.status(), 200);
     h.stop().await;
 }
+
+// ---- Phase 3A: ENGINE ----
+
+fn sha256_hex(b: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(b))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn scan_cache_ignores_summaries_from_an_older_scanner() {
+    let h = Harness::start(|_| {}).await;
+    // What a build from before the `agent_bypass` rule cached for this archive: keyed by
+    // the model version alone, and without the field.
+    let old = json!({
+        "risk": 0.01, "scores": {}, "reasons": [], "evidence": [], "install_surface": [],
+        "scan_errors": [], "install_scripts": [], "scanned_ms": 1, "scanned": true,
+    });
+    let key = customs::store::ScanKey {
+        ecosystem: Ecosystem::Pypi,
+        name: "agentic".into(),
+        version: Some("1.0.0".into()),
+        sha256: sha256_hex(b"benign but agentic"),
+        model_version: "dev-untrained".into(),
+    };
+    h.engine
+        .store
+        .scan_cache_put(&key, &old.to_string())
+        .unwrap();
+    let (_, v) = h.check("pypi", "agentic", Some("1.0.0")).await;
+    assert_eq!(v["cached"], false, "{v}");
+    assert!(rules_of(&v).contains(&"agent_bypass".to_string()), "{v}");
+    assert_eq!(h.scans.load(Ordering::SeqCst), 1);
+    h.stop().await;
+}

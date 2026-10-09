@@ -31,6 +31,8 @@ pub use large::install_time_code;
 
 /// Version of the feature schema emitted by this crate.
 pub const FEATURE_SCHEMA_VERSION: u32 = 1;
+/// Bump whenever scanner output for the same archive can change outside the feature schema.
+pub const SCAN_RULES_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
