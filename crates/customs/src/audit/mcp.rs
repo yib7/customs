@@ -15,8 +15,8 @@ use std::path::Path;
 use customs_scan::Ecosystem;
 use serde_json::Value;
 
-use super::{json_key_lines, key_line, Parsed};
-use crate::hook::parse::{parse_command, Target};
+use super::{json_key_lines, key_line, Parsed, SkipKind};
+use crate::hook::parse::{looks_like_path, looks_like_url, parse_command, Target};
 
 /// File names read as MCP configurations. `settings.json` and `config.toml` count only
 /// inside `.gemini` and `.codex`.
@@ -168,6 +168,7 @@ pub fn parse(text: &str, path: &Path, out: &mut Parsed) -> Result<(), String> {
                 path,
                 s.line,
                 &format!("{}: {cmd}", s.name),
+                SkipKind::Other,
                 "a container image; Customs checks PyPI and npm packages",
             );
             continue;
@@ -189,13 +190,21 @@ pub fn parse(text: &str, path: &Path, out: &mut Parsed) -> Result<(), String> {
                         out.server_dep(ecosystem, &name, &version, pinned, path, s.line);
                     }
                     Target::Unverifiable { spec, reason, .. } => {
-                        out.skip(path, s.line, &format!("{}: {spec}", s.name), reason);
+                        let kind = if looks_like_url(&spec) {
+                            SkipKind::Source
+                        } else if looks_like_path(&spec) {
+                            SkipKind::Local
+                        } else {
+                            SkipKind::Other
+                        };
+                        out.skip(path, s.line, &format!("{}: {spec}", s.name), kind, reason);
                     }
                     Target::RemoteScript { url, runner } => {
                         out.skip(
                             path,
                             s.line,
                             &format!("{}: {url}", s.name),
+                            SkipKind::Source,
                             format!("downloads a script and runs it with {runner}"),
                         );
                     }

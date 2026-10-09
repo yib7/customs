@@ -8,7 +8,7 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use super::{json_key_lines, key_line, npm_pin, split_npm_spec, Parsed};
+use super::{json_key_lines, key_line, npm_pin, split_npm_spec, Parsed, SkipKind};
 
 pub(super) fn parse(text: &str, file: &Path, out: &mut Parsed) -> Result<(), String> {
     let text = strip_trailing_commas(text);
@@ -20,7 +20,7 @@ pub(super) fn parse(text: &str, file: &Path, out: &mut Parsed) -> Result<(), Str
     for (key, e) in packages {
         let line = key_line(&lines, &["packages", key]);
         let Some((name, res)) = e.get(0).and_then(Value::as_str).and_then(split_npm_spec) else {
-            out.skip(file, line, key, "no resolution recorded");
+            out.skip(file, line, key, SkipKind::Other, "no resolution recorded");
             continue;
         };
         // The project's own workspace folders.

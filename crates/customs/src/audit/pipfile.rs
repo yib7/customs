@@ -6,7 +6,8 @@ use std::path::Path;
 use customs_scan::Ecosystem;
 use serde_json::Value;
 
-use super::{host_of, json_key_lines, key_line, known_registry, Parsed};
+use super::{host_of, json_key_lines, key_line, known_registry, Parsed, SkipKind};
+use crate::hook::parse::looks_like_url;
 
 pub(super) fn parse(text: &str, file: &Path, out: &mut Parsed) -> Result<(), String> {
     let doc: Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
@@ -27,12 +28,29 @@ pub(super) fn parse(text: &str, file: &Path, out: &mut Parsed) -> Result<(), Str
             let field = |k: &str| e.get(k).and_then(Value::as_str);
             let version = field("version").unwrap_or("");
             let spec = format!("{name}{version}");
-            if e.get("editable").and_then(Value::as_bool) == Some(true) || field("path").is_some() {
-                out.skip(file, line, &spec, "installed from a local path");
+            // A git checkout is fetched even when it is installed editable.
+            if let Some(url) = field("git").or_else(|| field("file").filter(|f| looks_like_url(f)))
+            {
+                out.skip(
+                    file,
+                    line,
+                    &spec,
+                    SkipKind::Source,
+                    format!("installed from {url}"),
+                );
                 continue;
             }
-            if let Some(url) = field("git").or_else(|| field("file")) {
-                out.skip(file, line, &spec, format!("installed from {url}"));
+            if e.get("editable").and_then(Value::as_bool) == Some(true)
+                || field("path").is_some()
+                || field("file").is_some()
+            {
+                out.skip(
+                    file,
+                    line,
+                    &spec,
+                    SkipKind::Local,
+                    "installed from a local path",
+                );
                 continue;
             }
             if let Some(url) = field("index").and_then(|i| sources.get(i)) {
@@ -41,6 +59,7 @@ pub(super) fn parse(text: &str, file: &Path, out: &mut Parsed) -> Result<(), Str
                         file,
                         line,
                         &spec,
+                        SkipKind::CustomIndex,
                         format!("from a custom package index ({})", host_of(url)),
                     );
                     continue;
@@ -48,7 +67,7 @@ pub(super) fn parse(text: &str, file: &Path, out: &mut Parsed) -> Result<(), Str
             }
             match version.strip_prefix("==").filter(|v| !v.is_empty()) {
                 Some(v) => out.dep(Ecosystem::Pypi, name, v, file, line),
-                None => out.skip(file, line, &spec, "no exact version"),
+                None => out.skip(file, line, &spec, SkipKind::Unpinned, "no exact version"),
             }
         }
     }
@@ -112,6 +131,11 @@ mod tests {
         "fork": {
             "git": "https://github.com/x/fork.git",
             "ref": "abc"
+        },
+        "editable-fork": {
+            "editable": true,
+            "git": "https://github.com/x/editable-fork.git",
+            "ref": "abc"
         }
     }
 }
@@ -133,6 +157,11 @@ mod tests {
         );
         let mut skipped: Vec<usize> = p.skipped.iter().map(|s| s.line).collect();
         skipped.sort();
-        assert_eq!(skipped, vec![32, 36, 50]);
+        assert_eq!(skipped, vec![32, 36, 50, 54]);
+        let kind = |line: usize| p.skipped.iter().find(|s| s.line == line).unwrap().kind;
+        assert_eq!(kind(36), SkipKind::Local);
+        assert_eq!(kind(50), SkipKind::Source);
+        // Editable does not make a git checkout the project's own code.
+        assert_eq!(kind(54), SkipKind::Source);
     }
 }

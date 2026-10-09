@@ -61,12 +61,31 @@ impl Dependency {
     }
 }
 
+/// Why an entry is not checked. Decided by the parser, never from the reason text, which
+/// can quote lockfile-controlled URLs and hosts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkipKind {
+    /// The project's own files: a local path, an editable install, a workspace member.
+    Local,
+    /// A range or bare name that a resolver pins later.
+    Unpinned,
+    /// A git repository or a URL.
+    Source,
+    /// A package index or registry Customs does not check.
+    CustomIndex,
+    /// Anything else that installs code Customs did not check: an entry it could not read,
+    /// a JSR package, a container image, a launcher it does not recognise.
+    Other,
+}
+
 /// An entry that is not checked: not pinned to an exact version, or not from a registry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Skipped {
     pub file: PathBuf,
     pub line: usize,
     pub spec: String,
+    pub kind: SkipKind,
     pub reason: String,
 }
 
@@ -75,9 +94,7 @@ impl Skipped {
     /// Customs does not check), as opposed to the project's own files or a range a resolver
     /// will pin later.
     pub fn fetched(&self) -> bool {
-        !["local", "editable", "no version pinned", "no exact version"]
-            .iter()
-            .any(|k| self.reason.contains(k))
+        !matches!(self.kind, SkipKind::Local | SkipKind::Unpinned)
     }
 }
 
@@ -144,11 +161,19 @@ impl Parsed {
         });
     }
 
-    fn skip(&mut self, file: &Path, line: usize, spec: &str, reason: impl Into<String>) {
+    fn skip(
+        &mut self,
+        file: &Path,
+        line: usize,
+        spec: &str,
+        kind: SkipKind,
+        reason: impl Into<String>,
+    ) {
         self.skipped.push(Skipped {
             file: file.to_path_buf(),
             line,
             spec: spec.to_string(),
+            kind,
             reason: reason.into(),
         });
     }
@@ -595,20 +620,37 @@ fn npm_pin(
         let local = ["file:", "link:", ".", "/"]
             .iter()
             .any(|p| version.starts_with(p));
-        let reason = if local {
-            "installed from a local path"
-        } else {
-            "not a registry package (git or URL)"
-        };
-        out.skip(file, line, &spec, reason);
-        return;
-    }
-    if let Some(r) = resolved {
-        if !(r.starts_with("https://") || r.starts_with("http://")) {
+        if local {
             out.skip(
                 file,
                 line,
                 &spec,
+                SkipKind::Local,
+                "installed from a local path",
+            );
+        } else {
+            out.skip(
+                file,
+                line,
+                &spec,
+                SkipKind::Source,
+                "not a registry package (git or URL)",
+            );
+        }
+        return;
+    }
+    if let Some(r) = resolved {
+        if !(r.starts_with("https://") || r.starts_with("http://")) {
+            let kind = if r.starts_with("file:") {
+                SkipKind::Local
+            } else {
+                SkipKind::Source
+            };
+            out.skip(
+                file,
+                line,
+                &spec,
+                kind,
                 format!("resolved from {r}, not a registry"),
             );
             return;
@@ -618,6 +660,7 @@ fn npm_pin(
                 file,
                 line,
                 &spec,
+                SkipKind::CustomIndex,
                 format!("from a custom registry ({})", host_of(r)),
             );
             return;
@@ -640,7 +683,13 @@ fn npm_pin(
                 if valid_npm_name(&n) && is_npm_version(&v) {
                     out.dep(Ecosystem::Npm, &n, &v, file, line);
                 } else {
-                    out.skip(file, line, &installed, "not a registry package version");
+                    out.skip(
+                        file,
+                        line,
+                        &installed,
+                        SkipKind::Other,
+                        "not a registry package version",
+                    );
                 }
                 return;
             }
@@ -1368,6 +1417,48 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn fetched_comes_from_the_kind_not_the_lockfile_text() {
+        let f = Path::new("package-lock.json");
+        let mut p = Parsed::default();
+        // Hosts and URLs the lockfile controls that contain "local" or "editable".
+        npm_pin(
+            &mut p,
+            f,
+            1,
+            "a",
+            "1.0.0",
+            Some("git+https://github.com/x/localize.git#abc"),
+        );
+        npm_pin(
+            &mut p,
+            f,
+            2,
+            "b",
+            "1.0.0",
+            Some("https://npm.local.corp/b/-/b-1.0.0.tgz"),
+        );
+        npm_pin(
+            &mut p,
+            f,
+            3,
+            "c",
+            "1.0.0",
+            Some("https://editable.example/c/-/c-1.0.0.tgz"),
+        );
+        // The project's own files are not fetched.
+        npm_pin(&mut p, f, 4, "d", "file:../d", None);
+        let fetched: Vec<(usize, bool)> = p.skipped.iter().map(|s| (s.line, s.fetched())).collect();
+        assert_eq!(
+            fetched,
+            vec![(1, true), (2, true), (3, true), (4, false)],
+            "{:?}",
+            p.skipped
+        );
+        assert_eq!(p.skipped[0].kind, SkipKind::Source);
+        assert_eq!(p.skipped[1].kind, SkipKind::CustomIndex);
+    }
+
+    #[test]
     fn tarball_identities() {
         let id = |u: &str| tarball_identity(u);
         let pair = |n: &str, v: &str| Some((n.to_string(), v.to_string()));
@@ -1547,6 +1638,7 @@ pub(crate) mod tests {
                 file: PathBuf::from("sub/requirements.txt"),
                 line: 4,
                 spec: "flask>=2".into(),
+                kind: SkipKind::Unpinned,
                 reason: "not pinned".into(),
             }],
             via: "in-process".into(),

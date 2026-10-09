@@ -6,7 +6,7 @@ use customs_scan::Ecosystem;
 use serde::Deserialize;
 use toml::Spanned;
 
-use super::{host_of, known_registry, LineIndex, Parsed};
+use super::{host_of, known_registry, LineIndex, Parsed, SkipKind};
 
 #[derive(Deserialize)]
 struct Lock {
@@ -49,13 +49,21 @@ pub(super) fn parse(text: &str, file: &Path, out: &mut Parsed) -> Result<(), Str
                     file,
                     line,
                     &spec,
+                    SkipKind::CustomIndex,
                     format!("from a custom package index ({})", host_of(&s.url)),
                 ),
-                "file" => out.skip(file, line, &spec, "installed from a local file"),
+                "file" => out.skip(
+                    file,
+                    line,
+                    &spec,
+                    SkipKind::Local,
+                    "installed from a local file",
+                ),
                 other => out.skip(
                     file,
                     line,
                     &spec,
+                    SkipKind::Source,
                     format!("installed from a {other} source ({})", s.url),
                 ),
             },

@@ -7,7 +7,7 @@ use customs_scan::Ecosystem;
 use serde::Deserialize;
 use toml::Spanned;
 
-use super::{host_of, known_registry, LineIndex, Parsed};
+use super::{host_of, known_registry, LineIndex, Parsed, SkipKind};
 
 #[derive(Deserialize)]
 struct Lock {
@@ -43,12 +43,19 @@ pub(super) fn parse(text: &str, file: &Path, out: &mut Parsed) -> Result<(), Str
         };
         let spec = format!("{name}=={version}");
         if source.contains_key("path") {
-            out.skip(file, line, &spec, "installed from a local path");
+            out.skip(
+                file,
+                line,
+                &spec,
+                SkipKind::Local,
+                "installed from a local path",
+            );
         } else if let Some(url) = source.get("git").or_else(|| source.get("url")) {
             out.skip(
                 file,
                 line,
                 &spec,
+                SkipKind::Source,
                 format!("installed from {}", url.as_str().unwrap_or("a URL")),
             );
         } else {
@@ -57,6 +64,7 @@ pub(super) fn parse(text: &str, file: &Path, out: &mut Parsed) -> Result<(), Str
                     file,
                     line,
                     &spec,
+                    SkipKind::CustomIndex,
                     format!("from a custom package index ({})", host_of(r)),
                 ),
                 _ => out.dep(Ecosystem::Pypi, name, &version, file, line),

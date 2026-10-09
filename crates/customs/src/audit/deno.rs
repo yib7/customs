@@ -1,6 +1,7 @@
 //! `deno.lock`, the lockfile Deno writes for `deno add`, `deno install` and npm: imports.
 //! Version 4 and 5 keep npm packages in a top-level `npm` map, version 3 under
-//! `packages.npm`. Keys are `name@version`, followed by `_peer@version` for each peer
+//! `packages.npm`, version 2 under `npm.packages`; other versions are an error rather than
+//! a lockfile read as empty. Keys are `name@version`, followed by `_peer@version` for each peer
 //! dependency the copy was resolved against. An entry carries a `tarball` URL when the
 //! registry is not the default one; Deno downloads that URL without comparing it with the
 //! entry's name, so it gets the same check as npm's `resolved`. JSR packages and remote
@@ -10,27 +11,40 @@ use std::path::Path;
 
 use serde_json::{Map, Value};
 
-use super::{json_key_lines, key_line, npm_pin, split_npm_spec, Parsed};
+use super::{json_key_lines, key_line, npm_pin, split_npm_spec, Parsed, SkipKind};
 
 pub(super) fn parse(text: &str, file: &Path, out: &mut Parsed) -> Result<(), String> {
     let doc: Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
     let lines = json_key_lines(text);
-    let (root, base): (&Value, &[&str]) = match doc.get("packages") {
-        Some(p) if p.get("npm").is_some() || p.get("jsr").is_some() => (p, &["packages"]),
-        _ => (&doc, &[]),
+    // The key paths of the npm and JSR package maps, by lockfile version.
+    let (npm_at, jsr_at): (&[&str], &[&str]) = match doc.get("version").and_then(Value::as_str) {
+        Some("2") => (&["npm", "packages"], &[]),
+        Some("3") => (&["packages", "npm"], &["packages", "jsr"]),
+        Some("4" | "5") => (&["npm"], &["jsr"]),
+        Some(v) => return Err(format!("deno.lock version {v} is not supported (versions 2 to 5 are)")),
+        None => {
+            return Err("deno.lock has no version field; version 1 lockfiles are not supported (a newer Deno rewrites the file)".into())
+        }
     };
-    let path = |section: &str, key: &str| -> usize {
-        let mut p: Vec<&str> = base.to_vec();
-        p.push(section);
+    let empty = Map::new();
+    let section = |at: &[&str]| {
+        if at.is_empty() {
+            return &empty;
+        }
+        at.iter()
+            .try_fold(&doc, |v, k| v.get(*k))
+            .and_then(Value::as_object)
+            .unwrap_or(&empty)
+    };
+    let line_of = |at: &[&str], key: &str| {
+        let mut p = at.to_vec();
         p.push(key);
         key_line(&lines, &p)
     };
-    let empty = Map::new();
-    let section = |name: &str| root.get(name).and_then(Value::as_object).unwrap_or(&empty);
-    for (key, e) in section("npm") {
-        let line = path("npm", key);
+    for (key, e) in section(npm_at) {
+        let line = line_of(npm_at, key);
         let Some((name, rest)) = split_npm_spec(key) else {
-            out.skip(file, line, key, "not a name@version entry");
+            out.skip(file, line, key, SkipKind::Other, "not a name@version entry");
             continue;
         };
         // Peer dependencies are recorded after the version: `18.3.1_react@18.3.1`.
@@ -38,11 +52,12 @@ pub(super) fn parse(text: &str, file: &Path, out: &mut Parsed) -> Result<(), Str
         let tarball = e.get("tarball").and_then(Value::as_str);
         npm_pin(out, file, line, name, version, tarball);
     }
-    for key in section("jsr").keys() {
+    for key in section(jsr_at).keys() {
         out.skip(
             file,
-            path("jsr", key),
+            line_of(jsr_at, key),
             &format!("jsr:{key}"),
+            SkipKind::Other,
             "JSR packages are not checked",
         );
     }
@@ -56,7 +71,13 @@ pub(super) fn parse(text: &str, file: &Path, out: &mut Parsed) -> Result<(), Str
         let line = text
             .find(&format!("{quoted}:"))
             .map_or(1, |at| text[..at].matches('\n').count() + 1);
-        out.skip(file, line, url, "remote module, not a registry package");
+        out.skip(
+            file,
+            line,
+            url,
+            SkipKind::Source,
+            "remote module, not a registry package",
+        );
     }
     Ok(())
 }
@@ -155,5 +176,46 @@ mod tests {
             (p.deps[0].name.as_str(), p.deps[0].version.as_str()),
             ("ms", "2.1.2")
         );
+    }
+
+    #[test]
+    fn deno_lock_version_2_keeps_packages_under_npm() {
+        let v2 = r#"{
+  "version": "2",
+  "remote": {},
+  "npm": {
+    "specifiers": {
+      "chalk@5": "chalk@5.3.0",
+      "react-dom@18": "react-dom@18.3.1_react@18.3.1"
+    },
+    "packages": {
+      "chalk@5.3.0": {
+        "integrity": "sha512-x",
+        "dependencies": {}
+      },
+      "react-dom@18.3.1_react@18.3.1": {
+        "integrity": "sha512-y",
+        "dependencies": {"react": "react@18.3.1"}
+      }
+    }
+  }
+}"#;
+        let mut p = Parsed::default();
+        parse(v2, Path::new("deno.lock"), &mut p).unwrap();
+        let deps: Vec<_> = p
+            .deps
+            .iter()
+            .map(|d| (d.name.as_str(), d.version.as_str(), d.line))
+            .collect();
+        assert_eq!(deps, [("chalk", "5.3.0", 10), ("react-dom", "18.3.1", 14)]);
+        assert!(p.skipped.is_empty(), "{:?}", p.skipped);
+
+        for unknown in [
+            r#"{"version": "9", "npm": {}}"#,
+            r#"{"https://x/mod.ts": "abc"}"#,
+        ] {
+            let e = parse(unknown, Path::new("deno.lock"), &mut Parsed::default()).unwrap_err();
+            assert!(e.contains("version"), "{e}");
+        }
     }
 }
