@@ -35,6 +35,9 @@ test('navigates between all pages with the sidebar and keyboard', async ({ page 
 
   // On a fresh load the skip link is the first tab stop.
   await page.goto('/activity');
+  // goto resolves on the load event, which can fire before React's first render; a Tab
+  // pressed then lands on an empty page.
+  await expect(page.getByRole('heading', { level: 1, name: 'Activity' })).toBeVisible();
   await page.keyboard.press('Tab');
   const skip = page.getByRole('link', { name: 'Skip to content' });
   await expect(skip).toBeFocused();
