@@ -6,7 +6,11 @@
 //! activation (`relu` or `none`), and a single output logit. Weights use PyTorch layouts (`Conv1d.weight` is
 //! `[out_channels, in_channels, kernel]`, `Linear.weight` is `[out, in]`) so the exporter
 //! can dump tensors without reshaping.
+//!
+//! Email-shaped tokens (an `author_email` kept as a short string literal, say) are looked
+//! up by [`vocab_key`], a hash, so a trained vocabulary never stores a plaintext address.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use base64::Engine as _;
@@ -19,6 +23,47 @@ pub const PAD_ID: u32 = 0;
 pub const UNK_ID: u32 = 1;
 /// Short inputs are right-padded to at least this many positions.
 pub const MIN_LEN: usize = 16;
+
+/// 64-bit FNV-1a.
+pub fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in bytes {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
+/// `local@domain.tld`: local part of ASCII letters, digits and `. _ % + -`, two or more
+/// dot-separated domain labels of letters, digits and `-`, and a final label of at least
+/// two letters. Mirrors `EMAIL` in `python/customs_ml/nn.py`.
+fn is_email(t: &str) -> bool {
+    let Some((local, domain)) = t.split_once('@') else {
+        return false;
+    };
+    let local_ok = !local.is_empty()
+        && local
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'%' | b'+' | b'-'));
+    let labels: Vec<&str> = domain.split('.').collect();
+    let labels_ok = labels.len() >= 2
+        && labels
+            .iter()
+            .all(|l| !l.is_empty() && l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'));
+    let tld = labels[labels.len() - 1];
+    local_ok && labels_ok && tld.len() >= 2 && tld.bytes().all(|b| b.is_ascii_alphabetic())
+}
+
+/// The vocabulary key of a token: `<email:{fnv1a64:016x}>` for an email-shaped token, the
+/// token itself otherwise. Applied to the vocabulary on load and to every token on lookup,
+/// so a file with plaintext keys and one with hashed keys give the same ids.
+pub fn vocab_key(token: &str) -> Cow<'_, str> {
+    if token.contains('@') && is_email(token) {
+        Cow::Owned(format!("<email:{:016x}>", fnv1a64(token.as_bytes())))
+    } else {
+        Cow::Borrowed(token)
+    }
+}
 
 /// A float32 tensor as stored on disk: little-endian bytes, base64-encoded.
 #[derive(Debug, Clone, Deserialize)]
@@ -238,7 +283,11 @@ impl CodeCnn {
             ));
         }
         Ok(Self {
-            vocab: raw.vocab,
+            vocab: raw
+                .vocab
+                .into_iter()
+                .map(|(t, id)| (vocab_key(&t).into_owned(), id))
+                .collect(),
             max_len: raw.max_len,
             vocab_rows,
             dim,
@@ -262,7 +311,12 @@ impl CodeCnn {
         let mut ids: Vec<u32> = tokens
             .iter()
             .take(self.max_len)
-            .map(|t| self.vocab.get(t.as_ref()).copied().unwrap_or(UNK_ID))
+            .map(|t| {
+                self.vocab
+                    .get(vocab_key(t.as_ref()).as_ref())
+                    .copied()
+                    .unwrap_or(UNK_ID)
+            })
             .collect();
         let target = MIN_LEN.max(max_k);
         if ids.len() < target {
@@ -371,6 +425,58 @@ mod tests {
         let ids = m.encode(&["x", "x", "x", "x"]);
         assert_eq!(ids.len(), MIN_LEN);
         assert_eq!(&ids[..4], &[2, 2, 2, 0]);
+    }
+
+    #[test]
+    fn fnv64_known_values() {
+        assert_eq!(fnv1a64(b""), 0xcbf2_9ce4_8422_2325);
+        assert_eq!(fnv1a64(b"a"), 0xaf63_dc4c_8601_ec8c);
+        assert_eq!(fnv1a64(b"foobar"), 0x8594_4171_f739_67e8);
+    }
+
+    #[test]
+    fn email_tokens_are_hashed() {
+        // Same value as python/tests/test_nn.py::test_vocab_key_hashes_emails.
+        assert_eq!(vocab_key("dev@example.org"), "<email:3506ad6ec84933e2>");
+        for t in [
+            "os",
+            "@",
+            "@babel/core",
+            "@out.txt",
+            "user@localhost",
+            "a@b.c",
+            "x@1.2.3.4",
+            "a@b..com",
+            "a@@b.com",
+            "<email:3506ad6ec84933e2>",
+        ] {
+            assert_eq!(vocab_key(t), t, "{t}");
+        }
+    }
+
+    #[test]
+    fn plaintext_and_hashed_vocab_keys_give_the_same_ids() {
+        let model = |key: &str| {
+            format!(
+                r#"{{"vocab": {{"<pad>": 0, "<unk>": 1, "{key}": 2}}, "max_len": 4,
+                   "embedding": {{"shape": [3, 1], "data": "{}"}},
+                   "convs": [{{"kernel": 1, "weight": {{"shape": [1, 1, 1], "data": "{}"}}, "bias": {{"shape": [1], "data": "{}"}}}}],
+                   "dense": [{{"weight": {{"shape": [1, 1], "data": "{}"}}, "bias": {{"shape": [1], "data": "{}"}}}}]}}"#,
+                b64(&[0.0, 0.0, 1.0]),
+                b64(&[1.0]),
+                b64(&[0.0]),
+                b64(&[1.0]),
+                b64(&[0.0])
+            )
+        };
+        for key in ["dev@example.org", "<email:3506ad6ec84933e2>"] {
+            let m = CodeCnn::from_json(&model(key)).unwrap();
+            assert_eq!(
+                &m.encode(&["dev@example.org", "x@example.org"])[..2],
+                &[2, UNK_ID]
+            );
+            assert_eq!(m.logit(&["dev@example.org"]), 1.0);
+        }
     }
 
     #[test]

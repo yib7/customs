@@ -92,3 +92,61 @@ def test_vocab_does_not_depend_on_hash_seed():
         for seed in ("1", "2", "3")
     }
     assert len(outs) == 1
+
+
+def test_vocab_key_hashes_emails():
+    # Same value as vocab_key's test in crates/customs-model/src/cnn.rs.
+    assert cnn.vocab_key("dev@example.org") == "<email:3506ad6ec84933e2>"
+    for t in [
+        "os",
+        "@",
+        "@babel/core",
+        "@out.txt",
+        "user@localhost",
+        "a@b.c",
+        "x@1.2.3.4",
+        "a@b..com",
+        "a@@b.com",
+        "<email:3506ad6ec84933e2>",
+    ]:
+        assert cnn.vocab_key(t) == t
+
+
+def test_vocabulary_never_stores_plaintext_emails():
+    docs = [["setup", "dev@example.org", "os"]] * 3
+    cfg = cnn.Config(max_len=8, emb_dim=4, channels=2, hidden=2, kernels=(1,), min_df=1)
+    vocab = cnn.build_vocab(docs, cfg)
+    assert "dev@example.org" not in vocab
+    assert "<email:3506ad6ec84933e2>" in vocab
+    X = cnn.encode(docs, vocab, cfg.max_len)
+    assert X[0, 1] == vocab["<email:3506ad6ec84933e2>"]
+    torch.manual_seed(0)
+    exported = cnn.export(cnn.CodeCNN(len(vocab), cfg).eval(), vocab, cfg)
+    plain = dict(
+        exported,
+        vocab={("dev@example.org" if k.startswith("<email:") else k): v for k, v in vocab.items()},
+    )
+    assert cnn.numpy_forward(exported, docs[0]) == cnn.numpy_forward(plain, docs[0])
+
+
+def test_parity_streams_are_synthetic_and_cover_lengths():
+    vocab = {"<pad>": 0, "<unk>": 1, "os": 2, "exec": 3}
+    streams = cnn.parity_streams({"vocab": vocab, "max_len": 32}, n=25, seed=0)
+    assert len(streams) == 25
+    lengths = {len(s) for s in streams}
+    assert {0, 1, 31, 32, 33, 64} <= lengths
+    allowed = set(vocab) | {
+        "<file>",
+        "import",
+        ".",
+        "system",
+        "(",
+        ")",
+        "<str>",
+        "setup",
+        "author_email",
+        "=",
+        "dev@example.org",
+    }
+    assert all(t in allowed or t.startswith("unseen_") for s in streams for t in s)
+    assert streams == cnn.parity_streams({"vocab": vocab, "max_len": 32}, n=25, seed=0)

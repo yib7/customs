@@ -187,14 +187,16 @@ def stage_cnn(scheme: str = SCHEME, cfg: cnn.Config | None = None) -> None:
     df = load_table()
     split = df[f"split_{scheme}"]
     cfg = cfg or cnn.Config()
-    _, exported, logits, hist, docs = _fit_cnn(df, split, cfg)
+    _, exported, logits, hist, _ = _fit_cnn(df, split, cfg)
     cnn.save(exported, work() / f"code_nn_{scheme}.json")
     (work() / f"cnn_history_{scheme}.json").write_text(json.dumps(hist))
     df[f"cnn_logit_{scheme}"] = logits
-    # Parity fixtures for the Rust forward pass, from real data.
-    rng = np.random.default_rng(0)
-    pick = rng.choice(len(docs), size=min(25, len(docs)), replace=False)
-    fx = [{"tokens": docs[i], "logit": float(cnn.numpy_forward(exported, docs[i]))} for i in pick]
+    # Parity fixtures for the Rust forward pass. Synthetic streams, not rows of the
+    # dataset: the fixtures ship in models/parity/ and must not carry real package code.
+    fx = [
+        {"tokens": t, "logit": float(cnn.numpy_forward(exported, t))}
+        for t in cnn.parity_streams(exported)
+    ]
     (work() / f"cnn_parity_{scheme}.json").write_text(json.dumps(fx))
     df.to_parquet(work() / "dataset.parquet")
 

@@ -621,6 +621,11 @@ install-surface tokens (`ScanReport.tokens`, scanned with `tokens: true`):
   "convs": [ { "kernel": 3, "weight": T [C, D, k], "bias": T [C] }, ... ],
   "dense": [ { "weight": T [out, in], "bias": T [out], "activation": "relu" | "none" }, ... ] }
 ```
+Vocabulary keys: an email-shaped token (`local@domain.tld`, the pattern `EMAIL` in
+`python/customs_ml/nn.py`) is stored and looked up as `<email:HHHHHHHHHHHHHHHH>`, its 64-bit
+FNV-1a hash in hex, so a trained vocabulary never ships a plaintext address. Every other
+token is its own key. Both sides apply the mapping to the file's keys on load as well, so
+plaintext and hashed keys give the same ids.
 Forward: ids = vocab lookup (unknown = 1) of the first `max_len` tokens; if fewer than
 `max(16, largest kernel)`, right-pad with 0 to that length; x = embedding rows (L, D); per
 conv `y[l][c] = bias[c] + sum_{d,j} w[c][d][j] * x[l+j][d]` for `l` in `0..L-k+1` (valid),

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -27,6 +28,24 @@ from torch import nn
 PAD, UNK = 0, 1
 # Documents shorter than this are right-padded to it (also in the Rust forward pass).
 MIN_LEN = 16
+# Email-shaped tokens are stored in the vocabulary as a hash (see ``vocab_key``), so a
+# trained model never ships a plaintext address. Mirrors ``is_email`` in
+# crates/customs-model/src/cnn.rs.
+EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}")
+
+
+def fnv1a64(data: bytes) -> int:
+    h = 0xCBF29CE484222325
+    for b in data:
+        h = ((h ^ b) * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+    return h
+
+
+def vocab_key(token: str) -> str:
+    """``<email:{fnv1a64:016x}>`` for an email-shaped token, the token itself otherwise."""
+    if "@" in token and EMAIL.fullmatch(token):
+        return f"<email:{fnv1a64(token.encode()):016x}>"
+    return token
 
 
 @dataclass
@@ -67,7 +86,7 @@ def build_vocab(docs: Sequence[Sequence[str]], cfg: Config) -> dict[str, int]:
     common = [t for t, c in ranked if c >= cfg.min_df]
     vocab = {"<pad>": PAD, "<unk>": UNK}
     for t in common:
-        vocab[t] = len(vocab)
+        vocab.setdefault(vocab_key(t), len(vocab))
     return vocab
 
 
@@ -75,7 +94,7 @@ def encode(docs: Sequence[Sequence[str]], vocab: dict[str, int], max_len: int) -
     # Length is at least the widest kernel so an empty document still yields a valid conv.
     out = np.zeros((len(docs), max_len), dtype=np.int64)
     for i, d in enumerate(docs):
-        ids = [vocab.get(t, UNK) for t in d[:max_len]]
+        ids = [vocab.get(vocab_key(t), UNK) for t in d[:max_len]]
         out[i, : len(ids)] = ids
     return out
 
@@ -244,8 +263,8 @@ def numpy_forward(exported: dict, tokens: Sequence[str]) -> float:
     def arr(t):
         return np.frombuffer(base64.b64decode(t["data"]), dtype="<f4").reshape(t["shape"])
 
-    vocab = exported["vocab"]
-    ids = [vocab.get(t, UNK) for t in tokens[: exported["max_len"]]]
+    vocab = {vocab_key(k): v for k, v in exported["vocab"].items()}
+    ids = [vocab.get(vocab_key(t), UNK) for t in tokens[: exported["max_len"]]]
     emb = arr(exported["embedding"])
     max_k = max(c["kernel"] for c in exported["convs"])
     # Sequences shorter than MIN_LEN are right-padded with <pad> to MIN_LEN.
@@ -264,6 +283,36 @@ def numpy_forward(exported: dict, tokens: Sequence[str]) -> float:
         if layer["activation"] == "relu":
             h = np.maximum(h, 0)
     return float(h[0])
+
+
+def parity_streams(exported: dict, n: int = 25, seed: int = 0) -> list[list[str]]:
+    """Synthetic token streams for the Rust parity fixtures (``models/parity/code_nn.json``).
+
+    Draws from the model's own vocabulary plus tokens it has never seen, at lengths from
+    empty to past ``max_len``, so the fixtures exercise lookup, padding and truncation
+    without copying any real package's code into the repository.
+    """
+    rng = np.random.default_rng(seed)
+    vocab = [t for t in exported["vocab"] if t not in ("<pad>", "<unk>")]
+    max_len = exported["max_len"]
+    fixed = [
+        [],
+        ["<file>"],
+        ["<file>", "import", "os", "os", ".", "system", "(", "<str>", ")"],
+        ["<file>", "setup", "(", "author_email", "=", "dev@example.org", ")"],
+    ]
+    lengths = [1, 3, 8, 15, 16, 17, 40, 100, 300, max_len - 1, max_len, max_len + 1, 2 * max_len]
+    out = [list(f) for f in fixed]
+    while len(out) < n:
+        length = lengths[(len(out) - len(fixed)) % len(lengths)]
+        stream = ["<file>"]
+        while len(stream) < length:
+            if rng.random() < 0.05:
+                stream.append(f"unseen_{int(rng.integers(0, 1000))}")
+            else:
+                stream.append(vocab[int(rng.integers(0, len(vocab)))])
+        out.append(stream[:length])
+    return out[:n]
 
 
 def save(exported: dict, path: Path) -> None:
