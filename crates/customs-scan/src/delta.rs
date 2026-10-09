@@ -157,7 +157,7 @@ pub fn delta(prev: &Contents, cur: &Contents) -> (Contents, DeltaStats) {
         n_links: 0,
         n_unsafe_paths: 0,
         stripped_prefix: cur.stripped_prefix.clone(),
-        errors: Vec::new(),
+        errors: cur.errors.clone(),
         unread: cur.unread.clone(),
         // Like `n_links`: a link's target may be an unchanged file the delta leaves out.
         links: Vec::new(),
@@ -377,5 +377,20 @@ mod tests {
 "
         );
         assert_eq!((s.n_modified, s.cur_files), (1, 1));
+    }
+
+    #[test]
+    fn current_archive_errors_are_kept() {
+        let prev = contents(&[(
+            "a.py", b"x = 1
+",
+        )]);
+        let mut cur = contents(&[(
+            "a.py", b"x = 2
+",
+        )]);
+        cur.errors.push("link entry skipped: a/b".into());
+        let (d, _) = delta(&prev, &cur);
+        assert_eq!(d.errors, ["link entry skipped: a/b"]);
     }
 }
