@@ -1485,31 +1485,6 @@ async fn events_filters_stats_model_metrics_health() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn cors_allows_only_the_vite_dev_origin() {
-    let h = Harness::start(|_| {}).await;
-    let r = h
-        .http
-        .get(format!("{}/api/stats", h.base))
-        .header("origin", "http://localhost:5173")
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(
-        r.headers()["access-control-allow-origin"],
-        "http://localhost:5173"
-    );
-    let r = h
-        .http
-        .get(format!("{}/api/stats", h.base))
-        .header("origin", "http://evil.example")
-        .send()
-        .await
-        .unwrap();
-    assert!(r.headers().get("access-control-allow-origin").is_none());
-    h.stop().await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn dashboard_serving() {
     let h = Harness::start(|_| {}).await;
     let body = h.get("/").await.text().await.unwrap();
@@ -3248,4 +3223,42 @@ async fn in_process_checks_ignore_a_projects_customs_toml_and_models() {
         let d: Value = serde_json::from_str(out.trim()).unwrap_or_else(|_| panic!("{out:?} {err}"));
         assert_eq!(d["hookSpecificOutput"]["permissionDecision"], "deny", "{d}");
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_vite_dev_origin_cannot_change_the_policy() {
+    let h = Harness::start(|_| {}).await;
+    let mut p: Value = h.get("/api/policy").await.json().await.unwrap();
+    p["mode"] = json!("monitor");
+    // Any page served on Vite's default port, from any project.
+    let r = h
+        .http
+        .put(format!("{}/api/policy", h.base))
+        .header("origin", "http://localhost:5173")
+        .json(&p)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 403);
+    assert_eq!(h.engine.policy().mode, Mode::Enforce);
+    let r = h
+        .http
+        .get(format!("{}/api/events", h.base))
+        .header("origin", "http://localhost:5173")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.headers().get("access-control-allow-origin").is_none());
+    // The dev server proxies /api with the browser's Host, so its dashboard is same-origin.
+    let r = h
+        .http
+        .put(format!("{}/api/policy", h.base))
+        .header("host", "localhost:5173")
+        .header("origin", "http://localhost:5173")
+        .json(&p)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    h.stop().await;
 }

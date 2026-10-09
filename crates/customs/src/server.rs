@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use axum::extract::{MatchedPath, Request, State};
-use axum::http::{header, HeaderValue, Method, StatusCode};
+use axum::http::{header, Method, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{any, get};
@@ -14,7 +14,6 @@ use axum::{Json, Router};
 use serde_json::json;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
-use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
 
 use crate::engine::Engine;
@@ -109,9 +108,6 @@ pub struct ServeOptions {
 /// Shortest admin token accepted.
 pub const MIN_ADMIN_TOKEN_LEN: usize = 16;
 
-/// The dev server origin of the dashboard; the built dashboard is same-origin.
-const DEV_ORIGIN: &str = "http://localhost:5173";
-
 const NOT_BUILT: &str = r#"<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Customs</title>
@@ -125,12 +121,9 @@ code{background:#eee;padding:.1rem .3rem;border-radius:3px}@media(prefers-color-
 <a href="/api/model">/api/model</a>, <a href="/metrics">/metrics</a>.</p>
 </body></html>"#;
 
+/// No CORS: the built dashboard is same-origin, and the Vite dev server proxies `/api`
+/// with the browser's `Host` (`changeOrigin: false`), so its dashboard is same-origin too.
 pub fn router(state: AppState, ui_dir: Option<&Path>) -> Router {
-    let cors = CorsLayer::new()
-        .allow_origin(AllowOrigin::list([HeaderValue::from_static(DEV_ORIGIN)]))
-        .allow_methods([Method::GET, Method::POST, Method::PUT, Method::OPTIONS])
-        .allow_headers([header::CONTENT_TYPE, header::ACCEPT, header::AUTHORIZATION]);
-
     let mut app = Router::new()
         .route("/pypi/simple", get(pypi::simple_index))
         .route("/pypi/simple/", get(pypi::simple_index))
@@ -141,9 +134,7 @@ pub fn router(state: AppState, ui_dir: Option<&Path>) -> Router {
         .route("/npm/{*rest}", any(npm::npm_any))
         .nest(
             "/api",
-            crate::api::router()
-                .layer(middleware::from_fn(guard_api))
-                .layer(cors),
+            crate::api::router().layer(middleware::from_fn(guard_api)),
         )
         .route("/metrics", get(metrics))
         .route("/healthz", get(healthz));
@@ -198,17 +189,17 @@ pub fn host_allowed(host: &str, extra: &[String]) -> bool {
 }
 
 /// A browser `Origin` that may send state-changing requests: the dashboard served by this
-/// server (same host and port) or the Vite dev server.
+/// server (same host and port). Any other page, a dev server on another port included, is
+/// cross-origin.
 pub fn origin_allowed(origin: &str, host: &str) -> bool {
-    origin == DEV_ORIGIN
-        || origin
-            .strip_prefix("http://")
-            .or_else(|| origin.strip_prefix("https://"))
-            .is_some_and(|authority| authority.eq_ignore_ascii_case(host))
+    origin
+        .strip_prefix("http://")
+        .or_else(|| origin.strip_prefix("https://"))
+        .is_some_and(|authority| authority.eq_ignore_ascii_case(host))
 }
 
-/// Refuse state-changing API calls a web page could have made. CORS keeps other origins
-/// from reading responses, but a cross-site form or fetch can still send one, and DNS
+/// Refuse state-changing API calls a web page could have made. Without CORS headers other
+/// origins cannot read responses, but a cross-site form or fetch can still send one, and DNS
 /// rebinding makes the page same-origin: its host name resolves to 127.0.0.1, so the
 /// browser sends `Host: attacker.example`. Non-browser clients send no `Origin`.
 async fn guard_api(req: Request, next: Next) -> Response {
@@ -463,7 +454,8 @@ mod tests {
     #[test]
     fn origins() {
         assert!(origin_allowed("http://127.0.0.1:7878", "127.0.0.1:7878"));
-        assert!(origin_allowed(DEV_ORIGIN, "127.0.0.1:7878"));
+        assert!(!origin_allowed("http://localhost:5173", "127.0.0.1:7878"));
+        assert!(origin_allowed("http://localhost:5173", "localhost:5173"));
         assert!(!origin_allowed("http://evil.example", "127.0.0.1:7878"));
         assert!(!origin_allowed("null", "127.0.0.1:7878"));
     }

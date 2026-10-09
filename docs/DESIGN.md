@@ -734,7 +734,8 @@ Registry proxy:
   and the event log named `requests`. PyPI project names are limited to letters, digits,
   `-`, `_` and `.`.
 
-API (JSON). CORS allows only `http://localhost:5173` (the Vite dev server).
+API (JSON). No CORS headers: the built dashboard is same-origin, and the Vite dev server
+proxies `/api` with the browser's `Host`, so its dashboard is same-origin as well.
 - `POST /api/check` `{ "ecosystem": "pypi", "name": "foo", "version": null, "client": "cli" }`:
   `version` is null (latest), an exact version, a range (`>=1,<2`, `~=1.4`, `^1.2`, npm
   ranges), or an npm dist-tag; it resolves to the newest matching non-yanked version. The
@@ -767,7 +768,7 @@ API (JSON). CORS allows only `http://localhost:5173` (the Vite dev server).
   set it for a team server reached by name). A page that resolves its own host name to
   127.0.0.1 is same-origin to the browser, so CORS alone would not stop it. Any
   state-changing API request carrying a browser `Origin` other than the dashboard's own
-  (or the Vite dev server) is refused with 403 as well; non-browser clients send none.
+  is refused with 403 as well; non-browser clients send none.
   When the server listens on a loopback address, the same `Host` check applies to every
   request, reads and package downloads included, since only a rebound page would name a
   loopback listener by another host name; without it such a page could read the event log
