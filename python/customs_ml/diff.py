@@ -7,7 +7,8 @@ code, and package-level counts are diluted. A maintainer never ships a whole pac
 ship a change. This module builds the *delta* between a release and the one before it and
 trains a model on that.
 
-Delta construction (mirrored exactly by the Rust firewall, see ``crates/customs/src/diff.rs``):
+Delta construction (mirrored exactly by ``customs-scan delta``, see
+``crates/customs-scan/src/delta.rs``):
 
 * Files new in this release are included whole.
 * Files whose bytes changed contribute only their *new lines*: lines of the new file left
@@ -423,6 +424,10 @@ def _pair_one(task: dict) -> list[dict]:
                 donor = load_tree(donor_path)
                 if payload_ok(eco, donor):
                     break
+            else:
+                # No donor with a payload: an injected empty payload would be a label-1 row
+                # with nothing malicious in it.
+                return rows
             injected, mode = inject(eco, cur, donor, rng)
             d2, s2 = build_delta(prev, injected)
             rows.append(
@@ -450,7 +455,7 @@ def stage_pairs(workers: int = 12, limit: int | None = None) -> Path:
     were never a real library (typosquats, fresh malware) have no meaningful previous
     release, so they only serve as payload donors.
     """
-    from .pipeline import load_table
+    from .pipeline import load_table, log
 
     df = load_table()
     if "augmented" in df:
@@ -495,10 +500,9 @@ def stage_pairs(workers: int = 12, limit: int | None = None) -> Path:
         for i, r in rows.iterrows()
         if int(i) not in done
     ]
-    print(
+    log(
         f"{len(tasks)} pairs to build ({len(done)} done); donors",
         {k: len(v) for k, v in donors.items()},
-        flush=True,
     )
     t0 = time.time()
     with ProcessPoolExecutor(workers) as ex, manifest.open("a", encoding="utf-8") as mf:
@@ -507,18 +511,16 @@ def stage_pairs(workers: int = 12, limit: int | None = None) -> Path:
                 mf.write(json.dumps(r) + "\n")
             if n % 500 == 0:
                 mf.flush()
-                print(f"{n}/{len(tasks)} pairs, {time.time() - t0:.0f}s", flush=True)
+                log(f"{n}/{len(tasks)} pairs, {time.time() - t0:.0f}s")
     return manifest
 
 
 # ------------------------------------------------------------------ stage: table
 
 
-STAT_COLS = ["n_added", "n_modified", "n_unchanged", "added_bytes", "cur_files"]
-
-
 def pair_features(stats: pd.DataFrame) -> pd.DataFrame:
-    """Change-size features shared with the Rust firewall (see diff.rs)."""
+    """Change-size features of a pair. Python only: ``customs-scan delta`` reports the raw
+    counts (``DeltaStats`` in ``crates/customs-scan/src/delta.rs``), not these."""
     out = pd.DataFrame(index=stats.index)
     total = stats.cur_files.clip(lower=1)
     out["p_n_added"] = stats.n_added
@@ -527,6 +529,12 @@ def pair_features(stats: pd.DataFrame) -> pd.DataFrame:
     out["p_log_added_bytes"] = np.log1p(stats.added_bytes)
     out["p_log_cur_files"] = np.log1p(stats.cur_files)
     return out
+
+
+def _delta_eco(path: str) -> str:
+    """Ecosystem of a delta archive from its name (``_write_delta``: npm ``.tgz``, PyPI
+    ``.tar.gz``), whatever the path separator."""
+    return "npm" if path.endswith(".tgz") else "pypi"
 
 
 def sweep(min_batch: int = 1) -> int:
@@ -556,7 +564,7 @@ def sweep(min_batch: int = 1) -> int:
         return 0
     by_eco: dict[str, list[str]] = {}
     for p in paths:
-        by_eco.setdefault("npm" if "/diff/npm/" in p else "pypi", []).append(p)
+        by_eco.setdefault(_delta_eco(p), []).append(p)
     paths = [p for eco in sorted(by_eco) for p in by_eco[eco]]
     reports = [
         r
@@ -582,23 +590,24 @@ def sweep(min_batch: int = 1) -> int:
 
 
 def sweep_forever(interval: float = 120) -> None:
+    """Run ``sweep`` every ``interval`` seconds, next to a running ``stage_pairs``."""
+    from .pipeline import log
+
     while True:
-        n = sweep()
-        print(time.strftime("%H:%M:%S"), f"swept {n}", flush=True)
+        log(f"swept {sweep()}")
         time.sleep(interval)
 
 
 def stage_table() -> Path:
-    from .pipeline import work
+    from .pipeline import log, work
 
     sweep()
     out_dir = config.sub("diff")
     pairs = pd.read_json(out_dir / "pairs.jsonl", lines=True)
     ok = pairs[pairs.delta_path.notna()].reset_index(drop=True)
-    print(
+    log(
         f"{len(ok)} deltas of {len(pairs)} attempts; errors:",
         pairs[pairs.delta_path.isna()].error.str.slice(0, 40).value_counts().head(8).to_dict(),
-        flush=True,
     )
     feats = pd.read_json(out_dir / "features.jsonl", lines=True).drop_duplicates("delta_path")
     ok = ok.merge(feats, on="delta_path", how="inner")
@@ -606,7 +615,7 @@ def stage_table() -> Path:
     table = pd.concat([ok.drop(columns=["features"]), f, pair_features(ok)], axis=1)
     path = work() / "diff_dataset.parquet"
     table.to_parquet(path)
-    print(f"wrote {path} {table.shape}", flush=True)
+    log(f"wrote {path} {table.shape}")
     return path
 
 
@@ -779,3 +788,29 @@ def stage_train() -> dict:
     table.drop(columns=["tokens"]).to_parquet(work() / "diff_scored.parquet")
     log(json.dumps({k: report[k] for k in ("pairs", "thresholds", "best_val_ap")}, default=float))
     return report
+
+
+def main(argv: list[str] | None = None) -> None:
+    import argparse
+
+    ap = argparse.ArgumentParser(
+        prog="python -m customs_ml.diff",
+        description="Release diff experiment (docs/DESIGN.md 10.2): build release pairs, "
+        "scan their deltas, build the table, train and evaluate.",
+    )
+    ap.add_argument("stage", choices=["pairs", "sweep", "table", "train"])
+    ap.add_argument("--workers", type=int, default=12, help="pairs: worker processes")
+    ap.add_argument("--limit", type=int, help="pairs: sample this many rows")
+    args = ap.parse_args(argv)
+    if args.stage == "pairs":
+        stage_pairs(args.workers, args.limit)
+    elif args.stage == "sweep":
+        sweep_forever()
+    elif args.stage == "table":
+        stage_table()
+    else:
+        stage_train()
+
+
+if __name__ == "__main__":
+    main()

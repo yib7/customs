@@ -1389,11 +1389,16 @@ Python and Rust build identical deltas (checked on real pairs). Training pairs: 
 release and its predecessor (negative), and the same pair with a training-split malware
 payload injected into the newer release (positive; npm: new postinstall file, appended to
 the entry point, or a shell install script; PyPI: appended to `setup.py`, appended to the
-top `__init__.py`, or a new imported module). Real compromised releases are test only.
-The diff model uses `all_` and structural features plus change-size features; `inst_`
+top `__init__.py`, or a new imported module); a benign pair with no training donor that
+has a payload gets no positive. Real compromised releases are test only.
+The diff model uses `all_` and structural features plus change-size features (computed in
+Python only; `customs-scan delta` reports the raw counts); `inst_`
 features are excluded because the install surface of a delta is not well defined.
 Thresholds come from benign validation pairs at FPR 0.5% and 0.1%. The comparison with the
 base model is made at matched false positive rates. It was not adopted (see the report).
+`python -m customs_ml.diff pairs` fetches previous releases and writes deltas (run
+`python -m customs_ml.diff sweep` beside it to scan and delete them as they appear), then
+`table` and `train`.
 
 ## 11. Lockfile audit (`customs audit`)
 
