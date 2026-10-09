@@ -4,6 +4,7 @@
   "version": "0.9.0",
   "type": "module",
   "description": "Customs dashboard",
+  "license": "MIT",
   "scripts": {
     "dev": "vite",
     "dev:mock": "vite --mode mock",
@@ -16,20 +17,25 @@
     "lint": "eslint .",
     "typecheck": "tsc -b --noEmit"
   },
+  "//": [
+    "typescript stays on 6.0: TypeScript 7 (the native Go compiler) exports no stable JS API, and typescript-eslint, which `npm run lint` needs, supports typescript <6.1.0 in its latest and canary releases. Move to 7 once typescript-eslint does.",
+    "@types/node tracks the Node major in .nvmrc (24); @playwright/test is pinned exactly so the browser build `npx playwright install` fetches matches the test runner.",
+    "The lockfile's one pre-release, gensync 1.0.0-beta.2 (pulled in by @babel/core under eslint-plugin-react-hooks, lint only), is that package's latest release; no stable 1.x exists."
+  ],
   "dependencies": {
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
-    "react-router": "^7.18.4"
+    "react-router": "^8.4.0"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
-    "@playwright/test": "1.56.1",
+    "@playwright/test": "1.64.0",
     "@tailwindcss/vite": "^4.3.3",
     "@testing-library/dom": "^10.4.2",
     "@testing-library/jest-dom": "^7.0.1",
     "@testing-library/react": "^16.3.3",
     "@testing-library/user-event": "^14.6.7",
-    "@types/node": "^22.20.5",
+    "@types/node": "^24.19.1",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.1.2",
@@ -37,11 +43,11 @@
     "eslint-plugin-react-hooks": "^7.1.1",
     "eslint-plugin-react-refresh": "^0.5.7",
     "globals": "^17.13.0",
-    "jsdom": "^29.1.1",
+    "jsdom": "^30.1.2",
     "tailwindcss": "^4.3.3",
     "typescript": "~6.0.3",
     "typescript-eslint": "^8.71.1",
-    "vite": "^8.3.3",
+    "vite": "^8.3.4",
     "vitest": "^5.0.3"
   }
 }

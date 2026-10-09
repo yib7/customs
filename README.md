@@ -87,7 +87,7 @@ flowchart LR
 ## Setup
 
 Customs runs on Linux and macOS. You need git, [rustup](https://rustup.rs) (it installs
-the Rust version pinned in `rust-toolchain.toml`) and [Node.js 22](https://nodejs.org)
+the Rust version pinned in `rust-toolchain.toml`) and [Node.js 24](https://nodejs.org)
 with npm. The first build takes a few minutes.
 
 **Step 1.** Clone the repository.
