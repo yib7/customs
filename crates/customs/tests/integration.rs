@@ -2822,7 +2822,7 @@ async fn a_network_facing_server_without_a_token_refuses_policy_changes() {
     h.stop().await;
 }
 
-// Hook fixes (Phase 3A).
+// ---- Phase 3A: HOOK ----
 
 /// A config whose upstreams refuse connections, so no package can be checked.
 fn dead_upstreams(dir: &std::path::Path) -> String {
@@ -2858,4 +2858,37 @@ async fn hook_fails_closed_on_input_that_once_panicked() {
         .as_str()
         .unwrap();
     assert!(reason.contains("zzevil"), "{reason}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn hook_checks_installs_that_runners_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dead_upstreams(dir.path());
+    let cwd = dir.path().to_path_buf();
+    for command in [
+        "uv run pip install zzevil",
+        "npx -y pnpm add zzevil",
+        "bash -euo pipefail -c 'pip install zzevil'",
+        "cmd /c npx -y zzevil",
+    ] {
+        let (cwd, cfg) = (cwd.clone(), cfg.clone());
+        let (stdout, stderr, code) = tokio::task::spawn_blocking(move || {
+            run_hook(
+                "http://127.0.0.1:9",
+                command,
+                &cwd,
+                &["--config", &cfg, "--fail-closed"],
+            )
+        })
+        .await
+        .unwrap();
+        assert_eq!(code, 0, "{stderr}");
+        let d: Value = serde_json::from_str(stdout.trim())
+            .unwrap_or_else(|_| panic!("{command}: {stdout} {stderr}"));
+        assert_eq!(d["hookSpecificOutput"]["permissionDecision"], "deny", "{d}");
+        let reason = d["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .unwrap();
+        assert!(reason.contains("zzevil"), "{command}: {reason}");
+    }
 }

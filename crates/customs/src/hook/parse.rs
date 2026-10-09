@@ -147,7 +147,7 @@ fn has_positional(args: &[String], with_value: &[&str]) -> bool {
         if !a.starts_with('-') {
             return true;
         }
-        i += if with_value.contains(&a) || a == "--registry" {
+        i += if with_value.contains(&a) || npm_registry_opt(a) == Some(None) {
             2
         } else {
             1
@@ -168,6 +168,16 @@ fn basename(w: &str) -> &str {
     w.rsplit(['/', '\\']).next().unwrap_or(w)
 }
 
+/// A program as named in a command, lower case, without its directory or a Windows
+/// `.exe`, `.cmd`, `.bat` or `.ps1` suffix (`npx.cmd` runs npx).
+fn program_name(w: &str) -> String {
+    let b = basename(w).to_ascii_lowercase();
+    [".exe", ".cmd", ".bat", ".ps1"]
+        .iter()
+        .find_map(|s| b.strip_suffix(s))
+        .map_or_else(|| b.clone(), str::to_string)
+}
+
 fn is_assignment(w: &str) -> bool {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| Regex::new(r"^[A-Za-z_][A-Za-z0-9_]*=").unwrap())
@@ -180,6 +190,14 @@ pub fn parse_command(cmd: &str, cwd: &Path) -> Vec<Install> {
     for words in split_commands(cmd) {
         parse_simple(&words, cwd, &mut out, 0);
     }
+    for (owner, body) in heredocs(cmd) {
+        // Code fed to an interpreter on standard input reads like `python -c` code; a
+        // shell's heredoc lines were already parsed as commands above.
+        let runner = stdin_runner(&owner).map(|r| program_name(&r));
+        if runner.is_some_and(|r| !SHELLS.contains(&r.as_str())) {
+            inline_code(&body, cwd, &mut out, 0);
+        }
+    }
     let mut scripts = Vec::new();
     remote_scripts(cmd, &mut scripts, 0);
     for (url, runner, tool) in scripts {
@@ -189,6 +207,61 @@ pub fn parse_command(cmd: &str, cwd: &Path) -> Vec<Install> {
         });
     }
     out
+}
+
+/// Each heredoc (`cmd <<EOF`, `<<-'EOF'`) in `cmd`: the words of the command that reads
+/// it, and its body.
+fn heredocs(cmd: &str) -> Vec<(Vec<String>, String)> {
+    let mut found = Vec::new();
+    let mut from = 0;
+    while let Some(k) = cmd[from..].find("<<") {
+        let at = from + k;
+        from = at + 2;
+        // `<<<` is a here-string.
+        if cmd[from..].starts_with('<') {
+            from += 1;
+            continue;
+        }
+        let mut rest = &cmd[from..];
+        let strip_tabs = rest.starts_with('-');
+        if strip_tabs {
+            rest = &rest[1..];
+        }
+        let rest = rest.trim_start_matches([' ', '\t']);
+        let delim: String = match rest.chars().next() {
+            Some(q @ ('\'' | '"')) => rest[1..].split(q).next().unwrap_or("").to_string(),
+            _ => rest
+                .trim_start_matches('\\')
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+                .collect(),
+        };
+        let Some(nl) = cmd[from..].find('\n') else {
+            continue;
+        };
+        if delim.is_empty() {
+            continue;
+        }
+        let mut body = String::new();
+        for line in cmd[from + nl + 1..].lines() {
+            let line = line.trim_end_matches('\r');
+            let line = if strip_tabs {
+                line.trim_start_matches('\t')
+            } else {
+                line
+            };
+            if line == delim {
+                break;
+            }
+            body.push_str(line);
+            body.push('\n');
+        }
+        let line_start = cmd[..at].rfind('\n').map_or(0, |i| i + 1);
+        if let Some(owner) = split_commands(&cmd[line_start..at]).pop() {
+            found.push((owner, body));
+        }
+    }
+    found
 }
 
 /// Commands that print a downloaded file to standard output (curl, wget -O-, and the
@@ -204,12 +277,13 @@ const DOWNLOADERS: [&str; 7] = [
 ];
 
 fn is_downloader(word: &str) -> bool {
-    let w = basename(word).to_ascii_lowercase();
-    DOWNLOADERS.contains(&w.trim_end_matches(".exe"))
+    DOWNLOADERS.contains(&program_name(word).as_str())
 }
 
 /// Shells, which run a script read from standard input unless given `-c`.
-const SHELLS: [&str; 7] = ["sh", "bash", "zsh", "dash", "ksh", "ash", "fish"];
+const SHELLS: &[&str] = &[
+    "sh", "bash", "zsh", "dash", "ksh", "ash", "mksh", "posh", "fish",
+];
 /// Interpreters that run a script from standard input only with no argument or `-`.
 const INTERPRETERS: [&str; 9] = [
     "python",
@@ -246,7 +320,7 @@ fn stdin_runner(words: &[String]) -> Option<String> {
     let w = unwrap_runner(words);
     let first = w.first()?;
     let name = basename(first).trim_end_matches(".exe");
-    let lower = name.to_ascii_lowercase();
+    let lower = program_name(first);
     let args = &w[1..];
     if SHELLS.contains(&lower.as_str()) {
         return (!args.iter().any(|a| a == "-c")).then(|| name.to_string());
@@ -624,6 +698,231 @@ fn skip_opts<'a>(mut w: &'a [String], with_value: &[&str]) -> &'a [String] {
     w
 }
 
+/// The command string a POSIX shell or fish runs with `-c` (`bash -euo pipefail -c CMD`,
+/// `bash -c -e CMD`, `fish --command=CMD`): the first word after the options. `None` when
+/// the shell runs a script file or standard input.
+fn shell_command(args: &[String]) -> Option<&str> {
+    let mut c = false;
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        if let Some(v) = a.strip_prefix("--command=") {
+            return Some(v);
+        }
+        if a == "--" {
+            i += 1;
+            break;
+        }
+        if a == "--command" {
+            c = true;
+            i += 1;
+        } else if a.starts_with("--") {
+            // `--rcfile FILE`, `--init-file FILE`, fish `--init-command CMD`; the rest are flags.
+            i += if matches!(a, "--rcfile" | "--init-file" | "--init-command") {
+                2
+            } else {
+                1
+            };
+        } else if let Some(flags) = a.strip_prefix(['-', '+']).filter(|f| !f.is_empty()) {
+            c |= a.starts_with('-') && flags.contains('c');
+            // `-o NAME`, `+o NAME`, `-O NAME` and clusters like `-euo NAME` take a word.
+            i += 1 + flags.chars().filter(|f| matches!(f, 'o' | 'O')).count();
+        } else {
+            break;
+        }
+    }
+    if c {
+        args.get(i).map(String::as_str)
+    } else {
+        None
+    }
+}
+
+/// The command line `cmd /c` or `cmd /k` runs, after cmd's other switches (`/s`, `/q`,
+/// `/d`, `/e:on`, `/v:on`).
+fn cmd_command(args: &[String]) -> Option<String> {
+    for (i, a) in args.iter().enumerate() {
+        let lower = a.to_ascii_lowercase();
+        if !lower.starts_with('/') {
+            return None;
+        }
+        if matches!(lower.as_str(), "/c" | "/k" | "/r") {
+            return Some(args[i + 1..].join(" "));
+        }
+    }
+    None
+}
+
+/// PowerShell options that take a value, as full names; any prefix of three or more
+/// letters names them too.
+const POWERSHELL_VALUE: &[&str] = &[
+    "executionpolicy",
+    "windowstyle",
+    "outputformat",
+    "inputformat",
+    "configurationname",
+    "configurationfile",
+    "psconsolefile",
+    "version",
+    "workingdirectory",
+    "settingsfile",
+    "custompipename",
+    "encodedarguments",
+];
+
+/// The command `pwsh` or `powershell` runs: everything after `-Command` (`-c`), the
+/// decoded `-EncodedCommand` (`-enc`, `-ec`, `-e`), or, for Windows PowerShell, the words
+/// from its first argument on (pwsh reads that argument as a script file). `None` for
+/// `-File` and scripts.
+fn powershell_command(args: &[String], windows_powershell: bool) -> Option<String> {
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        let Some(name) = a.strip_prefix("--").or_else(|| a.strip_prefix('-')) else {
+            return windows_powershell.then(|| args[i..].join(" "));
+        };
+        let name = name.to_ascii_lowercase();
+        let abbreviates = |full: &str| name.len() >= 3 && full.starts_with(name.as_str());
+        if name == "c" || abbreviates("command") {
+            return Some(args[i + 1..].join(" "));
+        }
+        if name == "cwa" || (name.len() > 7 && "commandwithargs".starts_with(name.as_str())) {
+            return args.get(i + 1).cloned();
+        }
+        if name == "e" || name == "ec" || abbreviates("encodedcommand") {
+            return args.get(i + 1).and_then(|v| decode_utf16_base64(v));
+        }
+        if name == "f" || name == "fi" || abbreviates("file") {
+            return None;
+        }
+        let valued = POWERSHELL_VALUE.iter().any(|f| abbreviates(f))
+            || matches!(
+                name.as_str(),
+                "ep" | "ex" | "w" | "o" | "of" | "if" | "v" | "wd" | "ea"
+            );
+        i += if valued { 2 } else { 1 };
+    }
+    None
+}
+
+/// `-EncodedCommand` text: base64 of UTF-16LE.
+fn decode_utf16_base64(v: &str) -> Option<String> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(v.trim())
+        .ok()?;
+    if bytes.len() % 2 != 0 {
+        return None;
+    }
+    let units: Vec<u16> = bytes
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .collect();
+    String::from_utf16(&units).ok()
+}
+
+/// PowerShell text as the POSIX lexer should read it: a backslash separates path
+/// components rather than escaping, and a backtick escapes the next character (at a line
+/// end, it continues the line).
+pub fn powershell_text(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => out.push('/'),
+            '`' => match chars.next() {
+                Some('\r') => {
+                    chars.next_if_eq(&'\n');
+                    out.push(' ');
+                }
+                Some('\n') => out.push(' '),
+                Some(n) => out.push(n),
+                None => {}
+            },
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Parse a PowerShell command line (Claude Code's `PowerShell` tool).
+pub fn parse_powershell(cmd: &str, cwd: &Path) -> Vec<Install> {
+    parse_command(&powershell_text(cmd), cwd)
+}
+
+/// The command a runner starts (`poetry run CMD`, `conda run -n env CMD`): the runner's
+/// options (`with_value` take a value) and an optional `--` are skipped. One word holding
+/// spaces is a command line (`pixi run 'pip install x'`).
+fn run_words(
+    args: &[String],
+    with_value: &[&str],
+    cwd: &Path,
+    out: &mut Vec<Install>,
+    depth: usize,
+) {
+    match skip_opts(args, with_value) {
+        [one] if one.contains(char::is_whitespace) => run_script_text(one, cwd, out, depth),
+        rest => parse_simple(rest, cwd, out, depth + 1),
+    }
+}
+
+/// `conda run`, `mamba run` and `micromamba run` options that take a value.
+const CONDA_RUN_VALUE: &[&str] = &[
+    "-n",
+    "--name",
+    "-p",
+    "--prefix",
+    "--cwd",
+    "-r",
+    "--root-prefix",
+    "-a",
+    "--attach",
+    "-e",
+    "--env",
+    "--label",
+    "--rc-file",
+];
+
+/// `pdm add SPEC...`, and `pdm run CMD`.
+fn pdm(args: &[String], cwd: &Path, out: &mut Vec<Install>, depth: usize) {
+    let rest = skip_opts(args, &["-p", "--project"]);
+    let Some((sub, rest)) = rest.split_first() else {
+        return;
+    };
+    match sub.as_str() {
+        "add" => out.push(Install {
+            tool: "pdm add".into(),
+            targets: pypi_args(rest, cwd),
+        }),
+        "run" => run_words(rest, &["-p", "--project", "--venv"], cwd, out, depth),
+        _ => {}
+    }
+}
+
+/// `hatch [-e ENV] run [ENV:]CMD`.
+fn hatch(args: &[String], cwd: &Path, out: &mut Vec<Install>, depth: usize) {
+    const VALUE: &[&str] = &[
+        "-e",
+        "--env",
+        "-p",
+        "--project",
+        "--data-dir",
+        "--cache-dir",
+        "--config",
+    ];
+    let rest = skip_opts(args, VALUE);
+    let Some(("run", rest)) = rest.split_first().map(|(s, r)| (s.as_str(), r)) else {
+        return;
+    };
+    let mut words = rest.to_vec();
+    if let Some(first) = words.first_mut() {
+        if let Some((_, cmd)) = first.split_once(':') {
+            *first = cmd.to_string();
+        }
+    }
+    run_words(&words, &[], cwd, out, depth);
+}
+
 fn parse_simple(words: &[String], cwd: &Path, out: &mut Vec<Install>, depth: usize) {
     if depth > 4 {
         return;
@@ -715,36 +1014,30 @@ fn parse_simple(words: &[String], cwd: &Path, out: &mut Vec<Install>, depth: usi
             _ => break,
         }
     }
-    let prog = basename(&w[0]).to_ascii_lowercase();
+    let prog = program_name(&w[0]);
     let args = &w[1..];
-    let prog = prog.strip_suffix(".exe").unwrap_or(&prog).to_string();
 
     // Shells and eval run their argument as a script.
-    if matches!(
-        prog.as_str(),
-        "bash" | "sh" | "zsh" | "dash" | "ksh" | "fish"
-    ) {
-        let mut i = 0;
-        while i < args.len() {
-            let a = &args[i];
-            if a.starts_with('-') && !a.starts_with("--") && a.contains('c') {
-                if let Some(script) = args.get(i + 1) {
-                    for cmd in split_commands(script) {
-                        parse_simple(&cmd, cwd, out, depth + 1);
-                    }
-                }
-                return;
-            }
-            if !a.starts_with('-') {
-                return;
-            }
-            i += 1;
+    if SHELLS.contains(&prog.as_str()) {
+        if let Some(script) = shell_command(args) {
+            run_script_text(script, cwd, out, depth);
         }
         return;
     }
     if prog == "eval" {
-        for cmd in split_commands(&args.join(" ")) {
-            parse_simple(&cmd, cwd, out, depth + 1);
+        run_script_text(&args.join(" "), cwd, out, depth);
+        return;
+    }
+    if prog == "cmd" {
+        if let Some(script) = cmd_command(args) {
+            // cmd has no backslash escapes: a backslash separates path components.
+            run_script_text(&script.replace('\\', "/"), cwd, out, depth);
+        }
+        return;
+    }
+    if prog == "pwsh" || prog == "powershell" {
+        if let Some(script) = powershell_command(args, prog == "powershell") {
+            run_script_text(&powershell_text(&script), cwd, out, depth);
         }
         return;
     }
@@ -772,7 +1065,7 @@ fn parse_simple(words: &[String], cwd: &Path, out: &mut Vec<Install>, depth: usi
                 let rest = &args[rest.min(args.len())..];
                 match m {
                     "pip" => pip(rest, cwd, out, "python -m pip"),
-                    "uv" => uv(rest, cwd, out),
+                    "uv" => uv(rest, cwd, out, depth),
                     "pipx" => pipx(rest, cwd, out),
                     _ => {}
                 }
@@ -795,25 +1088,29 @@ fn parse_simple(words: &[String], cwd: &Path, out: &mut Vec<Install>, depth: usi
         }
     } else {
         match prog.as_str() {
-            "uv" => uv(args, cwd, out),
-            "uvx" => tool_run(args, cwd, out, "uvx"),
-            "poetry" => poetry(args, cwd, out),
-            "pipenv" => pipenv(args, cwd, out),
-            "pdm" => subcommand_install(args, &["add"], &["-p", "--project"], |rest| {
-                out.push(Install {
-                    tool: "pdm add".into(),
-                    targets: pypi_args(rest, cwd),
-                })
-            }),
+            "uv" => uv(args, cwd, out, depth),
+            "uvx" => tool_run(args, cwd, out, "uvx", depth),
+            "poetry" => poetry(args, cwd, out, depth),
+            "pipenv" => pipenv(args, cwd, out, depth),
+            "pdm" => pdm(args, cwd, out, depth),
+            "hatch" => hatch(args, cwd, out, depth),
+            "conda" | "mamba" | "micromamba" => {
+                if let Some(("run", rest)) = skip_opts(args, &[])
+                    .split_first()
+                    .map(|(s, r)| (s.as_str(), r))
+                {
+                    run_words(rest, CONDA_RUN_VALUE, cwd, out, depth);
+                }
+            }
             "pipx" => pipx(args, cwd, out),
-            "pixi" => pixi(args, cwd, out),
-            "npm" => npm(args, cwd, out),
-            "pnpm" => pnpm(args, cwd, out),
-            "pnpx" => npx_like(args, out, "pnpx"),
-            "yarn" => yarn(args, cwd, out),
-            "bun" => bun(args, cwd, out),
-            "bunx" => npx_like(args, out, "bunx"),
-            "npx" => npx_like(args, out, "npx"),
+            "pixi" => pixi(args, cwd, out, depth),
+            "npm" => npm(args, cwd, out, depth),
+            "pnpm" => pnpm(args, cwd, out, depth),
+            "pnpx" => npx_like(args, cwd, out, "pnpx", depth),
+            "yarn" => yarn(args, cwd, out, depth),
+            "bun" => bun(args, cwd, out, depth),
+            "bunx" => npx_like(args, cwd, out, "bunx", depth),
+            "npx" => npx_like(args, cwd, out, "npx", depth),
             "deno" => deno(args, cwd, out),
             "node" | "nodejs" => {
                 let mut it = args.iter();
@@ -842,22 +1139,6 @@ fn parse_simple(words: &[String], cwd: &Path, out: &mut Vec<Install>, depth: usi
     }
 }
 
-/// Find the subcommand after global options; call `f` with its arguments when it is one
-/// of `names`.
-fn subcommand_install(
-    args: &[String],
-    names: &[&str],
-    global_with_value: &[&str],
-    f: impl FnOnce(&[String]),
-) {
-    let rest = skip_opts(args, global_with_value);
-    if let Some((sub, rest)) = rest.split_first() {
-        if names.contains(&sub.as_str()) {
-            f(rest);
-        }
-    }
-}
-
 /// `pixi add` options that take a value.
 const PIXI_ADD_VALUE: &[&str] = &[
     "--manifest-path",
@@ -875,13 +1156,29 @@ const PIXI_ADD_VALUE: &[&str] = &[
     "-g",
 ];
 
+/// `pixi run` options that take a value.
+const PIXI_RUN_VALUE: &[&str] = &[
+    "--manifest-path",
+    "-m",
+    "--environment",
+    "-e",
+    "--auth-file",
+    "--pypi-keyring-provider",
+    "--concurrent-solves",
+    "--concurrent-downloads",
+    "--skip",
+];
+
 /// `pixi add --pypi SPEC...`; without `--pypi` the specs are conda packages, which
-/// Customs does not cover.
-fn pixi(args: &[String], cwd: &Path, out: &mut Vec<Install>) {
+/// Customs does not cover. `pixi run CMD` runs a task or a command.
+fn pixi(args: &[String], cwd: &Path, out: &mut Vec<Install>, depth: usize) {
     let rest = skip_opts(args, &["--manifest-path", "-m"]);
     let Some((sub, rest)) = rest.split_first() else {
         return;
     };
+    if sub == "run" {
+        return run_words(rest, PIXI_RUN_VALUE, cwd, out, depth);
+    }
     if sub != "add" || !rest.iter().any(|a| a == "--pypi") {
         return;
     }
@@ -920,12 +1217,13 @@ fn pixi(args: &[String], cwd: &Path, out: &mut Vec<Install>) {
 
 const POETRY_GLOBAL_VALUE: &[&str] = &["-C", "--directory", "-P", "--project"];
 
-fn poetry(args: &[String], cwd: &Path, out: &mut Vec<Install>) {
+fn poetry(args: &[String], cwd: &Path, out: &mut Vec<Install>, depth: usize) {
     let rest = skip_opts(args, POETRY_GLOBAL_VALUE);
     let Some((sub, rest)) = rest.split_first() else {
         return;
     };
     match sub.as_str() {
+        "run" => run_words(rest, &[], cwd, out, depth),
         "add" => out.push(Install {
             tool: "poetry add".into(),
             targets: pypi_args(rest, cwd),
@@ -945,12 +1243,13 @@ fn poetry(args: &[String], cwd: &Path, out: &mut Vec<Install>) {
 /// Options of `pipenv install` that take a value.
 const PIPENV_VALUE: &[&str] = &["--python", "--categories", "--extra-pip-args"];
 
-fn pipenv(args: &[String], cwd: &Path, out: &mut Vec<Install>) {
+fn pipenv(args: &[String], cwd: &Path, out: &mut Vec<Install>, depth: usize) {
     let rest = skip_opts(args, &["--python"]);
     let Some((sub, rest)) = rest.split_first() else {
         return;
     };
     match sub.as_str() {
+        "run" => run_words(rest, &[], cwd, out, depth),
         "install" if has_positional(rest, PIPENV_VALUE) || opt_value(rest, &["-r"]).is_some() => {
             let rest: Vec<String> = strip_opts(rest, PIPENV_VALUE);
             out.push(Install {
@@ -997,20 +1296,75 @@ const PIP_GLOBAL_VALUE: &[&str] = &[
     "--python",
     "--use-feature",
     "--use-deprecated",
+    "--keyring-provider",
+    "--resume-retries",
 ];
 
+/// pip's subcommands.
+const PIP_SUBCOMMANDS: &[&str] = &[
+    "install",
+    "download",
+    "uninstall",
+    "freeze",
+    "inspect",
+    "list",
+    "show",
+    "check",
+    "config",
+    "search",
+    "cache",
+    "index",
+    "wheel",
+    "hash",
+    "completion",
+    "debug",
+    "help",
+    "lock",
+];
+
+/// The index of a tool's subcommand in `args`, past its global options (`takes_value`
+/// says which take a value). An option this table does not know may take a value too
+/// (`pip --new-option v install x`): a `--long` option followed by a word that is not one
+/// of the `known` subcommands is read as an option with its value.
+fn subcommand_at(
+    args: &[String],
+    takes_value: impl Fn(&str) -> bool,
+    known: impl Fn(&str) -> bool,
+) -> Option<usize> {
+    let mut unknown_long = false;
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        if a.starts_with('-') && a != "-" {
+            let takes = takes_value(a);
+            unknown_long = !takes && a.starts_with("--") && a.len() > 2 && !a.contains('=');
+            i += if takes { 2 } else { 1 };
+            continue;
+        }
+        if unknown_long && !known(a) {
+            unknown_long = false;
+            i += 1;
+            continue;
+        }
+        return Some(i);
+    }
+    None
+}
+
 fn pip(args: &[String], cwd: &Path, out: &mut Vec<Install>, tool: &str) {
-    subcommand_install(
+    let Some(at) = subcommand_at(
         args,
-        &["install", "download", "wheel"],
-        PIP_GLOBAL_VALUE,
-        |rest| {
-            out.push(Install {
-                tool: format!("{tool} install"),
-                targets: pypi_args(rest, cwd),
-            })
-        },
-    );
+        |a| PIP_GLOBAL_VALUE.contains(&a),
+        |a| PIP_SUBCOMMANDS.contains(&a),
+    ) else {
+        return;
+    };
+    if matches!(args[at].as_str(), "install" | "download" | "wheel") {
+        out.push(Install {
+            tool: format!("{tool} install"),
+            targets: pypi_args(&args[at + 1..], cwd),
+        });
+    }
 }
 
 const UV_GLOBAL_VALUE: &[&str] = &[
@@ -1024,7 +1378,7 @@ const UV_GLOBAL_VALUE: &[&str] = &[
     "--allow-insecure-host",
 ];
 
-fn uv(args: &[String], cwd: &Path, out: &mut Vec<Install>) {
+fn uv(args: &[String], cwd: &Path, out: &mut Vec<Install>, depth: usize) {
     let rest = skip_opts(args, UV_GLOBAL_VALUE);
     let global = &args[..args.len() - rest.len()];
     let Some((sub, rest)) = rest.split_first() else {
@@ -1073,7 +1427,7 @@ fn uv(args: &[String], cwd: &Path, out: &mut Vec<Install>) {
                         tool: "uv tool install".into(),
                         targets: pypi_args(rest, cwd),
                     }),
-                    "run" => tool_run(rest, cwd, out, "uv tool run"),
+                    "run" => tool_run(rest, cwd, out, "uv tool run", depth),
                     _ => {}
                 }
             }
@@ -1090,7 +1444,14 @@ fn uv(args: &[String], cwd: &Path, out: &mut Vec<Install>) {
             let (forced, at) = uv_run_command(rest);
             let isolated = match rest.get(at) {
                 Some(cmd) if cmd == "-" => true,
-                Some(cmd) => run_script(cmd, forced, cwd, out, "uv run"),
+                Some(cmd) => {
+                    let script = run_script(cmd, forced, cwd, out, "uv run");
+                    if !script {
+                        // A command run in the project's environment (`uv run pip install x`).
+                        parse_simple(&rest[at..], cwd, out, depth + 1);
+                    }
+                    script
+                }
                 None => false,
             };
             let opts = &rest[..at.min(rest.len())];
@@ -1327,7 +1688,8 @@ fn split_with(v: &str) -> Vec<Target> {
 }
 
 /// `uvx` / `uv tool run`: `--from SPEC` names the package, otherwise the command does.
-fn tool_run(args: &[String], cwd: &Path, out: &mut Vec<Install>, tool: &str) {
+/// The command may itself install packages (`uvx pip install x`).
+fn tool_run(args: &[String], cwd: &Path, out: &mut Vec<Install>, tool: &str, depth: usize) {
     const VALUE: &[&str] = &[
         "--python",
         "-p",
@@ -1407,6 +1769,19 @@ fn tool_run(args: &[String], cwd: &Path, out: &mut Vec<Install>, tool: &str) {
             targets,
         });
     }
+    if let Some(cmd) = args.get(i) {
+        // `ruff@0.5` runs the `ruff` command.
+        let name = cmd.split(['@', '=', '<', '>', '[']).next().unwrap_or(cmd);
+        run_command_as(name, &args[i + 1..], cwd, out, depth);
+    }
+}
+
+/// Parse `name args...` as a command one level down: what a package runner starts.
+fn run_command_as(name: &str, args: &[String], cwd: &Path, out: &mut Vec<Install>, depth: usize) {
+    let words: Vec<String> = std::iter::once(name.to_string())
+        .chain(args.iter().cloned())
+        .collect();
+    parse_simple(&words, cwd, out, depth + 1);
 }
 
 fn pipx(args: &[String], cwd: &Path, out: &mut Vec<Install>) {
@@ -1545,6 +1920,12 @@ const PYPI_VALUE: &[&str] = &[
     "--config-file",
     "--use-feature",
     "--dependency-group",
+    "--root-user-action",
+    "--all-releases",
+    "--only-final",
+    "--uploaded-prior-to",
+    "--use-deprecated",
+    "--resume-retries",
 ];
 
 const INDEX_OPTS: &[&str] = &[
@@ -1609,8 +1990,21 @@ pub fn pypi_args(args: &[String], cwd: &Path) -> Vec<Target> {
                     targets.extend(requirements_file(&cwd.join(&f), &f, 0));
                 }
             }
-            "-c" | "--constraint" | "--constraints" | "--override" | "--overrides" => {
+            "-c" | "--constraint" | "--constraints" | "--override" | "--overrides"
+            | "--build-constraint" => {
                 let _ = value(&mut i);
+            }
+            // pip installs what the script's PEP 723 block lists.
+            "--requirements-from-script" => {
+                if let Some(f) = value(&mut i) {
+                    targets.extend(script_metadata(&cwd.join(&f)).unwrap_or_else(|| {
+                        vec![Target::Unverifiable {
+                            ecosystem: Ecosystem::Pypi,
+                            spec: format!("--requirements-from-script {f}"),
+                            reason: format!("the dependencies of script '{f}' could not be read"),
+                        }]
+                    }));
+                }
             }
             "-e" | "--editable" => {
                 if let Some(v) = value(&mut i) {
@@ -1849,26 +2243,47 @@ const NPM_VALUE: &[&str] = &[
     "--backend",
     "--cafile",
     "--ca",
+    "--location",
+    "--fetch-retries",
+    "--fetch-retry-factor",
+    "--fetch-retry-mintimeout",
+    "--fetch-retry-maxtimeout",
+    "--fetch-timeout",
 ];
+
+/// `Some(value)` when `a` sets a registry, `--registry` or a scope's
+/// `--@scope:registry`; the value is `Some` when attached (`--registry=URL`).
+fn npm_registry_opt(a: &str) -> Option<Option<&str>> {
+    let (key, value) = a.split_once('=').map_or((a, None), |(k, v)| (k, Some(v)));
+    (key == "--registry" || (key.starts_with("--@") && key.ends_with(":registry"))).then_some(value)
+}
 
 /// Arguments of `npm install` and friends (after the subcommand).
 pub fn npm_args(args: &[String]) -> Vec<Target> {
+    npm_targets(args, true)
+}
+
+/// The packages (with `packages`) and registries that npm-style arguments name.
+fn npm_targets(args: &[String], packages: bool) -> Vec<Target> {
     let mut targets = Vec::new();
     let mut i = 0;
     let mut positional_only = false;
     while i < args.len() {
         let a = args[i].as_str();
         if positional_only || !a.starts_with('-') {
-            targets.push(parse_npm_spec(a));
+            if packages {
+                targets.push(parse_npm_spec(a));
+            }
         } else if a == "--" {
             positional_only = true;
-        } else if let Some(v) = a.strip_prefix("--registry=") {
-            targets.push(custom_index(Ecosystem::Npm, v));
-        } else if a == "--registry" {
-            if let Some(v) = args.get(i + 1) {
-                targets.push(custom_index(Ecosystem::Npm, v));
+        } else if let Some(v) = npm_registry_opt(a) {
+            let v = v.map(str::to_string).or_else(|| {
+                i += 1;
+                args.get(i).cloned()
+            });
+            if let Some(v) = v {
+                targets.push(custom_index(Ecosystem::Npm, &v));
             }
-            i += 1;
         } else if NPM_VALUE.contains(&a) {
             i += 1;
         }
@@ -1878,25 +2293,73 @@ pub fn npm_args(args: &[String]) -> Vec<Target> {
 }
 
 const NPM_INSTALL: &[&str] = &[
-    "install", "i", "in", "ins", "inst", "insta", "instal", "isnt", "isnta", "isntal", "isntall",
+    "install",
+    "i",
+    "in",
+    "ins",
+    "inst",
+    "insta",
+    "instal",
+    "isnt",
+    "isnta",
+    "isntal",
+    "isntall",
     "add",
+    // Install, then run the tests.
+    "it",
+    "install-test",
 ];
 
-/// First positional argument (the subcommand) after npm-style global options.
-fn npm_subcommand(args: &[String]) -> Option<(&str, &[String])> {
-    let mut i = 0;
-    while i < args.len() {
-        let a = args[i].as_str();
-        if !a.starts_with('-') {
-            return Some((a, &args[i + 1..]));
-        }
-        i += if NPM_VALUE.contains(&a) || a == "--registry" {
-            2
-        } else {
-            1
-        };
-    }
-    None
+/// Other subcommands of npm, pnpm, Yarn and Bun, which an unknown option before them must
+/// not take for its value (see [`subcommand_at`]).
+const NPM_COMMANDS: &[&str] = &[
+    "exec",
+    "x",
+    "init",
+    "create",
+    "innit",
+    "dlx",
+    "global",
+    "a",
+    "c",
+    "run",
+    "run-script",
+    "test",
+    "t",
+    "start",
+    "stop",
+    "restart",
+    "config",
+    "set",
+    "get",
+    "ls",
+    "list",
+    "uninstall",
+    "remove",
+    "rm",
+    "un",
+    "update",
+    "up",
+    "upgrade",
+    "audit",
+    "outdated",
+    "view",
+    "info",
+    "publish",
+    "pack",
+    "link",
+    "why",
+];
+
+/// The subcommand after npm-style global options, the options before it and the
+/// arguments after it.
+fn npm_subcommand(args: &[String]) -> Option<(&str, &[String], &[String])> {
+    let at = subcommand_at(
+        args,
+        |a| NPM_VALUE.contains(&a) || npm_registry_opt(a) == Some(None),
+        |a| NPM_INSTALL.contains(&a) || NPM_CI.contains(&a) || NPM_COMMANDS.contains(&a),
+    )?;
+    Some((args[at].as_str(), &args[..at], &args[at + 1..]))
 }
 
 /// npm's clean-install commands, which install exactly what the lockfile pins.
@@ -1912,19 +2375,14 @@ const NPM_CI: &[&str] = &[
     "sit",
 ];
 
-fn npm(args: &[String], cwd: &Path, out: &mut Vec<Install>) {
-    let Some((sub, rest)) = npm_subcommand(args) else {
+fn npm(args: &[String], cwd: &Path, out: &mut Vec<Install>, depth: usize) {
+    let Some((sub, pre, rest)) = npm_subcommand(args) else {
         return;
     };
-    // Global options may sit before the subcommand (`npm --registry X install y`).
-    let pre: Vec<String> = args
-        .iter()
-        .take_while(|a| a.as_str() != sub)
-        .cloned()
-        .collect();
     let ci = NPM_CI.contains(&sub);
     if NPM_INSTALL.contains(&sub) || ci {
-        let mut targets = npm_args(&pre);
+        // Global options may sit before the subcommand (`npm --registry X install y`).
+        let mut targets = npm_targets(pre, false);
         targets.extend(npm_args(rest));
         if ci || !has_positional(rest, NPM_VALUE) {
             targets.push(project(
@@ -1938,14 +2396,14 @@ fn npm(args: &[String], cwd: &Path, out: &mut Vec<Install>) {
             targets,
         });
     } else if sub == "exec" || sub == "x" {
-        npx_like(rest, out, "npm exec");
+        npx_like(rest, cwd, out, "npm exec", depth);
     } else if matches!(sub, "init" | "create" | "innit") {
         create_like(rest, out, "npm init");
     }
 }
 
-fn pnpm(args: &[String], cwd: &Path, out: &mut Vec<Install>) {
-    let Some((sub, rest)) = npm_subcommand(args) else {
+fn pnpm(args: &[String], cwd: &Path, out: &mut Vec<Install>, depth: usize) {
+    let Some((sub, _, rest)) = npm_subcommand(args) else {
         return;
     };
     match sub {
@@ -1965,15 +2423,15 @@ fn pnpm(args: &[String], cwd: &Path, out: &mut Vec<Install>) {
                 });
             }
         }
-        "dlx" => npx_like(rest, out, "pnpm dlx"),
+        "dlx" => npx_like(rest, cwd, out, "pnpm dlx", depth),
         "create" => create_like(rest, out, "pnpm create"),
         _ => {}
     }
 }
 
-fn yarn(args: &[String], cwd: &Path, out: &mut Vec<Install>) {
+fn yarn(args: &[String], cwd: &Path, out: &mut Vec<Install>, depth: usize) {
     // Bare `yarn` (options only) is `yarn install`.
-    let Some((sub, rest)) = npm_subcommand(args) else {
+    let Some((sub, _, rest)) = npm_subcommand(args) else {
         let info = ["-v", "--version", "-h", "--help"];
         if args.iter().any(|a| info.contains(&a.as_str())) {
             return;
@@ -1986,7 +2444,7 @@ fn yarn(args: &[String], cwd: &Path, out: &mut Vec<Install>) {
     };
     let (sub, rest) = if sub == "global" {
         match npm_subcommand(rest) {
-            Some(x) => x,
+            Some((sub, _, rest)) => (sub, rest),
             None => return,
         }
     } else {
@@ -2002,7 +2460,7 @@ fn yarn(args: &[String], cwd: &Path, out: &mut Vec<Install>) {
                 });
             }
         }
-        "dlx" => npx_like(rest, out, "yarn dlx"),
+        "dlx" => npx_like(rest, cwd, out, "yarn dlx", depth),
         "create" => create_like(rest, out, "yarn create"),
         "install" => out.push(Install {
             tool: "yarn install".into(),
@@ -2012,8 +2470,8 @@ fn yarn(args: &[String], cwd: &Path, out: &mut Vec<Install>) {
     }
 }
 
-fn bun(args: &[String], cwd: &Path, out: &mut Vec<Install>) {
-    let Some((sub, rest)) = npm_subcommand(args) else {
+fn bun(args: &[String], cwd: &Path, out: &mut Vec<Install>, depth: usize) {
+    let Some((sub, _, rest)) = npm_subcommand(args) else {
         return;
     };
     match sub {
@@ -2029,7 +2487,7 @@ fn bun(args: &[String], cwd: &Path, out: &mut Vec<Install>) {
                 });
             }
         }
-        "x" => npx_like(rest, out, "bunx"),
+        "x" => npx_like(rest, cwd, out, "bunx", depth),
         "create" | "c" => create_like(rest, out, "bun create"),
         _ => {}
     }
@@ -2347,9 +2805,11 @@ fn deno_x(args: &[String], out: &mut Vec<Install>, tool: &str) {
 
 /// `npx`, `npm exec`, `pnpm dlx`, `yarn dlx`, `bunx`: `--package` names packages and the
 /// first positional is a command; without `--package` the first positional is the package.
-fn npx_like(args: &[String], out: &mut Vec<Install>, tool: &str) {
+/// The command, or the `-c` command line, may itself install packages (`npx pnpm add x`).
+fn npx_like(args: &[String], cwd: &Path, out: &mut Vec<Install>, tool: &str, depth: usize) {
     let mut targets = Vec::new();
     let mut has_package = false;
+    let mut call = None;
     let mut i = 0;
     while i < args.len() {
         let a = args[i].as_str();
@@ -2366,15 +2826,22 @@ fn npx_like(args: &[String], out: &mut Vec<Install>, tool: &str) {
                 has_package = true;
             }
             i += 1;
+        } else if let Some(v) = a.strip_prefix("--call=") {
+            call = Some(v.to_string());
+            has_package = true;
         } else if a == "-c" || a == "--call" {
             // An inline command; the packages it needs come from --package.
+            call = args.get(i + 1).cloned();
             has_package = true;
             i += 1;
-        } else if a == "--registry" {
-            if let Some(v) = args.get(i + 1) {
-                targets.push(custom_index(Ecosystem::Npm, v));
+        } else if let Some(v) = npm_registry_opt(a) {
+            let v = v.map(str::to_string).or_else(|| {
+                i += 1;
+                args.get(i).cloned()
+            });
+            if let Some(v) = v {
+                targets.push(custom_index(Ecosystem::Npm, &v));
             }
-            i += 1;
         } else if NPM_VALUE.contains(&a) {
             i += 1;
         } else if !a.starts_with('-') {
@@ -2382,8 +2849,9 @@ fn npx_like(args: &[String], out: &mut Vec<Install>, tool: &str) {
         }
         i += 1;
     }
+    let cmd = args.get(i);
     if !has_package {
-        if let Some(cmd) = args.get(i) {
+        if let Some(cmd) = cmd {
             targets.push(parse_npm_spec(cmd));
         }
     }
@@ -2392,6 +2860,15 @@ fn npx_like(args: &[String], out: &mut Vec<Install>, tool: &str) {
             tool: tool.into(),
             targets,
         });
+    }
+    if let Some(call) = call {
+        run_script_text(&call, cwd, out, depth);
+    } else if let Some(cmd) = cmd {
+        // A package's command is named after it: `pnpm@9` runs `pnpm`, `@scope/x` runs `x`.
+        if let Target::Package { name, .. } = parse_npm_spec(cmd) {
+            let bin = name.rsplit('/').next().unwrap_or(&name);
+            run_command_as(bin, &args[i + 1..], cwd, out, depth);
+        }
     }
 }
 
@@ -3590,6 +4067,239 @@ mod tests {
                 .flat_map(|i| i.targets)
                 .collect::<Vec<_>>(),
             vec![py("zzevil", None)]
+        );
+    }
+
+    /// The registry packages `cmd` installs, without project syncs.
+    fn packages(cmd: &str) -> Vec<Target> {
+        targets(cmd)
+            .into_iter()
+            .filter(|t| matches!(t, Target::Package { .. }))
+            .collect()
+    }
+
+    #[test]
+    fn installs_run_through_project_runners() {
+        for cmd in [
+            "uv run pip install evil",
+            "uv run -- pip install evil",
+            "uv run --with rich python -m pip install evil",
+            "poetry run pip install evil",
+            "poetry -C svc run pip install evil",
+            "hatch run pip install evil",
+            "hatch -e test run pip install evil",
+            "hatch run test:pip install evil",
+            "conda run pip install evil",
+            "conda run -n base --no-capture-output pip install evil",
+            "mamba run -p /opt/env pip install evil",
+            "micromamba run -n x pip install evil",
+            "pdm run pip install evil",
+            "pdm run -s -- pip install evil",
+            "pipenv run pip install evil",
+            "pixi run pip install evil",
+            "pixi run -e dev 'pip install evil'",
+        ] {
+            assert!(
+                packages(cmd).contains(&py("evil", None)),
+                "{cmd}: {:?}",
+                targets(cmd)
+            );
+        }
+        // Plain runs install nothing beyond what they did before.
+        assert_eq!(packages("poetry run pytest"), vec![]);
+        assert_eq!(packages("pixi run test"), vec![]);
+    }
+
+    #[test]
+    fn installers_run_by_package_runners() {
+        assert_eq!(
+            packages("uvx pip install evil"),
+            vec![py("pip", None), py("evil", None)]
+        );
+        assert_eq!(
+            packages("uv tool run --from pip pip install evil"),
+            vec![py("pip", None), py("evil", None)]
+        );
+        assert_eq!(
+            packages("npx -y pnpm add evil"),
+            vec![js("pnpm", None), js("evil", None)]
+        );
+        assert_eq!(
+            packages("npx -y pnpm@9 add evil"),
+            vec![js("pnpm", Some("9")), js("evil", None)]
+        );
+        assert_eq!(
+            packages("npm exec --yes -- yarn add evil"),
+            vec![js("yarn", None), js("evil", None)]
+        );
+        assert_eq!(
+            packages("npx -p pnpm -c 'pnpm add evil'"),
+            vec![js("pnpm", None), js("evil", None)]
+        );
+        assert_eq!(packages("npx cowsay hi"), vec![js("cowsay", None)]);
+    }
+
+    #[test]
+    fn shell_options_before_the_script() {
+        for cmd in [
+            "bash -o pipefail -c 'pip install evil'",
+            "bash -euo pipefail -c 'pip install evil'",
+            "zsh -o errexit -c 'pip install evil'",
+            "bash +e -c 'pip install evil'",
+            "bash -c -e 'pip install evil'",
+            "bash --norc --rcfile x -c 'pip install evil'",
+            "bash -O extglob -c 'pip install evil'",
+            "ash -c 'pip install evil'",
+            "mksh -c 'pip install evil'",
+            "fish --command 'pip install evil'",
+            "fish --command='pip install evil'",
+        ] {
+            assert_eq!(packages(cmd), vec![py("evil", None)], "{cmd}");
+        }
+        assert_eq!(packages("bash -o pipefail script.sh"), vec![]);
+        assert_eq!(packages("bash -x install.sh pip"), vec![]);
+    }
+
+    #[test]
+    fn npm_install_test_aliases() {
+        assert_eq!(packages("npm it evil"), vec![js("evil", None)]);
+        assert_eq!(packages("npm install-test evil"), vec![js("evil", None)]);
+    }
+
+    #[test]
+    fn windows_shells_and_program_suffixes() {
+        for cmd in [
+            "cmd /c pip install evil",
+            "cmd.exe /C pip install evil",
+            "cmd /k pip install evil",
+            "cmd /s /c \"pip install evil\"",
+            r#"cmd /c "C:\Python312\python.exe -m pip install evil""#,
+            "pwsh -Command \"pip install evil\"",
+            "pwsh -NoProfile -c 'pip install evil'",
+            "powershell -ExecutionPolicy Bypass -Command pip install evil",
+            "powershell.exe -command \"pip install evil; echo done\"",
+            "powershell \"pip install evil\"",
+            "pip.cmd install evil",
+            "pip.bat install evil",
+            "pip.ps1 install evil",
+        ] {
+            assert_eq!(packages(cmd), vec![py("evil", None)], "{cmd}");
+        }
+        assert_eq!(packages("npx.cmd -y evil"), vec![js("evil", None)]);
+        assert_eq!(packages("cmd /c npx -y evil"), vec![js("evil", None)]);
+        // `pip install evil` encoded as UTF-16LE and base64, as -EncodedCommand takes it.
+        assert_eq!(
+            packages("powershell -enc cABpAHAAIABpAG4AcwB0AGEAbABsACAAZQB2AGkAbAA="),
+            vec![py("evil", None)]
+        );
+        assert_eq!(packages("pwsh -File install.ps1"), vec![]);
+        assert_eq!(packages("pwsh script.ps1 pip"), vec![]);
+        assert_eq!(packages("cmd /c dir"), vec![]);
+    }
+
+    #[test]
+    fn valued_global_options_before_the_subcommand() {
+        for cmd in [
+            "pip --keyring-provider auto install evil",
+            "pip --resume-retries 3 install evil",
+            "pip --some-new-option value install evil",
+        ] {
+            assert_eq!(packages(cmd), vec![py("evil", None)], "{cmd}");
+        }
+        for cmd in [
+            "npm --location global install evil",
+            "npm --location=global install evil",
+            "npm --fetch-retries 3 i evil",
+            "npm --some-new-option value install evil",
+            "pnpm --reporter silent add evil",
+        ] {
+            assert_eq!(packages(cmd), vec![js("evil", None)], "{cmd}");
+        }
+        assert_eq!(packages("npm --silent run build"), vec![]);
+        assert_eq!(packages("pip --verbose list"), vec![]);
+    }
+
+    #[test]
+    fn every_valued_pip_install_option() {
+        assert_eq!(
+            packages("pip install --root-user-action ignore evil"),
+            vec![py("evil", None)]
+        );
+        for opt in [
+            "--build-constraint c.txt",
+            "--all-releases :all:",
+            "--only-final :all:",
+            "--uploaded-prior-to 2025-01-01",
+            "--use-deprecated legacy-certs",
+            "--resume-retries 2",
+            "--group dev",
+        ] {
+            let cmd = format!("pip install {opt} evil");
+            assert_eq!(packages(&cmd), vec![py("evil", None)], "{cmd}");
+        }
+    }
+
+    #[test]
+    fn pip_requirements_from_a_script() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(
+            d.path().join("s.py"),
+            "# /// script\n# dependencies = [\"evil\"]\n# ///\n",
+        )
+        .unwrap();
+        let t: Vec<Target> = parse_command("pip install --requirements-from-script s.py", d.path())
+            .into_iter()
+            .flat_map(|i| i.targets)
+            .collect();
+        assert_eq!(t, vec![py("evil", None)]);
+        // A script that cannot be read installs something nobody can see: ask.
+        let t: Vec<Target> =
+            parse_command("pip install --requirements-from-script gone.py", d.path())
+                .into_iter()
+                .flat_map(|i| i.targets)
+                .collect();
+        assert!(
+            matches!(t.as_slice(), [Target::Unverifiable { spec, .. }] if spec.contains("gone.py")),
+            "{t:?}"
+        );
+    }
+
+    #[test]
+    fn scoped_registry_is_a_custom_index() {
+        for cmd in [
+            "npm i @evil/x --@evil:registry=https://evil.example/",
+            "npm i @evil/x --@evil:registry https://evil.example/",
+            "npm --@evil:registry https://evil.example/ install @evil/x",
+            "pnpm add @evil/x --@evil:registry=https://evil.example/",
+            "npx --@evil:registry=https://evil.example/ @evil/x",
+        ] {
+            let t = targets(cmd);
+            assert!(
+                t.contains(&custom_index(Ecosystem::Npm, "https://evil.example/")),
+                "{cmd}: {t:?}"
+            );
+            assert!(t.contains(&js("@evil/x", None)), "{cmd}: {t:?}");
+        }
+    }
+
+    #[test]
+    fn heredoc_code_fed_to_an_interpreter() {
+        let cmd =
+            "python3 - <<'EOF'\nimport subprocess\nsubprocess.run(['pip', 'install', 'evil'])\nEOF";
+        assert!(
+            packages(cmd).contains(&py("evil", None)),
+            "{:?}",
+            targets(cmd)
+        );
+        let cmd = "node <<EOF\nrequire('child_process').execSync('npm i evil')\nEOF\necho ok";
+        assert!(
+            packages(cmd).contains(&js("evil", None)),
+            "{:?}",
+            targets(cmd)
+        );
+        assert_eq!(
+            packages("cat <<EOF > notes.txt\nsubprocess.run(['pip', 'install', 'evil'])\nEOF"),
+            vec![]
         );
     }
 }

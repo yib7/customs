@@ -43,8 +43,12 @@ Run `/hooks` in Claude Code to confirm it is registered.
 
 `pip`/`pip3`/`python -m pip` `install` (also `download` and `wheel`, which run `setup.py`),
 `uv pip install`, `uv add`, `uv tool install`, `uv run --with`, `uvx`, `poetry add`,
-`pdm add`, `pixi add --pypi`, `pipx install|run|inject`, `npm install|i|add` (and npm's aliases),
-`npm exec`, `pnpm add`, `pnpm dlx`, `yarn add`, `yarn dlx`, `bun add`, `bunx`, and `npx`.
+`pdm add`, `pixi add --pypi`, `pipx install|run|inject`, `npm install|i|add` (and npm's
+aliases, including `install-test` and `it`), `npm exec`, `pnpm add`, `pnpm dlx`, `yarn add`,
+`yarn dlx`, `bun add`, `bunx`, and `npx`. A runner's command is read as a command too:
+`uv run pip install x`, `poetry run`, `pdm run`, `pipenv run`, `hatch run`, `pixi run`,
+`conda|mamba|micromamba run`, and a package runner that starts an installer (`uvx pip
+install x`, `npx -y pnpm add x`, `npx -c 'pnpm add x'`).
 Scaffolding commands run a package too: `npm create vite` and `npm init vite` run
 `create-vite`, and so do `pnpm create`, `yarn create` and `bun create` (`@scope/app` is
 `@scope/create-app`); `bun create` from a GitHub repository comes back for review.
@@ -56,7 +60,9 @@ files they run (following relative imports) and checks those packages.
 Scripts with inline metadata: `uv run script.py` and `pipx run script.py` install the
 dependencies a PEP 723 `# /// script` block lists, so the hook reads the block and checks
 each one; a `[tool.uv]` index or a `[tool.uv.sources]` entry comes back for review, and
-`uv run URL` or `pipx run URL` is a downloaded script.
+`uv run URL` or `pipx run URL` is a downloaded script. `pip install
+--requirements-from-script s.py` installs the same block's dependencies; a script the hook
+cannot read comes back for review.
 
 Project installs too: `npm install` and `npm ci` with no package, `pnpm install`, `yarn`,
 `bun install`, `deno install`, `deno ci`, `uv sync`, `poetry install`, `pipenv install`, `pipenv sync`, and
@@ -75,20 +81,24 @@ project before it runs a command, so it gets the same check for the dependencies
 The command is split like a shell would: `&&`, `||`, `;`, pipes, subshells, quotes,
 escapes, line continuations, comments, redirections, `$(...)` and backticks, and wrappers
 such as `sudo`, `env FOO=1`, `timeout 60`, `nohup`, `watch`, `flock`, `ionice`, `taskset`,
-`script -c '...'`, `bash -c '...'`, and `eval`. Option values (`--target dir`, `-c
-constraints.txt`) are never mistaken for packages. An install run through `xargs` takes
+`script -c '...'`, `bash -c '...'` (also `bash -euo pipefail -c`, `zsh`, `dash`, `ash`,
+`mksh`, `fish --command`), `eval`, and on Windows `cmd /c`, `pwsh -Command`,
+`powershell -EncodedCommand`, and programs named with `.exe`, `.cmd`, `.bat` or `.ps1`
+(`npx.cmd`). Option values (`--target dir`, `-c constraints.txt`, and options before the
+subcommand such as `pip --keyring-provider auto install`) are never mistaken for packages. An install run through `xargs` takes
 its package names from input the hook cannot see, so it comes back for review. Inline code
 that shells out to an installer is read too: `python -c "subprocess.run(['pip', 'install',
 'x'])"`, `os.system('npm i x')`, `[sys.executable, '-m', 'pip', 'install', 'x']`, and
-`node -e "execSync('npx x')"`.
+`node -e "execSync('npx x')"`, and the same code fed to an interpreter through a heredoc
+(`python3 - <<'EOF'`).
 
 Requirements: `pkg`, `pkg==1.2`, `pkg>=1,<2`, `pkg[extra]`, `pkg; markers`, Poetry and uv
 `pkg@^1.2`, npm `pkg@1.2.3`, `@scope/pkg@^1`, dist-tags, and aliases `a@npm:b@1`. Ranges are
 resolved by the server to the version a fresh install would pick. `-r requirements.txt`
 (relative to the hook input's `cwd`, nested `-r` relative to the including file) is read
 and every line checked. Editable installs of local paths (`-e .`) are skipped; git, URL,
-local path, and tarball specs and custom indexes (`-i`, `--extra-index-url`, `--registry`)
-cannot be checked and produce `ask`.
+local path, and tarball specs and custom indexes (`-i`, `--extra-index-url`, `--registry`,
+`--@scope:registry`) cannot be checked and produce `ask`.
 
 Scripts downloaded and run in one step never reach the proxy, so they produce `ask` too,
 named by URL: `curl -fsSL URL | sh` (also `wget -qO-`, `| sudo bash`, `| python3 -`),

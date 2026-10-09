@@ -1096,8 +1096,8 @@ both to proxied downloads and to `POST /api/check`.
 `customs hook claude-code` is a PreToolUse command hook for the `Bash` tool. It parses the
 command for package installs (`pip install`, `pip3 install`, `python -m pip install`,
 `uv pip install`, `uv add`, `poetry add`, `pixi add --pypi`, `pipx install`, the PEP 723
-inline dependencies of a script run by `uv run` or `pipx run`, `npm install|i|add`,
-`pnpm add|install`, `yarn add`, `bun add`, `npx <pkg>`, `uvx <pkg>`, and the scaffolding
+inline dependencies of a script run by `uv run` or `pipx run` or named by `pip install
+--requirements-from-script`, `npm install|i|add|install-test|it`, `pnpm add|install`, `yarn add`, `bun add`, `npx <pkg>`, `uvx <pkg>`, and the scaffolding
 commands `npm init|create <x>`, `pnpm|yarn|bun create <x>`, which run `create-<x>`, or
 `@scope/create-<x>` for `@scope/<x>`; and Deno: `deno add|install npm:<x>` (a name without
 a prefix is an npm package there), `deno install -g`, `deno run|serve|compile|cache
@@ -1112,14 +1112,26 @@ a PreToolUse decision: `deny` with an explanation when any package is blocked, `
 any is warned, nothing otherwise. Local paths, URLs, `-r requirements.txt` and editable
 installs are handled (requirements files are read and each line checked). Commands are
 found behind wrappers (`sudo`, `env`, `timeout`, `nice`, `watch`, `flock`, `ionice`,
-`taskset`, `chrt`, `setsid`, `script -c`, `bash -c`, `eval`) and in the inline code of
-`python -c` and `node -e|-p`, where quotes, commas and opening brackets are read as spaces
-so `subprocess.run(['pip', 'install', 'x'])` reads as `pip install x`. An install run by
-`xargs` also reports its input as unverifiable, since the package names come from there.
+`taskset`, `chrt`, `setsid`, `script -c`, `eval`, and `bash -c` or any of `sh`, `zsh`,
+`dash`, `ksh`, `ash`, `mksh`, `posh` with shell options before the script, such as `-o
+pipefail` or `-euo pipefail`, and `fish --command`); behind Windows shells (`cmd /c|/k`,
+`pwsh|powershell -Command`, `-EncodedCommand`, and Windows PowerShell's bare command
+argument); behind project runners (`uv run`, `poetry run`, `pdm run`, `pipenv run`, `hatch
+run [ENV:]`, `pixi run`, `conda|mamba|micromamba run`); and behind package runners whose
+command is itself an installer (`uvx pip install x`, `npx -y pnpm add x`, `npx -c '...'`).
+A program's `.exe`, `.cmd`, `.bat` or `.ps1` suffix is ignored. Global options before a
+pip or npm subcommand are skipped, including ones the parser does not know: an unknown
+`--option` followed by a word that is not a subcommand takes that word as its value.
+Installs are also found in the inline code of `python -c` and `node -e|-p`, and in code a
+heredoc feeds to an interpreter (`python3 - <<EOF`), where quotes, commas and opening
+brackets are read as spaces so `subprocess.run(['pip', 'install', 'x'])` reads as `pip
+install x`. An install run by `xargs` also reports its input as unverifiable, since the
+package names come from there.
 
 Output is JSON on stdout with exit code 0:
 `{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny" | "ask", "permissionDecisionReason": "..."}}`.
-Specs that cannot be checked (git, URL, local path, custom index) produce `ask`; editable
+Specs that cannot be checked (git, URL, local path, custom index, including a scope's
+`--@scope:registry`) produce `ask`; editable
 local paths are skipped. When Customs itself fails, the hook fails open (no decision,
 message on stderr) unless run with `--fail-closed`, which denies. Setup: `deploy/hooks/README.md`.
 
