@@ -203,6 +203,8 @@ def stage_augment(
 
     for i, row in enumerate(src.itertuples()):
         d = donors[row.ecosystem]
+        if d.empty:
+            continue  # no benign donor in this ecosystem (before any draw, so seeds reproduce)
         donor_row = d.iloc[int(rng.integers(0, len(d)))]
         tname = TRANSFORMS[int(rng.integers(0, len(TRANSFORMS)))]
         try:
@@ -227,5 +229,6 @@ def stage_augment(
     aug = pd.DataFrame(rows)
     df["augmented"] = None
     out = pd.concat([df, aug], ignore_index=True)
-    log(f"augmented {len(aug)} training rows:", aug.augmented.value_counts().to_dict())
+    counts = aug.augmented.value_counts().to_dict() if len(aug) else {}
+    log(f"augmented {len(aug)} training rows:", counts)
     out.to_parquet(work() / "dataset.parquet")
