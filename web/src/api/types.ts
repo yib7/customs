@@ -197,7 +197,12 @@ export interface ModelMetrics {
 export interface ModelInfo {
   model_version: string;
   feature_schema_version: number | null;
+  /** Thresholds in effect: the model's own with numeric policy overrides applied. */
   thresholds: Thresholds | null;
+  /** The model's own thresholds (ensemble.json), before policy overrides. */
+  model_thresholds: Thresholds | null;
+  /** True for placeholder models that were not trained on data. */
+  untrained: boolean;
   metrics: ModelMetrics | null;
 }
 

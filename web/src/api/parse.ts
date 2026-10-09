@@ -452,6 +452,8 @@ export function parseModelInfo(v: unknown): ModelInfo {
     model_version: version,
     feature_schema_version: schema,
     thresholds: parseThresholds(r.thresholds ?? ensemble.thresholds ?? ensemble),
+    model_thresholds: parseThresholds(r.model_thresholds),
+    untrained: asBool(r.untrained, false),
     metrics: parseModelMetrics(r.metrics, r),
   };
 }

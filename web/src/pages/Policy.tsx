@@ -317,7 +317,8 @@ function PolicyForm({
     }
   };
 
-  const modelT = model?.thresholds ?? null;
+  // The model's own thresholds, which "Model default" stands for (not the effective ones).
+  const modelT = model?.model_thresholds ?? null;
 
   return (
     <form onSubmit={(e) => void onSubmit(e)} noValidate className="flex flex-col gap-4" aria-label="Policy">

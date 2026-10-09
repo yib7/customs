@@ -263,6 +263,18 @@ describe('parseModelInfo', () => {
     expect(m.metrics?.guarddog).toEqual({ fpr: 0.03, recall: 0.74, customs_recall: 0.96 });
   });
 
+  it("keeps the model's own thresholds apart from the effective ones", () => {
+    const m = parseModelInfo({
+      model_version: 'x',
+      untrained: true,
+      thresholds: { warn: 0.35, block: 0.9 },
+      model_thresholds: { warn: 0.35, block: 0.8, target_fpr_block: 0.001 },
+    });
+    expect(m.thresholds).toEqual({ warn: 0.35, block: 0.9 });
+    expect(m.model_thresholds).toEqual({ warn: 0.35, block: 0.8, target_fpr_block: 0.001 });
+    expect(m.untrained).toBe(true);
+  });
+
   it('accepts a manifest-only response', () => {
     const m = parseModelInfo({ manifest: { model_version: 'x', feature_schema_version: 1 } });
     expect(m.model_version).toBe('x');

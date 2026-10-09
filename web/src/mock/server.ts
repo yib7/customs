@@ -132,7 +132,7 @@ export class MockServer {
       return this.putPolicy(body, headers.has('Authorization') ? 'token' : 'none');
     }
     if (method === 'GET' && path === '/api/diff') return this.diff(url.searchParams);
-    if (method === 'GET' && path === '/api/model') return json(200, MODEL_INFO);
+    if (method === 'GET' && path === '/api/model') return json(200, this.model());
     if (method === 'POST' && path === '/api/check') return this.check(body);
     if (method === 'GET' && path === '/healthz') return { status: 200, body: 'ok', contentType: 'text/plain' };
     if (method === 'GET' && path === '/metrics') {
@@ -143,6 +143,18 @@ export class MockServer {
       };
     }
     return json(404, { error: `not found: ${method} ${path}` });
+  }
+
+  /** GET /api/model: `thresholds` has the policy overrides applied, `model_thresholds` is the model's own. */
+  private model() {
+    const own = MODEL_INFO.thresholds;
+    const pick = (t: unknown, m: number) => (typeof t === 'number' ? t : m);
+    return {
+      ...MODEL_INFO,
+      untrained: false,
+      thresholds: { ...own, warn: pick(this.policy.warn_threshold, own.warn), block: pick(this.policy.block_threshold, own.block) },
+      model_thresholds: own,
+    };
   }
 
   private listEvents(q: URLSearchParams): MockResponse {

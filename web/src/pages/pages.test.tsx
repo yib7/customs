@@ -81,6 +81,13 @@ describe('Policy page', () => {
     }
   });
 
+  it("labels the model default with the model's own threshold, not the override", async () => {
+    const mock = renderApp('/policy');
+    mock.server.policy.block_threshold = 0.9;
+    const block = await screen.findByRole('group', { name: 'Block threshold' });
+    await waitFor(() => expect(within(block).getByText('Model default (0.80)')).toBeInTheDocument());
+  });
+
   it('edits the release history rules', async () => {
     const user = userEvent.setup();
     renderApp('/policy');
@@ -177,6 +184,15 @@ describe('Verdict page', () => {
     await user.click(within(card).getByRole('button', { name: 'Compare' }));
     expect(await within(card).findByRole('alert')).toHaveTextContent('name two different versions');
     expect(within(card).queryByTestId('release-diff')).toBeNull();
+  });
+});
+
+describe('Model page', () => {
+  it("shows the model's own thresholds when the policy overrides them", async () => {
+    const mock = renderApp('/model');
+    mock.server.policy.block_threshold = 0.9;
+    expect(await screen.findByTestId('model-version')).toBeInTheDocument();
+    expect(screen.getByTestId('model-block-threshold')).toHaveTextContent('0.80');
   });
 });
 

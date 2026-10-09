@@ -77,8 +77,15 @@ const STEPS: { title: string; body: string }[] = [
 
 function ModelBody({ m }: { m: ModelInfo }) {
   const metrics = m.metrics;
+  // The model's own thresholds; the policy may override them (see the Policy page).
+  const t = m.model_thresholds;
   return (
     <div className="flex flex-col gap-4">
+      {m.untrained ? (
+        <p role="status" className="rounded-lg border border-warn/60 bg-warn-soft px-4 py-3 text-sm text-ink">
+          These are placeholder models that were not trained on data. Their scores mean nothing; policy rules still apply.
+        </p>
+      ) : null}
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         <div className="min-w-0 rounded-xl border border-line bg-surface p-4 shadow-card">
           <p className="text-xs font-medium text-ink-2">Model version</p>
@@ -89,15 +96,17 @@ function ModelBody({ m }: { m: ModelInfo }) {
         </div>
         <div className="min-w-0 rounded-xl border border-line bg-surface p-4 shadow-card">
           <p className="text-xs font-medium text-ink-2">Warn threshold</p>
-          <p className="mt-1 text-lg font-semibold text-ink tabular">{m.thresholds ? m.thresholds.warn.toFixed(2) : 'n/a'}</p>
+          <p className="mt-1 text-lg font-semibold text-ink tabular">{t ? t.warn.toFixed(2) : 'n/a'}</p>
           <p className="text-xs text-muted">From validation data</p>
         </div>
         <div className="min-w-0 rounded-xl border border-line bg-surface p-4 shadow-card">
           <p className="text-xs font-medium text-ink-2">Block threshold</p>
-          <p className="mt-1 text-lg font-semibold text-ink tabular">{m.thresholds ? m.thresholds.block.toFixed(2) : 'n/a'}</p>
+          <p className="mt-1 text-lg font-semibold text-ink tabular" data-testid="model-block-threshold">
+            {t ? t.block.toFixed(2) : 'n/a'}
+          </p>
           <p className="text-xs text-muted">
-            {m.thresholds?.target_fpr_block !== undefined
-              ? `Targets ${formatPercent(m.thresholds.target_fpr_block, 1)} false positives`
+            {t?.target_fpr_block !== undefined
+              ? `Targets ${formatPercent(t.target_fpr_block, 1)} false positives`
               : 'From validation data'}
           </p>
         </div>
