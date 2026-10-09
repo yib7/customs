@@ -401,10 +401,18 @@ impl PackageRule {
             }
         };
         let name = name.trim();
-        if name.is_empty() || name.contains(char::is_whitespace) {
-            return Err(format!("'{s}': missing or invalid package name"));
+        // A specifier written as a name would never match anything, so a deny entry
+        // like `pypi:evil>=1.0` would protect nothing.
+        const SYNTAX: &str = "use `pypi:name`, `pypi:name==1.0`, `npm:name` or `npm:name@1.0`                               (exact versions only; ranges and extras are not supported)";
+        if !valid_package_name(ecosystem, name) {
+            return Err(format!("'{s}': missing or invalid package name; {SYNTAX}"));
         }
-        let version = version.map(str::trim).filter(|v| !v.is_empty());
+        let version = version.map(str::trim);
+        if let Some(v) = version {
+            if v.is_empty() || v.contains(|c: char| c.is_whitespace() || "<>=!^~*|,".contains(c)) {
+                return Err(format!("'{s}': invalid version '{v}'; {SYNTAX}"));
+            }
+        }
         Ok(Self {
             ecosystem,
             name: normalize_name(ecosystem, name),
@@ -420,6 +428,28 @@ impl PackageRule {
                 (Some(v), Some(w)) => v == w,
                 (Some(_), None) => false,
             }
+    }
+}
+
+/// A PyPI project name (PEP 508), or an npm name with an optional `@scope/`.
+fn valid_package_name(eco: Ecosystem, name: &str) -> bool {
+    let part = |s: &str, extra: &str| {
+        !s.is_empty()
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || extra.contains(c))
+    };
+    match eco {
+        Ecosystem::Pypi => {
+            part(name, "._-")
+                && name.starts_with(|c: char| c.is_ascii_alphanumeric())
+                && name.ends_with(|c: char| c.is_ascii_alphanumeric())
+        }
+        Ecosystem::Npm => match name.strip_prefix('@') {
+            Some(scoped) => scoped
+                .split_once('/')
+                .is_some_and(|(scope, n)| part(scope, "._~-") && part(n, "._~-")),
+            None => part(name, "._~-"),
+        },
     }
 }
 
@@ -811,5 +841,31 @@ npm = "https://registry.npmjs.org"
         assert!(!r.matches(Ecosystem::Pypi, "python-dateutil", Some("2.9.0")));
         assert!(PackageRule::parse("requests").is_err());
         assert!(PackageRule::parse("pypi:").is_err());
+        assert!(PackageRule::parse("pypi:zope.interface==5.0").is_ok());
+        assert!(PackageRule::parse("npm:lodash.merge@4.6.2").is_ok());
+    }
+
+    #[test]
+    fn package_rule_rejects_specifiers() {
+        for bad in [
+            "pypi:evil>=1.0",
+            "pypi:foo=1.0",
+            "pypi:foo~=1",
+            "pypi:foo[x]",
+            "pypi:foo==",
+            "pypi:foo==>1",
+            "npm:foo@",
+            "npm:foo@^1.2",
+            "npm:@scope/",
+            "npm:@scope",
+            "npm:foo bar",
+            "npm:a/b",
+        ] {
+            let e = PackageRule::parse(bad).unwrap_err();
+            assert!(e.contains(bad), "{bad}: {e}");
+        }
+        let e = Policy::from_toml("deny = [\"npm:ok\", \"pypi:evil>=1.0\"]").unwrap_err();
+        assert_eq!(e.key, "deny[1]");
+        assert!(e.message.contains("pypi:name==1.0"), "{e}");
     }
 }

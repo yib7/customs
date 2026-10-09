@@ -950,7 +950,10 @@ Age comes from registry metadata: PyPI `upload_time_iso_8601` of the specific fi
 the earliest file of the release), npm `time[version]`. `min_age_severity = "warn"` makes
 young versions a warning, so that `block_install_scripts_from_new` is what blocks young npm
 packages with `preinstall`/`install`/`postinstall` scripts. List entries are
-`<ecosystem>:<name>` with an optional `@version` or `==version`; names are normalized. Deny
+`<ecosystem>:<name>` with an optional `@version` or `==version`; names are normalized.
+Only exact versions are supported: an entry with a range, a specifier (`pypi:x>=1.0`,
+`pypi:x=1.0`), extras (`pypi:x[y]`), an empty version (`npm:x@`) or characters a package
+name cannot hold is rejected, since it would never match anything. Deny
 beats allow; allow overrides the model and the other rules. `block_nonexistent = false`
 turns nonexistent names into warnings. Unknown keys and bad values are rejected with the
 key that holds them. Without `--config`, the server reads `./customs.toml`, then
