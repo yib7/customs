@@ -202,7 +202,7 @@ def fetch(name: str, cache: Path) -> dict:
         if e.code != 404:
             return {}
         doc = {"missing": True}
-    except (OSError, ValueError):
+    except OSError, ValueError:
         return {}
     path.write_text(json.dumps(doc))
     return doc
@@ -227,7 +227,7 @@ def archive_package_json(path: str) -> dict | None:
             root = pj.name.rsplit("/", 1)[0]
             doc["_binding_gyp"] = any(m.name == f"{root}/binding.gyp" for m in members)
             return doc
-    except (OSError, tarfile.TarError, ValueError, EOFError, AttributeError):
+    except OSError, tarfile.TarError, ValueError, EOFError, AttributeError:
         return None
 
 

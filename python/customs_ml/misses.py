@@ -110,7 +110,7 @@ def binary_strings(df: pd.DataFrame, scheme: str = SCHEME) -> pd.DataFrame:
                 continue
             try:
                 r = {"path": p, **binary_hits(p)}
-            except (OSError, tarfile.TarError, zipfile.BadZipFile, EOFError):
+            except OSError, tarfile.TarError, zipfile.BadZipFile, EOFError:
                 r = {"path": p, "n_binaries": 0, "error": 1}
             done[p] = r
             f.write(json.dumps(r) + "\n")

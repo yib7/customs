@@ -55,7 +55,7 @@ def npm_search_names(queries: list[str], pages: int = 4, workers: int = 8) -> se
             try:
                 r = s.get(NPM_SEARCH, params={"text": q, "size": 250, "from": 250 * p}, timeout=30)
                 objs = r.json().get("objects", []) if r.ok else []
-            except (requests.RequestException, ValueError):
+            except requests.RequestException, ValueError:
                 break
             out += [o["package"]["name"] for o in objs]
             if len(objs) < 250:

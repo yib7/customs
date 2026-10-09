@@ -103,7 +103,7 @@ def _fetch(name: str) -> tuple[str, dict | None]:
         try:
             with urllib.request.urlopen(req, timeout=30) as r:
                 return name, json.load(r)
-        except (OSError, ValueError, http.client.HTTPException):
+        except OSError, ValueError, http.client.HTTPException:
             continue
     return name, None
 

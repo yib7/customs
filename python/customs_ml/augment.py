@@ -93,7 +93,7 @@ def _own_name(files: Files, eco: str) -> str | None:
     if eco == "npm":
         try:
             name = json.loads(files.get("package.json", b"{}")).get("name")
-        except (ValueError, AttributeError):
+        except ValueError, AttributeError:
             return None
         return name.rsplit("/", 1)[-1] if isinstance(name, str) and name else None
     for ln in files.get("PKG-INFO", b"").split(b"\n"):

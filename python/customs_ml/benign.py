@@ -451,7 +451,7 @@ def _download(
                     raise ValueError("too large")
                 h.update(chunk)
                 fh.write(chunk)
-    except (requests.RequestException, ValueError):
+    except requests.RequestException, ValueError:
         path.unlink(missing_ok=True)
         return None
     return Artifact(
