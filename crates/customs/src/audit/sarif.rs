@@ -6,7 +6,9 @@ use std::path::Path;
 use customs_model::Decision;
 use serde_json::{json, Value};
 
-use super::{display_path, top_reasons, Finding, Outcome, Report};
+use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
+
+use super::{display_path, normalize, top_reasons, Finding, Outcome, Report};
 use crate::util::ecosystem_str;
 use crate::verdict::Verdict;
 
@@ -298,6 +300,44 @@ fn describe(f: &Finding) -> Option<(String, &'static str, String)> {
     }
 }
 
+/// Characters a URI path segment cannot carry as they are.
+const SEGMENT: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'%')
+    .add(b'<')
+    .add(b'>')
+    .add(b'?')
+    .add(b'[')
+    .add(b'\\')
+    .add(b']')
+    .add(b'^')
+    .add(b'`')
+    .add(b'{')
+    .add(b'|')
+    .add(b'}');
+
+/// A file inside the working directory is a relative URI under `%SRCROOT%`; one outside it
+/// is a `file://` URI, since `%SRCROOT%` cannot reach it.
+fn artifact_location(file: &Path, cwd: &Path) -> Value {
+    let shown = display_path(file, cwd);
+    let encoded = || {
+        shown
+            .split('/')
+            .map(|seg| utf8_percent_encode(seg, SEGMENT).to_string())
+            .collect::<Vec<_>>()
+            .join("/")
+    };
+    if Path::new(&shown).is_absolute() || shown.starts_with('/') {
+        return match url::Url::from_file_path(normalize(&cwd.join(file))) {
+            Ok(u) => json!({ "uri": u.as_str() }),
+            Err(()) => json!({ "uri": encoded() }),
+        };
+    }
+    json!({ "uri": encoded(), "uriBaseId": "%SRCROOT%" })
+}
+
 /// Severity order of SARIF levels.
 fn rank(level: &str) -> u8 {
     match level {
@@ -356,10 +396,7 @@ pub fn to_sarif(report: &Report, cwd: &Path) -> Value {
             "message": { "text": message },
             "locations": [{
                 "physicalLocation": {
-                    "artifactLocation": {
-                        "uri": display_path(&f.dep.file, cwd),
-                        "uriBaseId": "%SRCROOT%",
-                    },
+                    "artifactLocation": artifact_location(&f.dep.file, cwd),
                     "region": { "startLine": f.dep.line },
                 }
             }],
@@ -388,10 +425,7 @@ pub fn to_sarif(report: &Report, cwd: &Path) -> Value {
             "message": { "text": format!("{} was not checked: {}.", k.spec, k.reason) },
             "locations": [{
                 "physicalLocation": {
-                    "artifactLocation": {
-                        "uri": display_path(&k.file, cwd),
-                        "uriBaseId": "%SRCROOT%",
-                    },
+                    "artifactLocation": artifact_location(&k.file, cwd),
                     "region": { "startLine": k.line },
                 }
             }],
@@ -477,7 +511,7 @@ pub fn to_sarif(report: &Report, cwd: &Path) -> Value {
 mod tests {
     use super::super::tests::{checked, finding, verdict};
     use super::*;
-    use crate::audit::{SkipKind, Skipped};
+    use crate::audit::{Dependency, SkipKind, Skipped};
     use std::path::PathBuf;
 
     #[test]
@@ -648,6 +682,49 @@ mod tests {
         assert_eq!(r["name"], "UncheckedSource");
         // Notes never fail the build.
         assert_eq!(report.exit_code(super::super::FailOn::Warn), 0);
+    }
+
+    #[test]
+    fn paths_outside_the_root_are_file_uris() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let far = outside.path().join("my dir").join("req#1.txt");
+        let report = Report {
+            files: vec![],
+            findings: vec![
+                Finding {
+                    dep: Dependency {
+                        file: far.clone(),
+                        ..finding("a", 1, Outcome::Mismatch("x".into())).dep
+                    },
+                    outcome: Outcome::Mismatch("x".into()),
+                },
+                Finding {
+                    dep: Dependency {
+                        file: PathBuf::from("sub dir/requirements 100%.txt"),
+                        ..finding("b", 2, Outcome::Mismatch("x".into())).dep
+                    },
+                    outcome: Outcome::Mismatch("x".into()),
+                },
+            ],
+            skipped: vec![],
+            errors: vec![],
+            via: "test".into(),
+        };
+        let s = to_sarif(&report, root.path());
+        let loc = |i: usize| {
+            s["runs"][0]["results"][i]["locations"][0]["physicalLocation"]["artifactLocation"]
+                .clone()
+        };
+        let far_loc = loc(0);
+        let uri = far_loc["uri"].as_str().unwrap();
+        assert!(uri.starts_with("file:///"), "{uri}");
+        assert!(uri.ends_with("/my%20dir/req%231.txt"), "{uri}");
+        assert_eq!(url::Url::parse(uri).unwrap().to_file_path().unwrap(), far);
+        assert!(far_loc.get("uriBaseId").is_none(), "{far_loc}");
+        let near = loc(1);
+        assert_eq!(near["uri"], "sub%20dir/requirements%20100%25.txt");
+        assert_eq!(near["uriBaseId"], "%SRCROOT%");
     }
 
     #[test]

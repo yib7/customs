@@ -1465,7 +1465,7 @@ SARIF 2.1.0 with one run (driver `Customs`), rules `customs/model-block`,
 `customs/model-warn`, `customs/unavailable`, `customs/lockfile-mismatch` and one per policy rule that appears
 (`customs/deny-list`, `customs/nonexistent-package`, `customs/min-age`,
 `customs/install-scripts-from-new-package`, `customs/scan-error`), and one result per warned
-or blocked package, or mismatched entry, at its lockfile line (path relative to the working directory) with
+or blocked package, or mismatched entry, at its lockfile line (a percent-encoded path relative to the working directory under `%SRCROOT%`, or a `file://` URI for a file outside it) with
 `partialFingerprints.customsPackage/v1 = <ecosystem>/<name>/<version>`, so GitHub keeps one
 alert per package version across runs. Not-checked entries that fetch code (git, URL,
 custom index, unrecognised MCP launcher; not local paths or unpinned ranges) are
