@@ -12,20 +12,36 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+coverage/
 
 # Data directory that `customs serve` creates in the working directory
 /.customs/
+# Training data (malware samples) if CUSTOMS_DATA is pointed inside the checkout
+/customs-data/
 
 # Secrets and local settings
 .env
 .env.*
 # Vite settings for the mock API (no secrets)
 !web/.env.mock
+# Documented placeholders only
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
 
 # Editors and OS files
 .vscode/
 .idea/
 .DS_Store
+Thumbs.db
+*.swp
 *.log
 
 # Local agent and release-checklist files

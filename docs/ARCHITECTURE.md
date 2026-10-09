@@ -108,7 +108,8 @@ executed or installed. [EVALUATION.md](EVALUATION.md) has the numbers.
 | `CUSTOMS_SERVER` | `http://127.0.0.1:7878` | Server the hook and CLI talk to |
 | `CUSTOMS_ADMIN_TOKEN` | unset | Required for policy changes when set |
 
-Every flag and variable is listed by `customs serve --help`.
+Every flag and variable is listed by `customs serve --help`, and every variable in
+[`.env.example`](../.env.example).
 
 ## Where to start reading
 
