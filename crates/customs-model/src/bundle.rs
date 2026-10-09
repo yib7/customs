@@ -267,7 +267,7 @@ impl Models {
                 self.ensemble.weight_for(&logits, "code_gbdt") * self.ensemble.clip_scale(out.raw);
             for c in m.top_positive(out, row, 8) {
                 reasons.push(Reason {
-                    label: labels::label_or_name(&c.feature),
+                    label: labels::label_for_value(&c.feature, c.value),
                     value: c.value.is_finite().then_some(c.value),
                     contribution: w * c.contribution,
                     feature: c.feature,
@@ -296,7 +296,7 @@ impl Models {
                     let label = ns
                         .explanation
                         .clone()
-                        .unwrap_or_else(|| labels::label_or_name(&feature));
+                        .unwrap_or_else(|| labels::label_for_value(&feature, *value));
                     reasons.push(Reason {
                         feature,
                         value: Some(*value),
