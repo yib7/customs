@@ -2873,3 +2873,94 @@ async fn a_network_facing_server_without_a_token_refuses_policy_changes() {
     assert_eq!(r.status(), 200);
     h.stop().await;
 }
+
+// ---- Phase 3A: SERVER ----
+
+/// A loopback URL nothing listens on (a port that was just free).
+fn dead_server() -> String {
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    format!("http://{}", l.local_addr().unwrap())
+}
+
+/// Run the real binary (see [`customs_cmd`]) with extra environment and stdin, killed after
+/// `secs`: (stdout, stderr, exit code, or -1 when it had to be killed).
+fn run_customs(
+    args: &[&str],
+    envs: &[(&str, &str)],
+    stdin: &str,
+    secs: u64,
+) -> (String, String, i32) {
+    use std::io::{Read, Write};
+    use std::process::Stdio;
+    let data = tempfile::tempdir().unwrap();
+    let mut child = customs_cmd(data.path(), None)
+        .args(args)
+        .envs(envs.iter().copied())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(stdin.as_bytes())
+        .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(secs);
+    let code = loop {
+        if let Some(s) = child.try_wait().unwrap() {
+            break s.code().unwrap_or(-1);
+        }
+        if std::time::Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            break -1;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let (mut out, mut err) = (String::new(), String::new());
+    child
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_string(&mut out)
+        .unwrap();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut err)
+        .unwrap();
+    (out, err, code)
+}
+
+#[test]
+fn env_backed_flags_accept_1_0_yes_and_no() {
+    let dir = tempfile::tempdir().unwrap();
+    // The shipped compose file and k8s manifest set CUSTOMS_LOG_JSON to "1".
+    for v in ["1", "0", "yes", "true"] {
+        let (out, err, code) = run_customs(&["env"], &[("CUSTOMS_LOG_JSON", v)], "", 30);
+        assert_eq!(code, 0, "CUSTOMS_LOG_JSON={v}: {err}");
+        assert!(out.contains("PIP_INDEX_URL"), "{out}");
+    }
+    let input = json!({
+        "session_id": "t",
+        "cwd": dir.path(),
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"command": "ls"},
+    })
+    .to_string();
+    let server = dead_server();
+    for v in ["1", "0", "no"] {
+        let (_, err, code) = run_customs(
+            &["hook", "claude-code", "--server", &server],
+            &[("CUSTOMS_HOOK_FAIL_CLOSED", v)],
+            &input,
+            30,
+        );
+        assert_eq!(code, 0, "CUSTOMS_HOOK_FAIL_CLOSED={v}: {err}");
+        assert!(!err.contains("invalid value"), "{err}");
+    }
+}

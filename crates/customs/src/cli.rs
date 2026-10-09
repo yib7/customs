@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use clap::builder::BoolishValueParser;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use customs_model::Decision;
 use customs_scan::Ecosystem;
@@ -30,7 +31,7 @@ const DEFAULT_SERVER: &str = "http://127.0.0.1:7878";
 )]
 pub struct Cli {
     /// Log as JSON lines (to stderr).
-    #[arg(long, global = true, env = "CUSTOMS_LOG_JSON")]
+    #[arg(long, global = true, env = "CUSTOMS_LOG_JSON", value_parser = BoolishValueParser::new())]
     pub log_json: bool,
     #[command(subcommand)]
     pub command: Command,
@@ -107,7 +108,7 @@ pub struct ServeArgs {
     pub admin_token_file: Option<PathBuf>,
     /// Accept policy changes without a token on a server that listens beyond loopback,
     /// for a container whose published port is itself bound to loopback.
-    #[arg(long, env = "CUSTOMS_ALLOW_ANONYMOUS_POLICY_CHANGES")]
+    #[arg(long, env = "CUSTOMS_ALLOW_ANONYMOUS_POLICY_CHANGES", value_parser = BoolishValueParser::new())]
     pub allow_anonymous_policy_changes: bool,
 }
 
@@ -272,7 +273,7 @@ pub enum HookTarget {
         #[arg(long, default_value = DEFAULT_SERVER, env = "CUSTOMS_SERVER")]
         server: String,
         /// Deny the command when Customs itself fails (default: allow and log to stderr).
-        #[arg(long, env = "CUSTOMS_HOOK_FAIL_CLOSED")]
+        #[arg(long, env = "CUSTOMS_HOOK_FAIL_CLOSED", value_parser = BoolishValueParser::new())]
         fail_closed: bool,
         #[command(flatten)]
         local: LocalArgs,
@@ -299,7 +300,7 @@ pub struct AgentHookArgs {
     #[arg(long, default_value = DEFAULT_SERVER, env = "CUSTOMS_SERVER")]
     pub server: String,
     /// Deny the command when Customs itself fails (default: allow and log to stderr).
-    #[arg(long, env = "CUSTOMS_HOOK_FAIL_CLOSED")]
+    #[arg(long, env = "CUSTOMS_HOOK_FAIL_CLOSED", value_parser = BoolishValueParser::new())]
     pub fail_closed: bool,
     #[command(flatten)]
     pub local: LocalArgs,
