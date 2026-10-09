@@ -90,9 +90,9 @@ def fetch(listing: Path, workers: int = 16) -> Path:
     manifest = out_dir / "manifest.jsonl"
     done = set()
     if manifest.exists():
-        done = {json.loads(x)["source"] for x in manifest.read_text().splitlines()}
-    todo = [x for x in listing.read_text().splitlines() if x and x not in done]
-    with ThreadPoolExecutor(workers) as ex, manifest.open("a") as mf:
+        done = {json.loads(x)["source"] for x in manifest.read_text(encoding="utf-8").splitlines()}
+    todo = [x for x in listing.read_text(encoding="utf-8").splitlines() if x and x not in done]
+    with ThreadPoolExecutor(workers) as ex, manifest.open("a", encoding="utf-8") as mf:
         for n, row in enumerate(ex.map(lambda r: _fetch_one(r, out_dir), todo), 1):
             mf.write(json.dumps(row) + "\n")
             if n % 1000 == 0:
@@ -125,6 +125,7 @@ def score_with_binary(
             capture_output=True,
             text=True,
             timeout=300,
+            encoding="utf-8",
         )
         try:
             v = json.loads(p.stdout)
@@ -153,9 +154,9 @@ def code_only_models(out: Path) -> Path:
     for f in (ROOT / "models").iterdir():
         if f.is_file():
             shutil.copy(f, out / f.name)
-    man = json.loads((out / "manifest.json").read_text())
+    man = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
     man["name_model"] = None
-    (out / "manifest.json").write_text(json.dumps(man, indent=1))
+    (out / "manifest.json").write_text(json.dumps(man, indent=1), encoding="utf-8")
     return out
 
 
@@ -214,7 +215,9 @@ def evaluate() -> dict:
     df = df[df.source.isna()] if "source" in df else df
     df = df.assign(
         ens_risk=df.ens_risk_temporal,
-        ens_risk_code=code_only_risk(df, json.loads((ROOT / "models/ensemble.json").read_text())),
+        ens_risk_code=code_only_risk(
+            df, json.loads((ROOT / "models/ensemble.json").read_text(encoding="utf-8"))
+        ),
     )
     train_mal = df[(df.label == 1) & (df.split_temporal == "train")]
     all_mal_names = set(df[df.label == 1].name.map(norm))
@@ -241,7 +244,7 @@ def evaluate() -> dict:
     ext["cnn"] = [(v.get("scores") or {}).get("code_nn") for v in verdicts]
     ext["name_score"] = [(v.get("scores") or {}).get("name") for v in verdicts]
 
-    ens = json.loads((ROOT / "models/ensemble.json").read_text())["thresholds"]
+    ens = json.loads((ROOT / "models/ensemble.json").read_text(encoding="utf-8"))["thresholds"]
 
     def rates(g: pd.DataFrame) -> dict:
         r = g.risk.dropna().to_numpy()
@@ -270,7 +273,7 @@ def evaluate() -> dict:
     # (after a scanner change or a retrain) is measured on exactly the same samples.
     frozen_path = work() / "external_malregistry_split.json"
     if frozen_path.exists():
-        frozen = json.loads(frozen_path.read_text())
+        frozen = json.loads(frozen_path.read_text(encoding="utf-8"))
         for col in ("half", "novel", "cluster"):
             ext[col] = [
                 frozen.get(h, {}).get(col, v) for h, v in zip(ext.sha256, ext[col], strict=True)
@@ -282,7 +285,8 @@ def evaluate() -> dict:
                     h: {"half": a, "novel": bool(n), "cluster": int(c)}
                     for h, a, n, c in zip(ext.sha256, ext.half, ext.novel, ext.cluster, strict=True)
                 }
-            )
+            ),
+            encoding="utf-8",
         )
     ext["novel"] = ext.novel.astype(bool)
     nv = ext[ext.novel]
@@ -304,7 +308,9 @@ def evaluate() -> dict:
         "thresholds": ens,
     }
     ext.drop(columns=["tokens"]).to_parquet(work() / "external_malregistry.parquet")
-    (work() / "external_malregistry.json").write_text(json.dumps(summary, indent=1))
+    (work() / "external_malregistry.json").write_text(
+        json.dumps(summary, indent=1), encoding="utf-8"
+    )
     print(json.dumps(summary, indent=1))
     return summary
 
@@ -315,7 +321,7 @@ def _corpus_rows(df: pd.DataFrame, sel: pd.DataFrame, work_dir: Path) -> pd.Data
 
     reports = features.scan_paths(list(sel.path), tokens=True)
     pop = name_model.Popular.from_list("pypi", names.popular("pypi"))
-    nm = json.loads((work_dir / "name_model.json").read_text())
+    nm = json.loads((work_dir / "name_model.json").read_text(encoding="utf-8"))
     base = int(df.cluster.max()) + 1
     rows = []
     for r, rep in zip(sel.itertuples(), reports, strict=True):
@@ -390,14 +396,14 @@ def adapt(fraction: float = 1.0, seed: int = 0) -> dict:
         pipeline.stage_cnn(cfg=cnn.Config(max_len=768, epochs=10, patience=3))
         pipeline.stage_ensemble()
         df = pipeline.load_table()
-        ens = json.loads((pipeline.work() / "ensemble_temporal.json").read_text())
+        ens = json.loads((pipeline.work() / "ensemble_temporal.json").read_text(encoding="utf-8"))
     finally:
         if prev is None:
             os.environ.pop("CUSTOMS_DATA", None)
         else:
             os.environ["CUSTOMS_DATA"] = prev
 
-    main_ens = json.loads((ROOT / "models/ensemble.json").read_text())
+    main_ens = json.loads((ROOT / "models/ensemble.json").read_text(encoding="utf-8"))
     control = control[control.augmented.isna()]
     control = control.assign(ens_risk=control.ens_risk_temporal)
     control["ens_risk_code"] = code_only_risk(control, main_ens)
@@ -434,7 +440,7 @@ def adapt(fraction: float = 1.0, seed: int = 0) -> dict:
         },
     }
     dest = main / "work" / f"external_adapt_{int(round(fraction * 100))}.json"
-    dest.write_text(json.dumps(out, indent=1))
+    dest.write_text(json.dumps(out, indent=1), encoding="utf-8")
     print(json.dumps(out, indent=1))
     return out
 

@@ -99,7 +99,7 @@ def stage_split() -> None:
     df["split_temporal"] = t.values
     df["split_grouped"] = splits.assign_grouped(df).values
     meta = {"val_cutoff": t.attrs["val_cutoff"], "test_cutoff": t.attrs["test_cutoff"]}
-    (work() / "split_meta.json").write_text(json.dumps(meta))
+    (work() / "split_meta.json").write_text(json.dumps(meta), encoding="utf-8")
     for s in ("split_temporal", "split_grouped"):
         log(s, df.groupby([s, "label"]).size().to_dict())
     log("temporal cutoffs", meta)
@@ -189,7 +189,7 @@ def stage_cnn(scheme: str = SCHEME, cfg: cnn.Config | None = None) -> None:
     cfg = cfg or cnn.Config()
     _, exported, logits, hist, _ = _fit_cnn(df, split, cfg)
     cnn.save(exported, work() / f"code_nn_{scheme}.json")
-    (work() / f"cnn_history_{scheme}.json").write_text(json.dumps(hist))
+    (work() / f"cnn_history_{scheme}.json").write_text(json.dumps(hist), encoding="utf-8")
     df[f"cnn_logit_{scheme}"] = logits
     # Parity fixtures for the Rust forward pass. Synthetic streams, not rows of the
     # dataset: the fixtures ship in models/parity/ and must not carry real package code.
@@ -197,7 +197,7 @@ def stage_cnn(scheme: str = SCHEME, cfg: cnn.Config | None = None) -> None:
         {"tokens": t, "logit": float(cnn.numpy_forward(exported, t))}
         for t in cnn.parity_streams(exported)
     ]
-    (work() / f"cnn_parity_{scheme}.json").write_text(json.dumps(fx))
+    (work() / f"cnn_parity_{scheme}.json").write_text(json.dumps(fx), encoding="utf-8")
     df.to_parquet(work() / "dataset.parquet")
 
 
@@ -216,7 +216,7 @@ def stage_names() -> None:
     # Malicious names reported after the validation cutoff are future knowledge: the
     # temporal evaluation must not let the name model learn from them.
     cutoff = pd.Timestamp(
-        json.loads((work() / "split_meta.json").read_text())["val_cutoff"], tz="UTC"
+        json.loads((work() / "split_meta.json").read_text(encoding="utf-8"))["val_cutoff"], tz="UTC"
     )
     nd = nd[(nd.label == 0) | (nd.published < cutoff)]
     models, report = {}, {}
@@ -243,7 +243,7 @@ def stage_names() -> None:
         df.loc[rows, "name_logit"] = clf.decision_function(Xd)
     exported = name_model.export(models, {"pypi": "popular_pypi.txt", "npm": "popular_npm.txt"})
     name_model.save(exported, work() / "name_model.json")
-    (work() / "name_report.json").write_text(json.dumps(report, indent=2))
+    (work() / "name_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     fx = []
     for eco in ("pypi", "npm"):
         pop = name_model.Popular.from_list(eco, names.popular(eco))
@@ -267,7 +267,7 @@ def stage_names() -> None:
                     "logit": name_model.score_exported(exported, eco, s, pop),
                 }
             )
-    (work() / "name_parity.json").write_text(json.dumps(fx, indent=1))
+    (work() / "name_parity.json").write_text(json.dumps(fx, indent=1), encoding="utf-8")
     df.to_parquet(work() / "dataset.parquet")
 
 
@@ -291,7 +291,7 @@ def stage_ablation(scheme: str = SCHEME) -> None:
         }
         out[name] = metrics.summarize(y[te], sc[te], thr).as_dict()
         log("ablation", name, out[name])
-    (work() / f"ablation_{scheme}.json").write_text(json.dumps(out, indent=1))
+    (work() / f"ablation_{scheme}.json").write_text(json.dumps(out, indent=1), encoding="utf-8")
     df.to_parquet(work() / "dataset.parquet")
 
 
@@ -407,7 +407,7 @@ def fit_ensemble(df: pd.DataFrame, scheme: str = SCHEME) -> tuple[dict, np.ndarr
 def stage_ensemble(scheme: str = SCHEME) -> None:
     df = load_table()
     ens, risk = fit_ensemble(df, scheme)
-    (work() / f"ensemble_{scheme}.json").write_text(json.dumps(ens, indent=1))
+    (work() / f"ensemble_{scheme}.json").write_text(json.dumps(ens, indent=1), encoding="utf-8")
     df[f"ens_risk_{scheme}"] = risk
     df.to_parquet(work() / "dataset.parquet")
 

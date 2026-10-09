@@ -36,7 +36,11 @@ line-length = 100
 target-version = "py314"
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I", "B", "UP", "SIM"]
+# PLW1514 (unspecified-encoding) is a preview rule; explicit-preview-rules keeps every other
+# preview rule off, so text I/O must name its encoding without changing anything else.
+preview = true
+explicit-preview-rules = true
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "PLW1514"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

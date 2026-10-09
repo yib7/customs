@@ -481,7 +481,7 @@ def download_all(
     done: dict[tuple[str, str], int] = {}
     have: set[tuple[str, str]] = set()
     if manifest.exists():
-        for line in manifest.read_text().splitlines():
+        for line in manifest.read_text(encoding="utf-8").splitlines():
             a = json.loads(line)
             have.add((a["ecosystem"], normalize(a["ecosystem"], a["name"])))
             key = (a["ecosystem"], a["tier"])
@@ -506,7 +506,7 @@ def download_all(
         except Exception:  # noqa: BLE001 - one bad package must not stop the crawl
             return None
 
-    with ThreadPoolExecutor(workers) as ex, manifest.open("a") as mf:
+    with ThreadPoolExecutor(workers) as ex, manifest.open("a", encoding="utf-8") as mf:
         futs = [ex.submit(work, c) for c in todo]
         for fut in as_completed(futs):
             a = fut.result()

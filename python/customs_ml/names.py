@@ -113,8 +113,8 @@ def build(n_pypi_neg: int = 250_000, seed: int = 5) -> pd.DataFrame:
     ]
     out = config.sub("names")
     df.to_parquet(out / "names.parquet")
-    (out / "popular_pypi.txt").write_text("\n".join(popular_pypi()) + "\n")
-    (out / "popular_npm.txt").write_text("\n".join(popular_npm()) + "\n")
+    (out / "popular_pypi.txt").write_text("\n".join(popular_pypi()) + "\n", encoding="utf-8")
+    (out / "popular_npm.txt").write_text("\n".join(popular_npm()) + "\n", encoding="utf-8")
     return df
 
 
@@ -123,4 +123,6 @@ def load() -> pd.DataFrame:
 
 
 def popular(ecosystem: str) -> list[str]:
-    return Path(config.sub("names") / f"popular_{ecosystem}.txt").read_text().split()
+    return (
+        Path(config.sub("names") / f"popular_{ecosystem}.txt").read_text(encoding="utf-8").split()
+    )

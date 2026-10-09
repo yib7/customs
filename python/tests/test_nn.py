@@ -88,6 +88,7 @@ def test_vocab_does_not_depend_on_hash_seed():
             text=True,
             check=True,
             env={**__import__("os").environ, "PYTHONHASHSEED": seed},
+            encoding="utf-8",
         ).stdout
         for seed in ("1", "2", "3")
     }

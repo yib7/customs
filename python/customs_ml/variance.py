@@ -136,15 +136,15 @@ def run(seeds: tuple[int, ...] = DEFAULT_SEEDS, scheme: str = SCHEME) -> dict:
         runs.append(r)
         res = {"scheme": scheme, "seeds": list(seeds), "runs": runs}
         res["spread"] = summarize_runs(runs)
-        path.write_text(json.dumps(res, indent=1))
+        path.write_text(json.dumps(res, indent=1), encoding="utf-8")
     return res
 
 
 def score_exported(df: pd.DataFrame, models: Path) -> tuple[np.ndarray, dict]:
     """Risk for every row from an exported model directory (gbdt, cnn, ensemble JSON)."""
-    g_m = json.loads((models / "code_gbdt.json").read_text())
-    n_m = json.loads((models / "code_nn.json").read_text())
-    ens = json.loads((models / "ensemble.json").read_text())
+    g_m = json.loads((models / "code_gbdt.json").read_text(encoding="utf-8"))
+    n_m = json.loads((models / "code_nn.json").read_text(encoding="utf-8"))
+    ens = json.loads((models / "ensemble.json").read_text(encoding="utf-8"))
     X = df[["f_" + n for n in g_m["feature_names"]]].to_numpy(dtype=float)
     g = gbdt.predict_raw_exported(g_m, X)
     c = np.array([cnn.numpy_forward(n_m, list(t)) for t in df.tokens])
@@ -165,7 +165,7 @@ def compare(models: dict[str, Path], scheme: str = SCHEME) -> dict:
         risk, thr = score_exported(df, path)
         out[label] = test_metrics(df, risk, thr, scheme)
         log("compare", label, {k: round(v, 4) for k, v in out[label].items()})
-    (work() / "model_compare.json").write_text(json.dumps(out, indent=1))
+    (work() / "model_compare.json").write_text(json.dumps(out, indent=1), encoding="utf-8")
     return out
 
 

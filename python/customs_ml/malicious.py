@@ -237,7 +237,7 @@ def _ingest_one(args: tuple[str, str, str]) -> dict:
 
 def iter_sample_paths(repo: Path, tree_listing: Path | None = None) -> Iterator[str]:
     if tree_listing is not None:
-        for line in tree_listing.read_text().splitlines():
+        for line in tree_listing.read_text(encoding="utf-8").splitlines():
             if SAMPLE_RE.search(line) and (repo / line).exists():
                 yield line
         return
@@ -252,10 +252,12 @@ def ingest(repo: Path, workers: int = 4, tree_listing: Path | None = None) -> Pa
     manifest = out_dir / "manifest.jsonl"
     done = set()
     if manifest.exists():
-        done = {json.loads(line)["source"] for line in manifest.read_text().splitlines()}
+        done = {
+            json.loads(line)["source"] for line in manifest.read_text(encoding="utf-8").splitlines()
+        }
     todo = [(str(repo), rel, str(out_dir)) for rel in iter_sample_paths(repo, tree_listing)]
     todo = [t for t in todo if t[1] not in done]
-    with ProcessPoolExecutor(workers) as ex, manifest.open("a") as mf:
+    with ProcessPoolExecutor(workers) as ex, manifest.open("a", encoding="utf-8") as mf:
         for row in ex.map(_ingest_one, todo, chunksize=16):
             mf.write(json.dumps(row) + "\n")
     return manifest

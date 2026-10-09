@@ -186,4 +186,4 @@ def contributions_exported(model: dict, x: np.ndarray) -> tuple[float, np.ndarra
 
 
 def save(model: dict, path: Path) -> None:
-    path.write_text(json.dumps(model, separators=(",", ":")))
+    path.write_text(json.dumps(model, separators=(",", ":")), encoding="utf-8")

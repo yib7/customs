@@ -52,7 +52,7 @@ def b64(arr):
 
 
 def dump(path, obj):
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         json.dump(obj, f, indent=1, sort_keys=True)
         f.write("\n")
 
@@ -386,9 +386,9 @@ def main():
     dump(os.path.join(OUT, "expected_gbdt.json"), {"cases": cases})
 
     # Name model.
-    with open(os.path.join(MODELS, "popular_pypi.txt"), "w") as f:
+    with open(os.path.join(MODELS, "popular_pypi.txt"), "w", encoding="utf-8") as f:
         f.write("\n".join(normalize("pypi", n) for n in POPULAR_PYPI) + "\n")
-    with open(os.path.join(MODELS, "popular_npm.txt"), "w") as f:
+    with open(os.path.join(MODELS, "popular_npm.txt"), "w", encoding="utf-8") as f:
         f.write("\n".join(normalize("npm", n) for n in POPULAR_NPM) + "\n")
     pops = {"pypi": Popular("pypi", POPULAR_PYPI), "npm": Popular("npm", POPULAR_NPM)}
     n_buckets = 4096

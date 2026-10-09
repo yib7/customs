@@ -208,4 +208,4 @@ def nearest_popular(name: str, pop: Popular) -> tuple[str | None, int]:
 
 
 def save(model: dict, path: Path) -> None:
-    path.write_text(json.dumps(model, separators=(",", ":")))
+    path.write_text(json.dumps(model, separators=(",", ":")), encoding="utf-8")

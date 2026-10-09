@@ -56,7 +56,7 @@ def scan_paths(
     with tempfile.TemporaryDirectory() as td:
         inp = Path(td) / "paths.txt"
         out = Path(td) / "out.jsonl"
-        inp.write_text("\n".join(paths) + "\n")
+        inp.write_text("\n".join(paths) + "\n", encoding="utf-8")
         cmd = [scanner_bin(), "batch", "--input", str(inp), "--output", str(out)]
         if tokens:
             cmd.append("--tokens")

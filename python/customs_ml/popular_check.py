@@ -86,7 +86,7 @@ def summarize(rows: list[dict]) -> dict:
 
 def names(eco: str, n: int) -> list[str]:
     path = REPO / "models" / f"popular_{eco}.txt"
-    return [x.strip() for x in path.read_text().splitlines() if x.strip()][:n]
+    return [x.strip() for x in path.read_text(encoding="utf-8").splitlines() if x.strip()][:n]
 
 
 def main() -> None:
@@ -101,7 +101,9 @@ def main() -> None:
         rows = list(ex.map(lambda j: check(args.server, *j), jobs))
     summary = summarize(rows)
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(json.dumps({"rows": rows, "summary": summary}, indent=1) + "\n")
+    args.out.write_text(
+        json.dumps({"rows": rows, "summary": summary}, indent=1) + "\n", encoding="utf-8"
+    )
     for eco, s in summary.items():
         print(
             f"{eco}: {s['checked']} checked, {s['errors']} errors; model {s['model']}; "

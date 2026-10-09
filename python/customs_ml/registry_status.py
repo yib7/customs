@@ -72,7 +72,7 @@ def classify(version: str, entry: dict | None) -> str | None:
 
 def load() -> dict | None:
     p = work() / PATH_NAME
-    return json.loads(p.read_text()) if p.exists() else None
+    return json.loads(p.read_text(encoding="utf-8")) if p.exists() else None
 
 
 def status_column(df, snapshot: dict) -> list[str | None]:
@@ -95,7 +95,7 @@ def stage_registry_status(scheme: str = SCHEME, path: Path | None = None) -> dic
         "fetched": datetime.now(UTC).isoformat(timespec="seconds"),
         "status": {f"{e}|{n}": v for (e, n), v in res.items()},
     }
-    (path or work() / PATH_NAME).write_text(json.dumps(snap))
+    (path or work() / PATH_NAME).write_text(json.dumps(snap), encoding="utf-8")
     cls = status_column(t, snap)
     counts = {c: cls.count(c) for c in ("removed", "still_published", None)}
     log("registry status of test malware:", counts)

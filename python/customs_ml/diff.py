@@ -478,7 +478,7 @@ def stage_pairs(workers: int = 12, limit: int | None = None) -> Path:
     manifest = out_dir / "pairs.jsonl"
     done = set()
     if manifest.exists():
-        done = {json.loads(x)["row"] for x in manifest.read_text().splitlines()}
+        done = {json.loads(x)["row"] for x in manifest.read_text(encoding="utf-8").splitlines()}
     tasks = [
         {
             "row": int(i),
@@ -501,7 +501,7 @@ def stage_pairs(workers: int = 12, limit: int | None = None) -> Path:
         flush=True,
     )
     t0 = time.time()
-    with ProcessPoolExecutor(workers) as ex, manifest.open("a") as mf:
+    with ProcessPoolExecutor(workers) as ex, manifest.open("a", encoding="utf-8") as mf:
         for n, res in enumerate(ex.map(_pair_one, tasks, chunksize=4), 1):
             for r in res:
                 mf.write(json.dumps(r) + "\n")
@@ -541,9 +541,11 @@ def sweep(min_batch: int = 1) -> int:
     feats = out_dir / "features.jsonl"
     seen = set()
     if feats.exists():
-        seen = {json.loads(x)["delta_path"] for x in feats.read_text().split("\n") if x}
+        seen = {
+            json.loads(x)["delta_path"] for x in feats.read_text(encoding="utf-8").split("\n") if x
+        }
     paths = []
-    for line in (out_dir / "pairs.jsonl").read_text().split("\n"):
+    for line in (out_dir / "pairs.jsonl").read_text(encoding="utf-8").split("\n"):
         if not line:
             continue
         p = json.loads(line).get("delta_path")
@@ -561,7 +563,7 @@ def sweep(min_batch: int = 1) -> int:
         for eco in sorted(by_eco)
         for r in features.scan_paths(by_eco[eco], tokens=True, ecosystem=eco)
     ]
-    with feats.open("a") as f:
+    with feats.open("a", encoding="utf-8") as f:
         for p, r in zip(paths, reports, strict=True):
             f.write(
                 json.dumps(
@@ -690,9 +692,9 @@ def stage_train() -> dict:
         "warn": metrics.threshold_at_fpr(yva, rva, DIFF_FPR_WARN),
         "block": metrics.threshold_at_fpr(yva, rva, DIFF_FPR_BLOCK),
     }
-    ens = json.loads((Path(__file__).resolve().parents[2] / "models/ensemble.json").read_text())[
-        "thresholds"
-    ]
+    ens = json.loads(
+        (Path(__file__).resolve().parents[2] / "models/ensemble.json").read_text(encoding="utf-8")
+    )["thresholds"]
     ens = {k: ens[k] for k in ("warn", "block")}
     val_benign = table[(table.label == 0) & (table.split == "val")]
 
@@ -770,8 +772,10 @@ def stage_train() -> dict:
     )
     report["top_features"] = imp.head(15).round(1).to_dict()
     out = {"format": "customs-diff-v1", "features": cols, "thresholds": thresholds, "model": model}
-    (work() / "diff_model.json").write_text(json.dumps(out))
-    (work() / "diff_eval.json").write_text(json.dumps(report, indent=1, default=float))
+    (work() / "diff_model.json").write_text(json.dumps(out), encoding="utf-8")
+    (work() / "diff_eval.json").write_text(
+        json.dumps(report, indent=1, default=float), encoding="utf-8"
+    )
     table.drop(columns=["tokens"]).to_parquet(work() / "diff_scored.parquet")
     log(json.dumps({k: report[k] for k in ("pairs", "thresholds", "best_val_ap")}, default=float))
     return report

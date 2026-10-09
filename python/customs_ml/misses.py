@@ -102,9 +102,11 @@ def binary_strings(df: pd.DataFrame, scheme: str = SCHEME) -> pd.DataFrame:
     path = work() / "binary_strings.jsonl"
     done = {}
     if path.exists():
-        done = {r["path"]: r for r in map(json.loads, path.read_text().splitlines())}
+        done = {
+            r["path"]: r for r in map(json.loads, path.read_text(encoding="utf-8").splitlines())
+        }
     rows = df[df.f_n_binary > 0]
-    with path.open("a") as f:
+    with path.open("a", encoding="utf-8") as f:
         for p in rows.canonical_path:
             if p in done:
                 continue
@@ -176,7 +178,7 @@ def run(scheme: str = SCHEME) -> dict:
         df = df[df.augmented.isna()]
     if "source" in df:
         df = df[df.source.isna()]
-    ens = json.loads((work() / f"ensemble_{scheme}.json").read_text())
+    ens = json.loads((work() / f"ensemble_{scheme}.json").read_text(encoding="utf-8"))
     res = categorize(df, ens["thresholds"]["warn"], scheme)
     hits = binary_strings(df, scheme)
     stealer = [k for k in [*STEALER_STRINGS, "ip_url"] if k in hits]
@@ -189,7 +191,7 @@ def run(scheme: str = SCHEME) -> dict:
             **{k: float((g[k] > 0).mean()) for k in PACKERS if k in g},
         }
     res["binary_strings"] = prev
-    Path(work() / "misses.json").write_text(json.dumps(res, indent=1))
+    Path(work() / "misses.json").write_text(json.dumps(res, indent=1), encoding="utf-8")
     log("misses", res["categories"], res["binary_only"])
     return res
 

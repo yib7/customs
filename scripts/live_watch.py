@@ -78,10 +78,10 @@ def watch(out: Path, server: str, workers: int, hours: float) -> None:
     out.mkdir(parents=True, exist_ok=True)
     scans = out / "scans.jsonl"
     state_path = out / "state.json"
-    state = json.loads(state_path.read_text()) if state_path.exists() else {}
+    state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
     seen: set[tuple[str, str]] = set()
     if scans.exists():
-        for line in scans.read_text().splitlines():
+        for line in scans.read_text(encoding="utf-8").splitlines():
             r = json.loads(line)
             seen.add((r["name"], r["version"]))
     rpc = xmlrpc.client.ServerProxy(f"{PYPI}/pypi")
@@ -134,7 +134,7 @@ def watch(out: Path, server: str, workers: int, hours: float) -> None:
                 "scanned_ms": v.get("scanned_ms"),
                 "seconds": round(time.time() - t0, 2),
             }
-            with lock, scans.open("a") as f:
+            with lock, scans.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(row) + "\n")
             pending.task_done()
 
@@ -162,7 +162,7 @@ def watch(out: Path, server: str, workers: int, hours: float) -> None:
                 pending.put((ts + DELAY, name, version, ts))
         state["serial"] = serial
         state["queued"] = len(seen)
-        state_path.write_text(json.dumps(state))
+        state_path.write_text(json.dumps(state), encoding="utf-8")
         print(
             f"{now()} serial {serial} queued {len(seen)} backlog {pending.qsize()}",
             flush=True,
@@ -170,7 +170,7 @@ def watch(out: Path, server: str, workers: int, hours: float) -> None:
         time.sleep(60)
     pending.join()
     state["stopped"] = now()
-    state_path.write_text(json.dumps(state))
+    state_path.write_text(json.dumps(state), encoding="utf-8")
 
 
 # ------------------------------------------------------------------ follow-up
@@ -179,7 +179,9 @@ def watch(out: Path, server: str, workers: int, hours: float) -> None:
 def follow(out: Path) -> None:
     """Record, for every scanned release, whether PyPI still serves its project and whether
     an OpenSSF malicious-package report covers that release."""
-    rows = [json.loads(line) for line in (out / "scans.jsonl").read_text().splitlines()]
+    rows = [
+        json.loads(line) for line in (out / "scans.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
     names = sorted({r["name"] for r in rows})
     ossf = ossf_matches(rows, ossf_pypi_reports())
     status: dict[str, int] = {}
@@ -195,7 +197,7 @@ def follow(out: Path) -> None:
     with ThreadPoolExecutor(16) as ex:
         list(ex.map(check, names))
     rec = {"checked_at": now(), "status": status, "ossf": ossf}
-    with (out / "followups.jsonl").open("a") as f:
+    with (out / "followups.jsonl").open("a", encoding="utf-8") as f:
         f.write(json.dumps(rec) + "\n")
     gone = sum(1 for s in status.values() if s == 404)
     print(f"{len(names)} names; {gone} removed; OSSF reports cover {len(ossf)} releases: {ossf}")
@@ -286,6 +288,8 @@ def ossf_paths_from_clone() -> list[str]:
                 capture_output=True,
                 text=True,
                 timeout=600,
+                encoding="utf-8",
+                errors="replace",
             )
         except (subprocess.SubprocessError, OSError) as e:
             print(f"OSSF clone failed: {e}")
@@ -300,7 +304,10 @@ def report(out: Path) -> dict:
     import pandas as pd
 
     rows = pd.read_json(out / "scans.jsonl", lines=True)
-    ups = [json.loads(line) for line in (out / "followups.jsonl").read_text().splitlines()]
+    ups = [
+        json.loads(line)
+        for line in (out / "followups.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
     last = ups[-1]
     first_gone: dict[str, str] = {}
     for u in ups:
@@ -312,7 +319,7 @@ def report(out: Path) -> dict:
     rows["ossf"] = [f"{n}=={v}" in covered for n, v in zip(rows.name, rows.version, strict=True)]
     scored = rows[rows.risk.notna()]
     state_path = out / "state.json"
-    state = json.loads(state_path.read_text()) if state_path.exists() else {}
+    state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
     by = scored.groupby("model_decision")
     summary = {
         "window": [
@@ -344,7 +351,7 @@ def report(out: Path) -> dict:
             if last["status"].get(n) == 404
         },
     }
-    (out / "report.json").write_text(json.dumps(summary, indent=1))
+    (out / "report.json").write_text(json.dumps(summary, indent=1), encoding="utf-8")
     print(json.dumps(summary, indent=1))
     return summary
 

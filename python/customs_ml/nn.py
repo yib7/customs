@@ -316,4 +316,4 @@ def parity_streams(exported: dict, n: int = 25, seed: int = 0) -> list[list[str]
 
 
 def save(exported: dict, path: Path) -> None:
-    path.write_text(json.dumps(exported, separators=(",", ":")))
+    path.write_text(json.dumps(exported, separators=(",", ":")), encoding="utf-8")

@@ -57,6 +57,7 @@ def _datadog_listing() -> list[str]:
             check=True,
             capture_output=True,
             text=True,
+            encoding="utf-8",
         ).stdout
     return [p for p in out.split("\n") if malicious.SAMPLE_RE.search(p)]
 
@@ -104,7 +105,7 @@ def cmd_malicious(args) -> None:
         with ThreadPoolExecutor(16) as ex:
             list(ex.map(fetch, chunk))
         listing = raw_dir / "chunk.txt"
-        listing.write_text("\n".join(chunk) + "\n")
+        listing.write_text("\n".join(chunk) + "\n", encoding="utf-8")
         malicious.ingest(raw_dir, workers=args.workers, tree_listing=listing)
         for p in raw_dir.rglob("*.zip"):
             p.unlink()
@@ -140,7 +141,9 @@ def cmd_train(args) -> None:
         work = pipeline.work()
         for f in ("eval", "robustness", "ensemble", "ablation"):
             src = work / f"{f}_{pipeline.SCHEME}.json"
-            (work / f"baseline_{src.name}").write_text(src.read_text())
+            (work / f"baseline_{src.name}").write_text(
+                src.read_text(encoding="utf-8"), encoding="utf-8"
+            )
         pipeline.main(["augment", "gbdt", "ablation"])
         pipeline.stage_cnn(cfg=cnn.Config(max_len=768, epochs=10, patience=3))
         pipeline.main(["ensemble", "evaluate", "export"])

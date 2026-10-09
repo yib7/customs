@@ -147,10 +147,11 @@ def main() -> None:
         # off and the model decides every sample, as in the evaluation.
         "[established]\nenabled = false\n"
         f'[upstream]\npypi_simple = "{base}/simple"\npypi_files = "{base}/files"\n'
-        f'pypi_json = "{base}/pypi"\nnpm = "{base}/npm"\n'
+        f'pypi_json = "{base}/pypi"\nnpm = "{base}/npm"\n',
+        encoding="utf-8",
     )
     proxy = f"http://127.0.0.1:{args.port}"
-    with open(work / "server.log", "w") as log:
+    with open(work / "server.log", "w", encoding="utf-8") as log:
         server = subprocess.Popen(
             [
                 str(ROOT / "target/release/customs"),
@@ -244,7 +245,9 @@ def main() -> None:
                 "p50_ms": float(np.median(lats)),
             }
             print(json.dumps(res, indent=1))
-            (data / "work" / "loadtest.json").write_text(json.dumps(res, indent=1))
+            (data / "work" / "loadtest.json").write_text(
+                json.dumps(res, indent=1), encoding="utf-8"
+            )
         finally:
             server.terminate()
             server.wait(timeout=30)

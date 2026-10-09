@@ -13,7 +13,7 @@ from .pipeline import SCHEME, work
 
 def _load(name: str) -> dict | None:
     p = work() / name
-    return json.loads(p.read_text()) if p.exists() else None
+    return json.loads(p.read_text(encoding="utf-8")) if p.exists() else None
 
 
 def pct(x, digits: int = 1) -> str:
@@ -987,7 +987,7 @@ def render(scheme: str = SCHEME) -> str:
 
 def main() -> None:
     out = config.DOCS_DIR / "EVALUATION.md"
-    out.write_text(render())
+    out.write_text(render(), encoding="utf-8")
     print("wrote", out)
 
 
