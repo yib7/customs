@@ -22,6 +22,8 @@ export default defineConfig({
     target: 'es2022',
     sourcemap: false,
     chunkSizeWarningLimit: 400,
+    // The bundled libraries' license notices, shipped next to the dashboard (MIT requires it).
+    license: { fileName: 'THIRD_PARTY_LICENSES.md' },
   },
   test: {
     environment: 'jsdom',

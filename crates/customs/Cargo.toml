@@ -3,6 +3,7 @@ name = "customs"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 description = "Package firewall for AI coding agents"
 
 [lib]

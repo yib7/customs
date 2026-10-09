@@ -3,6 +3,7 @@ name = "customs-scan"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 description = "Safe archive unpacking and static feature extraction for package malware detection"
 
 [lib]

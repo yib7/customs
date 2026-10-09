@@ -3,6 +3,7 @@ name = "customs-model"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 description = "Inference for Customs malware models (tree ensemble, name model, code CNN)"
 
 [dependencies]
