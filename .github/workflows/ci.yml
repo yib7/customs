@@ -101,6 +101,20 @@ jobs:
           cache-to: type=gha,mode=max
 
   # Runs the README's Setup steps, as written, on a fresh runner with nothing cached.
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - run: cargo audit
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: web/.nvmrc
+      - run: npm audit --audit-level=high
+        working-directory: web
+
   readme:
     runs-on: ubuntu-latest
     steps:

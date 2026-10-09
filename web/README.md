@@ -2,11 +2,11 @@
 
 The web UI for Customs: what your package managers and coding agents tried to install, and why something was blocked. It is a static React app served by `customs serve` at `/` and talks to the JSON API on the same origin (see `docs/DESIGN.md`, sections 6 to 8).
 
-![Overview](screenshots/overview-light-desktop.png)
+![Overview page with mock data: install counts, blocks per day, decisions by ecosystem and the live feed](screenshots/overview-light-desktop.png)
 
 | Verdict detail | Check a package (dark, phone) |
 |---|---|
-| ![Verdict](screenshots/verdict-light-desktop.png) | ![Check](screenshots/check-dark-phone.png) |
+| ![Verdict page for a blocked package: risk gauge, per-model scores and the reasons behind the score](screenshots/verdict-light-desktop.png) | ![Check a package form in dark mode at phone width, with the verdict for a blocked npm package below it](screenshots/check-dark-phone.png) |
 
 ## Pages
 
