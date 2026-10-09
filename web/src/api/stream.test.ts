@@ -110,6 +110,54 @@ describe('LiveConnection', () => {
     conn.stop();
   });
 
+  it('catches up on the first open, so events from before the subscription are not lost', async () => {
+    const { conn, events } = setup(vi.fn(async () => [ev(3), ev(2)]));
+    conn.markSeen(['2']);
+    conn.start();
+    FakeES.instances[0]!.open();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(events.map((e) => e.id)).toEqual(['3']);
+    conn.stop();
+  });
+
+  it('catches up when the server says the stream lagged', async () => {
+    let server: CustomsEvent[] = [];
+    const { conn, events } = setup(vi.fn(async () => server));
+    conn.start();
+    const es = FakeES.instances[0]!;
+    es.open();
+    await vi.advanceTimersByTimeAsync(0);
+    server = [ev(9), ev(8)];
+    es.dispatchEvent(new MessageEvent('lagged', { data: '2' }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(events.map((e) => e.id)).toEqual(['8', '9']);
+    conn.stop();
+  });
+
+  it('survives a failed catch-up and reports successful ones', async () => {
+    const fetchEvents = vi.fn(async (): Promise<CustomsEvent[]> => {
+      throw new Error('down');
+    });
+    const onCatchUp = vi.fn();
+    const conn = new LiveConnection({
+      EventSourceImpl: FakeES as unknown as typeof EventSource,
+      onEvent: () => undefined,
+      onStatus: () => undefined,
+      onCatchUp,
+      fetchEvents,
+    });
+    conn.start();
+    FakeES.instances[0]!.open();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchEvents).toHaveBeenCalledTimes(1);
+    expect(onCatchUp).not.toHaveBeenCalled();
+    fetchEvents.mockResolvedValueOnce([]);
+    FakeES.instances[0]!.dispatchEvent(new MessageEvent('lagged', { data: '1' }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(onCatchUp).toHaveBeenCalledTimes(1);
+    conn.stop();
+  });
+
   it('polls directly when EventSource is unavailable and reports offline on errors', async () => {
     const fetchEvents = vi.fn(async (): Promise<CustomsEvent[]> => {
       throw new Error('down');
