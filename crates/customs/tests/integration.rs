@@ -3310,3 +3310,39 @@ async fn healthz_says_whether_the_models_are_trained() {
     let _ = tx.send(());
     server.await.unwrap().unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_policy_change_the_log_cannot_record_is_still_reported_as_applied() {
+    let h = Harness::start(|_| {}).await;
+    let db = rusqlite::Connection::open(h._dir.path().join("customs.db")).unwrap();
+    db.execute_batch("DROP TABLE policy_changes").unwrap();
+    drop(db);
+    let mut changes = h.engine.subscribe_policy_changes();
+    let mut p: Value = h.get("/api/policy").await.json().await.unwrap();
+    p["mode"] = json!("monitor");
+    let r = h
+        .http
+        .put(format!("{}/api/policy", h.base))
+        .json(&p)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let warning = r.headers()["x-customs-warning"]
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(warning.contains("change log"), "{warning}");
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(body["mode"], "monitor");
+    assert_eq!(h.engine.policy().mode, Mode::Monitor);
+    // Counted and announced (the webhook listens to this) like any applied change.
+    let ch = changes.try_recv().unwrap();
+    assert_eq!(ch.changes[0].field, "mode");
+    let metrics = h.get("/metrics").await.text().await.unwrap();
+    assert!(
+        metrics.contains("customs_policy_changes_total{result=\"applied\"} 1"),
+        "{metrics}"
+    );
+    h.stop().await;
+}

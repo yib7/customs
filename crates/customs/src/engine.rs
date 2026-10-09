@@ -188,6 +188,15 @@ struct ScanSummary {
 
 type Flight = Arc<OnceCell<Result<Outcome, EngineError>>>;
 
+/// A policy change that is live (see [`Engine::change_policy`]).
+#[derive(Debug, Clone)]
+pub struct AppliedChange {
+    /// `id` is 0 when the change log could not record it.
+    pub change: PolicyChange,
+    /// Why the change log could not record it.
+    pub log_error: Option<String>,
+}
+
 pub struct Engine {
     policy: RwLock<Arc<Policy>>,
     policy_path: PathBuf,
@@ -287,21 +296,30 @@ impl Engine {
 
     /// Persist and activate a policy that came in through the API, and record what changed
     /// (`None` when nothing did). `change` carries who made it; its `changes` are filled in.
+    /// An error means nothing changed. Once the policy is live it is counted and announced
+    /// even if the change log cannot record it; [`AppliedChange::log_error`] says why.
     pub fn change_policy(
         &self,
         p: Policy,
         mut change: PolicyChange,
-    ) -> anyhow::Result<Option<PolicyChange>> {
+    ) -> anyhow::Result<Option<AppliedChange>> {
         let _guard = self.policy_write.lock().unwrap_or_else(|e| e.into_inner());
         change.changes = crate::policy_log::diff(&self.policy(), &p);
         self.set_policy(p)?;
         if change.changes.is_empty() {
             return Ok(None);
         }
-        let change = self.store.insert_policy_change(change)?;
+        let (change, log_error) = match self.store.insert_policy_change(change.clone()) {
+            Ok(c) => (c, None),
+            Err(e) => {
+                tracing::error!(error = %e, "policy applied but not recorded in the change log");
+                change.ts = crate::util::now_ts();
+                (change, Some(e.to_string()))
+            }
+        };
         self.metrics.policy_change("applied");
         let _ = self.policy_changes.send(change.clone());
-        Ok(Some(change))
+        Ok(Some(AppliedChange { change, log_error }))
     }
 
     pub fn subscribe_policy_changes(&self) -> broadcast::Receiver<PolicyChange> {

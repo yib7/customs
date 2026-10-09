@@ -293,6 +293,7 @@ async fn put_policy(
         auth: state.policy_auth.kind().into(),
         changes: Vec::new(),
     };
+    let mut warning = None;
     match state.engine.change_policy(policy, who) {
         Err(e) => {
             return api_error(
@@ -300,7 +301,8 @@ async fn put_policy(
                 format!("saving policy: {e}"),
             )
         }
-        Ok(Some(ch)) => {
+        Ok(Some(applied)) => {
+            let ch = &applied.change;
             let fields: Vec<String> = ch.changes.iter().map(describe).collect();
             tracing::info!(
                 path = %state.engine.policy_path().display(),
@@ -309,10 +311,24 @@ async fn put_policy(
                 changes = %fields.join("; "),
                 "policy updated"
             );
+            warning = applied
+                .log_error
+                .map(|e| format!("policy applied but not recorded in the change log: {e}"));
         }
         Ok(None) => {}
     }
-    Json(&*state.engine.policy()).into_response()
+    let mut resp = Json(&*state.engine.policy()).into_response();
+    if let Some(w) = warning {
+        // Header values cannot hold control characters; the log line has the full text.
+        let w: String = w
+            .chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .collect();
+        if let Ok(v) = axum::http::HeaderValue::from_str(&w) {
+            resp.headers_mut().insert("x-customs-warning", v);
+        }
+    }
+    resp
 }
 
 #[derive(Deserialize)]
