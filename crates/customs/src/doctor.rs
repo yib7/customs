@@ -90,6 +90,19 @@ pub struct Inputs<'a> {
     pub home: Option<&'a Path>,
     pub server: &'a str,
     pub env: &'a dyn Fn(&str) -> Option<String>,
+    /// Machine-wide pip configuration files ([`system_pip_configs`] outside tests).
+    pub system_pip_configs: &'a [PathBuf],
+}
+
+/// pip's machine-wide configuration files on this platform.
+pub fn system_pip_configs(env: &dyn Fn(&str) -> Option<String>) -> Vec<PathBuf> {
+    if cfg!(windows) {
+        env("PROGRAMDATA")
+            .map(|p| vec![Path::new(&p).join("pip").join("pip.ini")])
+            .unwrap_or_default()
+    } else {
+        vec!["/etc/pip.conf".into(), "/etc/xdg/pip/pip.conf".into()]
+    }
 }
 
 /// Every finding about `inputs`, most severe first.
@@ -628,11 +641,17 @@ fn pip_config_files(inputs: &Inputs) -> Vec<PathBuf> {
     if let Some(h) = inputs.home {
         files.push(h.join(".pip/pip.conf"));
         files.push(h.join(".config/pip/pip.conf"));
+        // Windows: the legacy per-user file.
+        files.push(h.join("pip/pip.ini"));
+    }
+    if let Some(a) = (inputs.env)("APPDATA") {
+        files.push(Path::new(&a).join("pip").join("pip.ini"));
     }
     if let Some(v) = (inputs.env)("VIRTUAL_ENV") {
         files.push(Path::new(&v).join("pip.conf"));
+        files.push(Path::new(&v).join("pip.ini"));
     }
-    files.push("/etc/pip.conf".into());
+    files.extend(inputs.system_pip_configs.iter().cloned());
     files
 }
 
@@ -1002,11 +1021,13 @@ pub async fn run(opts: DoctorOptions) -> i32 {
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from);
     let env = |k: &str| std::env::var(k).ok();
+    let system = system_pip_configs(&env);
     let inputs = Inputs {
         dir: &opts.dir,
         home: home.as_deref(),
         server: &opts.server,
         env: &env,
+        system_pip_configs: &system,
     };
     let mut findings = inspect(&inputs);
     match health(&opts.server).await {
@@ -1077,6 +1098,7 @@ mod tests {
             home,
             server: SERVER,
             env: &lookup,
+            system_pip_configs: &[],
         })
     }
 
@@ -1482,5 +1504,41 @@ url = \"{url}\"
             assert!(!out.contains("s3cret") && !out.contains("t0k"), "{out}");
         }
         assert!(text.contains("https://***@corp.example/simple"), "{text}");
+    }
+
+    #[test]
+    fn system_pip_config_comes_from_inputs() {
+        let d = tempfile::tempdir().unwrap();
+        let sys = tempfile::tempdir().unwrap();
+        let appdata = tempfile::tempdir().unwrap();
+        write(
+            sys.path(),
+            "pip.conf",
+            "[global]
+extra-index-url = https://sys.example/simple
+",
+        );
+        write(
+            appdata.path(),
+            "pip/pip.ini",
+            "[global]
+find-links = https://win.example/links
+",
+        );
+        let lookup = |k: &str| (k == "APPDATA").then(|| appdata.path().display().to_string());
+        let configs = [sys.path().join("pip.conf")];
+        let f = inspect(&Inputs {
+            dir: d.path(),
+            home: None,
+            server: SERVER,
+            env: &lookup,
+            system_pip_configs: &configs,
+        });
+        let b = bypasses(&f);
+        assert!(b.iter().any(|(_, d)| d.contains("sys.example")), "{b:?}");
+        assert!(b.iter().any(|(_, d)| d.contains("win.example")), "{b:?}");
+        // Without system configs nothing outside the inputs is read (no /etc/pip.conf).
+        let f = run_with(d.path(), None, HashMap::new());
+        assert!(f.iter().all(|f| !f.subject.contains("pip.conf")), "{f:?}");
     }
 }
