@@ -683,7 +683,8 @@ allow), and that an `established` hit drops the model decision from the combinat
 rule hits still count). `risk` and component scores are `null` when that part of the model could not run
 (for example a package that does not exist has only a name score). `thresholds` are the
 effective ones (policy overrides applied). Policy `severity` is `allow` for informational
-hits (`allow`, `established`, `not_scanned` from the proxy), else `warn` or `block`. Rules: `deny`, `allow`,
+hits (`allow`, `established`, `not_scanned` from the proxy, `also_checked`), else `warn`
+or `block`. Rules: `deny`, `allow`,
 `established` (an established release of a popular package, section 8),
 `block_nonexistent`, `min_age_days`, `block_install_scripts_from_new`, the release history
 rules of section 8 (`provenance_dropped`, `install_script_added`, `publisher_changed`,
@@ -740,7 +741,12 @@ API (JSON). CORS allows only `http://localhost:5173` (the Vite dev server).
   `version` is null (latest), an exact version, a range (`>=1,<2`, `~=1.4`, `^1.2`, npm
   ranges), or an npm dist-tag; it resolves to the newest matching non-yanked version. The
   server applies policy, fetches (PyPI prefers the sdist, then a pure wheel, then the
-  smallest wheel), scans, and returns a verdict. A wheel whose registry size is above the
+  smallest wheel), scans, and returns a verdict. When the release has both an sdist and a
+  pure-Python (`-none-any`) wheel, both are read, since pip installs the wheel: both
+  verdicts are recorded, each with an `also_checked` hit naming the other file, and the
+  stricter is returned. A payload only in a platform-specific wheel is caught by the proxy,
+  which scans exactly what the installer downloads, not by a hook-only check. Each
+  archive is dated by its own upload time, not the release's. A wheel whose registry size is above the
   64 MiB check limit is scored on name and metadata only, with a `warn` `not_scanned` hit;
   an sdist or npm tarball is always downloaded (up to the 2 GiB download limit) and read
   like the proxy reads it, since its install-time code runs (npm's `unpackedSize` is

@@ -3180,3 +3180,69 @@ async fn check_reads_an_oversize_sdist_like_the_proxy() {
     assert_eq!(v["decision"], "warn", "{v}");
     h.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn check_dates_the_file_it_scans() {
+    let h = Harness::start(|_| {}).await;
+    // An old release of a popular name gets an sdist today.
+    let mut x = h.mock.extra_pypi.lock().unwrap();
+    x.push(ExtraFile::new(
+        "six",
+        "1.15.0",
+        "six-1.15.0-py3-none-any.whl",
+        b"benign six wheel",
+        "2020-05-01T00:00:00.000000Z".into(),
+    ));
+    x.push(ExtraFile::new(
+        "six",
+        "1.15.0",
+        "six-1.15.0.tar.gz",
+        b"benign six sdist",
+        now_rfc3339(),
+    ));
+    drop(x);
+    let (s, v) = h.check("pypi", "six", Some("1.15.0")).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["artifact"], "six-1.15.0.tar.gz", "{v}");
+    assert!(hit(&v, "established").is_none(), "{v}");
+    assert!(hit(&v, "min_age_days").is_some(), "{v}");
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn check_also_reads_the_pure_python_wheel() {
+    let h = Harness::start(|_| {}).await;
+    // pip installs the wheel; the payload is only there.
+    let mut x = h.mock.extra_pypi.lock().unwrap();
+    x.push(ExtraFile::new(
+        "wheelonly",
+        "1.0.0",
+        "wheelonly-1.0.0.tar.gz",
+        b"benign sdist",
+        "2020-05-01T00:00:00.000000Z".into(),
+    ));
+    x.push(ExtraFile::new(
+        "wheelonly",
+        "1.0.0",
+        "wheelonly-1.0.0-py3-none-any.whl",
+        b"EVIL wheel payload",
+        "2020-05-01T00:00:00.000000Z".into(),
+    ));
+    drop(x);
+    let (s, v) = h.check("pypi", "wheelonly", None).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["decision"], "block", "{v}");
+    assert_eq!(v["artifact"], "wheelonly-1.0.0-py3-none-any.whl", "{v}");
+    let note = hit(&v, "also_checked").unwrap_or_else(|| panic!("{v}"));
+    assert!(
+        note["detail"]
+            .as_str()
+            .unwrap()
+            .contains("wheelonly-1.0.0.tar.gz"),
+        "{v}"
+    );
+    // Both archives were read and both verdicts recorded.
+    assert_eq!(h.scans.load(Ordering::SeqCst), 2);
+    assert_eq!(h.events().await.len(), 2);
+    h.stop().await;
+}

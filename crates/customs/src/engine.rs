@@ -920,11 +920,55 @@ impl Engine {
             age_unknown: false,
             notes: note.into_iter().collect(),
         };
-        let Some(file) = choose_file(eco, &vm.files) else {
+        let files = check_files(eco, &vm.files);
+        if files.is_empty() {
             return Err(EngineError::NotFound(format!(
                 "{name} {version} has no downloadable files"
             )));
-        };
+        }
+        // pip installs a compatible wheel when there is one, so the pure-Python wheel is
+        // read as well as the sdist; both verdicts are recorded and the stricter returned.
+        let checks = files.iter().map(|file| {
+            let mut facts = facts.clone();
+            if let Some(other) = files.iter().find(|f| f.filename != file.filename) {
+                facts.notes.push(PolicyHit {
+                    rule: "also_checked".into(),
+                    severity: Decision::Allow,
+                    detail: format!(
+                        "{} was checked as well (an installer may pick either); the                          stricter verdict is returned",
+                        other.filename
+                    ),
+                });
+            }
+            self.check_file(&policy, eco, &name, &version, file, facts, client.clone())
+        });
+        let verdicts = futures::future::join_all(checks).await;
+        let mut best: Option<Verdict> = None;
+        for v in verdicts {
+            let v = v?;
+            if best.as_ref().is_none_or(|b| v.decision > b.decision) {
+                best = Some(v);
+            }
+        }
+        best.ok_or_else(|| internal("no archive was checked"))
+    }
+
+    /// Check one archive of a release: its own upload time and yank status, read like the
+    /// proxy reads it unless it is a wheel above the check limit.
+    #[allow(clippy::too_many_arguments)]
+    async fn check_file(
+        self: &Arc<Self>,
+        policy: &Policy,
+        eco: Ecosystem,
+        name: &str,
+        version: &str,
+        file: &FileMeta,
+        mut facts: MetaFacts,
+        client: Option<String>,
+    ) -> Result<Verdict, EngineError> {
+        // The archive's own upload time: an sdist added years after the wheels is new.
+        facts.published = file.upload_time.or(facts.published);
+        facts.yanked = facts.yanked || file.yanked;
         // Only a wheel may skip the download: it runs nothing at install but a top-level
         // `.pth` file. Anything else is read like the proxy reads it (up to the download
         // limit), since its install-time code must not go unread. PyPI reports a file's own
@@ -932,8 +976,7 @@ impl Engine {
         if file.filename.ends_with(".whl")
             && file.size.is_some_and(|s| s > self.limits.max_check_bytes)
         {
-            let s = self.name_only_summary(eco, &name, None);
-            let mut facts = facts;
+            let s = self.name_only_summary(eco, name, None);
             facts.notes.push(PolicyHit {
                 rule: "not_scanned".into(),
                 severity: Decision::Warn,
@@ -945,10 +988,10 @@ impl Engine {
                 ),
             });
             let v = self.build_verdict(
-                &policy,
+                policy,
                 eco,
-                &name,
-                Some(version),
+                name,
+                Some(version.to_string()),
                 Some(file.filename.clone()),
                 file.sha256.clone(),
                 &s,
@@ -960,8 +1003,8 @@ impl Engine {
         let out = self
             .evaluate_artifact(ArtifactRequest {
                 ecosystem: eco,
-                name,
-                version: Some(version),
+                name: name.to_string(),
+                version: Some(version.to_string()),
                 filename: file.filename.clone(),
                 url: file.url.clone(),
                 client,
@@ -1344,6 +1387,25 @@ fn scan_and_score(
             }
         }
     }
+}
+
+/// The archives `check` reads: [`choose_file`]'s pick and, when that is an sdist, the
+/// pure-Python wheel of the same release, which pip installs in its place. A
+/// platform-specific wheel is not read (the server does not know the client's platform).
+pub fn check_files(eco: Ecosystem, files: &[FileMeta]) -> Vec<&FileMeta> {
+    let Some(first) = choose_file(eco, files) else {
+        return Vec::new();
+    };
+    let mut out = vec![first];
+    if eco == Ecosystem::Pypi && !first.filename.ends_with(".whl") {
+        if let Some(w) = files
+            .iter()
+            .find(|f| !f.url.is_empty() && !f.yanked && f.filename.ends_with("-none-any.whl"))
+        {
+            out.push(w);
+        }
+    }
+    out
 }
 
 /// Pick the artifact `check` scans. PyPI prefers the sdist, whose `setup.py` runs at

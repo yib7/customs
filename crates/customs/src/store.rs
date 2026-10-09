@@ -567,6 +567,7 @@ pub fn rule_label(rule: &str) -> String {
         "block_install_scripts_from_new" => "New package with install scripts".into(),
         "scan_error" => "Archive could not be scanned".into(),
         "not_scanned" => "Archive too large to scan".into(),
+        "also_checked" => "The release's other archive was checked too".into(),
         "provenance_dropped" => "Release lost its provenance attestation".into(),
         "install_script_added" => "Release added or changed an install script".into(),
         "publisher_changed" => "Release published by a new account".into(),
