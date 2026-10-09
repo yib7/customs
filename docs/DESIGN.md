@@ -1009,7 +1009,7 @@ itself a prerelease. A version without a publish time gets no history rules.
 | `dormant_revival` | npm, PyPI | the previous release is more than `dormant_days` (1 to 3650) older |
 | `version_anomaly` | npm, PyPI | the major version is more than one above the highest earlier version, or the release extends an older major line while a newer major exists and that line had no release for `dormant_days` (or never had one) |
 | `nonregistry_dependency_added` | npm | a `dependencies` or `optionalDependencies` entry whose spec fetches code outside the registry (`git+`, `github:`, `owner/repo`, `http(s):`, `file:`, `link:` and the like) is new or changed since the previous release, or since the newest release at least 24 hours older |
-| `young_dependency_added` | npm | a dependency new since the previous release (or since the newest release at least 24 hours older) does not exist on the registry, or was first published less than `young_dependency_days` (1 to 365) before this release, and shares no maintainer or publisher with the package |
+| `young_dependency_added` | npm | a dependency new since the previous release (or since the newest release at least 24 hours older), compared by the package installed so an `npm:` alias counts under its real name, does not exist on the registry, or was first published less than `young_dependency_days` (1 to 365) before this release, and shares no maintainer or publisher with the package |
 
 `provenance_dropped`, `publisher_changed`, `dormant_revival`, `version_anomaly` and
 `young_dependency_added` apply only to releases published within `history_window_days` (90
