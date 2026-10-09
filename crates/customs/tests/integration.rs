@@ -2964,3 +2964,135 @@ fn env_backed_flags_accept_1_0_yes_and_no() {
         assert!(!err.contains("invalid value"), "{err}");
     }
 }
+
+#[test]
+fn serve_refuses_a_missing_explicit_dashboard_dir() {
+    let dir = tempfile::tempdir().unwrap();
+    let ui = dir.path().join("no-such-ui");
+    let data = dir.path().join("data");
+    let (_, err, code) = run_customs(
+        &[
+            "serve",
+            "--bind",
+            "127.0.0.1:0",
+            "--data-dir",
+            data.to_str().unwrap(),
+            "--ui-dir",
+            ui.to_str().unwrap(),
+        ],
+        &[("CUSTOMS_ALLOW_ANONYMOUS_POLICY_CHANGES", "1")],
+        "",
+        30,
+    );
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains(ui.to_str().unwrap()), "{err}");
+}
+
+#[test]
+fn serve_refuses_an_empty_admin_token() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    let data = data.to_str().unwrap();
+    let (_, err, code) = run_customs(
+        &["serve", "--bind", "127.0.0.1:0", "--data-dir", data],
+        &[("CUSTOMS_ADMIN_TOKEN", "")],
+        "",
+        30,
+    );
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("CUSTOMS_ADMIN_TOKEN"), "{err}");
+    let file = dir.path().join("token");
+    std::fs::write(&file, "\n").unwrap();
+    let (_, err, code) = run_customs(
+        &[
+            "serve",
+            "--bind",
+            "127.0.0.1:0",
+            "--data-dir",
+            data,
+            "--admin-token-file",
+            file.to_str().unwrap(),
+        ],
+        &[],
+        "",
+        30,
+    );
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains(file.to_str().unwrap()), "{err}");
+}
+
+#[test]
+fn an_unusable_data_dir_is_named_with_a_remedy() {
+    let dir = tempfile::tempdir().unwrap();
+    // A data dir below a regular file cannot be created.
+    let file = dir.path().join("plain-file");
+    std::fs::write(&file, "x").unwrap();
+    let bad = file.join("data");
+    let bad = bad.to_str().unwrap();
+    let server = dead_server();
+    let (_, err, code) = run_customs(
+        &[
+            "check",
+            "pypi",
+            "requests",
+            "--server",
+            &server,
+            "--data-dir",
+            bad,
+        ],
+        &[],
+        "",
+        60,
+    );
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains(bad), "{err}");
+    assert!(err.contains("--data-dir"), "{err}");
+    let (_, err, code) = run_customs(
+        &["serve", "--bind", "127.0.0.1:0", "--data-dir", bad],
+        &[],
+        "",
+        30,
+    );
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains(bad), "{err}");
+}
+
+#[test]
+fn serve_on_a_taken_port_says_how_to_pick_another() {
+    let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = taken.local_addr().unwrap().to_string();
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    let (_, err, code) = run_customs(
+        &[
+            "serve",
+            "--bind",
+            &addr,
+            "--data-dir",
+            data.to_str().unwrap(),
+        ],
+        &[],
+        "",
+        30,
+    );
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("--bind"), "{err}");
+    assert!(err.contains("CUSTOMS_BIND"), "{err}");
+}
+
+#[test]
+fn doctor_refuses_a_missing_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("nope");
+    let server = dead_server();
+    let (out, err, code) = run_customs(
+        &["doctor", missing.to_str().unwrap(), "--server", &server],
+        &[],
+        "",
+        30,
+    );
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("no such directory"), "{err}");
+    assert!(err.contains(missing.to_str().unwrap()), "{err}");
+    assert!(out.is_empty(), "{out}");
+}

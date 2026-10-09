@@ -365,6 +365,9 @@ pub async fn run(cli: Cli) -> i32 {
             print!("{}", env_exports(&a.server, a.shell));
             Ok(0)
         }
+        Command::Doctor(a) if !a.dir.is_dir() => {
+            Err(anyhow::anyhow!("no such directory: {}", a.dir.display()))
+        }
         Command::Doctor(a) => Ok(crate::doctor::run(crate::doctor::DoctorOptions {
             dir: a.dir,
             server: a.server,
@@ -404,6 +407,9 @@ pub async fn run(cli: Cli) -> i32 {
 }
 
 async fn serve(a: ServeArgs) -> anyhow::Result<()> {
+    // Settings that need no engine are checked first, so a typo fails fast.
+    let ui = find_ui_dir(a.ui_dir.as_deref())?;
+    let admin_token = admin_token(a.admin_token, a.admin_token_file)?;
     let (policy, source) =
         resolve_policy(a.config.as_deref(), &a.data_dir).map_err(|e| anyhow::anyhow!("{e}"))?;
     if source.loaded {
@@ -424,11 +430,16 @@ async fn serve(a: ServeArgs) -> anyhow::Result<()> {
         },
         metrics: Arc::new(Metrics::new()),
     })?;
-    let listener = tokio::net::TcpListener::bind(&a.bind)
-        .await
-        .map_err(|e| anyhow::anyhow!("binding {}: {e}", a.bind))?;
+    let listener = tokio::net::TcpListener::bind(&a.bind).await.map_err(|e| {
+        let hint = if e.kind() == std::io::ErrorKind::AddrInUse {
+            "; another `customs serve` may be running there: pick another address with \
+             --bind or CUSTOMS_BIND"
+        } else {
+            ""
+        };
+        anyhow::anyhow!("binding {}: {e}{hint}", a.bind)
+    })?;
     let addr = listener.local_addr()?;
-    let ui = find_ui_dir(a.ui_dir.as_deref());
     if ui.is_none() {
         tracing::warn!("dashboard not built (npm run build in web/); serving a placeholder page");
     }
@@ -453,23 +464,55 @@ async fn serve(a: ServeArgs) -> anyhow::Result<()> {
         cfg.validate().map_err(|e| anyhow::anyhow!("{e}"))?;
         crate::notify::spawn(engine.clone(), cfg);
     }
-    let admin_token = match (a.admin_token, a.admin_token_file) {
-        (Some(t), _) => Some(t.trim().to_string()),
-        (None, Some(path)) => Some(
-            std::fs::read_to_string(&path)
-                .map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))?
-                .trim()
-                .to_string(),
-        ),
-        (None, None) => None,
-    }
-    .filter(|t| !t.is_empty());
     let opts = ServeOptions {
         admin_token,
         allow_anonymous_policy_changes: a.allow_anonymous_policy_changes,
     };
     tracing::info!(%addr, "customs listening; run `customs env` for client settings");
     serve_with(listener, engine, ui, opts, shutdown_signal()).await
+}
+
+/// The admin token from `--admin-token` / `CUSTOMS_ADMIN_TOKEN` or the token file. A token
+/// that was set but is empty is an error: quietly running without one would leave a
+/// loopback server open to anonymous policy changes.
+fn admin_token(token: Option<String>, file: Option<PathBuf>) -> anyhow::Result<Option<String>> {
+    let token = match (token, file) {
+        (Some(t), _) => {
+            let t = t.trim().to_string();
+            anyhow::ensure!(
+                !t.is_empty(),
+                "the admin token (--admin-token or CUSTOMS_ADMIN_TOKEN) is empty; set one of \
+                 at least {} characters, or leave it unset",
+                crate::server::MIN_ADMIN_TOKEN_LEN
+            );
+            Some(t)
+        }
+        (None, Some(path)) => {
+            let t = std::fs::read_to_string(&path)
+                .map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))?
+                .trim()
+                .to_string();
+            anyhow::ensure!(
+                !t.is_empty(),
+                "the admin token file {} is empty",
+                path.display()
+            );
+            Some(t)
+        }
+        (None, None) => None,
+    };
+    // clap reads an empty variable as unset; one set to nothing is still a mistake.
+    if token.is_none() {
+        for var in ["CUSTOMS_ADMIN_TOKEN", "CUSTOMS_ADMIN_TOKEN_FILE"] {
+            if std::env::var_os(var).is_some_and(|v| v.is_empty()) {
+                anyhow::bail!(
+                    "{var} is set but empty; give it a value, or unset it to run without an \
+                     admin token"
+                );
+            }
+        }
+    }
+    Ok(token)
 }
 
 /// `name==1.0`, `name@1.0`, `@scope/name@^1` into name and optional version.
@@ -596,15 +639,22 @@ pub fn scan_file(
             anyhow::anyhow!("cannot tell the ecosystem of {filename}; pass --ecosystem")
         })?,
     };
-    // Offline: an in-memory engine with no network use, in a throwaway data dir.
-    let tmp = std::env::temp_dir().join(format!(
+    // Offline: an in-memory engine with no network use, in a throwaway data dir that is
+    // removed however this returns.
+    struct RemoveOnDrop(PathBuf);
+    impl Drop for RemoveOnDrop {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let tmp = RemoveOnDrop(std::env::temp_dir().join(format!(
         "customs-scan-{}-{}",
         std::process::id(),
         SCANS.fetch_add(1, Ordering::Relaxed)
-    ));
-    let (policy, source) = resolve_policy(config, &tmp).map_err(|e| anyhow::anyhow!("{e}"))?;
+    )));
+    let (policy, source) = resolve_policy(config, &tmp.0).map_err(|e| anyhow::anyhow!("{e}"))?;
     let engine = Engine::new(EngineConfig {
-        data_dir: tmp.clone(),
+        data_dir: tmp.0.clone(),
         models: load_models(models)?,
         policy,
         policy_path: source.path,
@@ -613,8 +663,9 @@ pub fn scan_file(
         metrics: Arc::new(Metrics::new()),
     })?;
     let v = engine.scan_local(&bytes, &filename, eco, name);
+    // The engine holds the database open; close it before the directory goes.
     drop(engine);
-    let _ = std::fs::remove_dir_all(&tmp);
+    drop(tmp);
     Ok(v)
 }
 
@@ -639,8 +690,8 @@ pub fn pretty(v: &Verdict, url: Option<&str>, via: &str) -> String {
         let sha = v
             .sha256
             .as_deref()
-            .map(|h| &h[..h.len().min(12)])
-            .unwrap_or("-");
+            .map(|h| h.chars().take(12).collect::<String>())
+            .unwrap_or_else(|| "-".into());
         s.push_str(&format!(
             "  artifact  {a} (sha256 {sha}...){}\n",
             if v.cached { " [cached]" } else { "" }
@@ -733,12 +784,21 @@ pub fn env_vars(server: &str) -> Vec<(&'static str, String)> {
     vars
 }
 
-/// The built dashboard: `explicit` if given, else the first of [`ui_dir_candidates`]
-/// that holds an `index.html`.
-fn find_ui_dir(explicit: Option<&Path>) -> Option<PathBuf> {
+/// The built dashboard: `explicit` if given (an error when it holds no `index.html`), else
+/// the first of [`ui_dir_candidates`] that holds one.
+fn find_ui_dir(explicit: Option<&Path>) -> anyhow::Result<Option<PathBuf>> {
     match explicit {
-        Some(dir) => first_ui_dir(&[dir.to_path_buf()]),
-        None => first_ui_dir(&ui_dir_candidates(std::env::current_exe().ok().as_deref())),
+        Some(dir) => match first_ui_dir(&[dir.to_path_buf()]) {
+            Some(d) => Ok(Some(d)),
+            None => anyhow::bail!(
+                "no dashboard in {} (--ui-dir or CUSTOMS_UI_DIR): it has no index.html; build \
+                 it with `npm run build` in web/ and pass web/dist, or leave the option unset",
+                dir.display()
+            ),
+        },
+        None => Ok(first_ui_dir(&ui_dir_candidates(
+            std::env::current_exe().ok().as_deref(),
+        ))),
     }
 }
 
@@ -784,12 +844,27 @@ mod tests {
     #[test]
     fn an_explicit_dashboard_dir_is_the_only_one_tried() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(find_ui_dir(Some(dir.path())), None);
+        let e = find_ui_dir(Some(dir.path())).unwrap_err().to_string();
+        assert!(e.contains(&dir.path().display().to_string()), "{e}");
         std::fs::write(dir.path().join("index.html"), "<html>").unwrap();
         assert_eq!(
-            find_ui_dir(Some(dir.path())),
+            find_ui_dir(Some(dir.path())).unwrap(),
             Some(dir.path().to_path_buf())
         );
+    }
+
+    #[test]
+    fn pretty_survives_a_non_ascii_sha256() {
+        let v: Verdict = serde_json::from_value(serde_json::json!({
+            "ts": "2026-01-01T00:00:00.000Z", "ecosystem": "pypi", "name": "x", "version": "1",
+            "artifact": "x-1.tar.gz", "sha256": "ééééééééééééééé", "decision": "allow",
+            "risk": null, "model_decision": "allow", "thresholds": {"warn": 0.5, "block": 0.9},
+            "scores": {}, "policy_hits": [], "reasons": [], "evidence": [],
+            "scanned_ms": 0, "model_version": "none", "cached": false, "mode": "enforce"
+        }))
+        .unwrap();
+        let text = pretty(&v, None, "test");
+        assert!(text.contains("(sha256 éééééééééééé...)"), "{text}");
     }
 
     #[test]

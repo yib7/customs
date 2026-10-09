@@ -231,7 +231,12 @@ fn install_scripts_from_report(r: &ScanReport) -> Vec<String> {
 impl Engine {
     pub fn new(cfg: EngineConfig) -> anyhow::Result<Arc<Self>> {
         let cache_dir = cfg.data_dir.join("cache");
-        std::fs::create_dir_all(cache_dir.join("tmp"))?;
+        std::fs::create_dir_all(cache_dir.join("tmp")).map_err(|e| {
+            anyhow::anyhow!(
+                "cannot use the data directory {}: {e}; pass --data-dir a writable directory",
+                cfg.data_dir.display()
+            )
+        })?;
         let store = Store::open(&cfg.data_dir.join("customs.db"))?;
         let (events, _) = broadcast::channel(1024);
         let (policy_changes, _) = broadcast::channel(64);
