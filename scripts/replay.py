@@ -180,6 +180,9 @@ def main() -> None:
     policy.write_text(
         'mode = "enforce"\nmin_age_days = 0\nblock_nonexistent = true\n'
         "block_install_scripts_from_new = false\n"
+        # The upload times served here are fake (OLD), so the established-release prior is
+        # off and the model decides every sample, as in the evaluation.
+        "[established]\nenabled = false\n"
         f'[upstream]\npypi_simple = "{base}/simple"\npypi_files = "{base}/files"\n'
         f'pypi_json = "{base}/pypi"\nnpm = "{base}/npm"\n'
     )

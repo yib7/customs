@@ -179,6 +179,7 @@ describe('parsePolicy', () => {
       scan_error: 'warn',
       allow: ['pypi:requests', 5],
       deny: ['npm:event-stream@3.3.6'],
+      established: { enabled: false, top: 1000 },
       upstream: { npm: 'https://registry.npmjs.org', bad: 1 },
     });
     expect(p).toEqual({
@@ -206,6 +207,7 @@ describe('parsePolicy', () => {
       scan_error: 'warn',
       allow: ['pypi:requests'],
       deny: ['npm:event-stream@3.3.6'],
+      established: { enabled: false, top: 1000, min_age_days: 30 },
       upstream: { npm: 'https://registry.npmjs.org' },
     });
   });
@@ -225,6 +227,7 @@ describe('parsePolicy', () => {
     expect(p.startup_hook).toBe('block');
     expect(p.agent_bypass).toBe('block');
     expect(p.scan_error).toBe('block');
+    expect(p.established).toEqual({ enabled: true, top: 5000, min_age_days: 30 });
   });
 });
 

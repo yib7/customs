@@ -19,6 +19,10 @@ First public release. Not tagged yet.
   cooldown (`min_age_days`), install scripts in new packages, and release history rules
   (provenance dropped, install script added, new publisher, dormant revival, git or URL
   dependency added, young dependency added).
+- An established-release prior (`[established]`): a release of one of the 5,000 most
+  popular PyPI or npm packages, at least 30 days old and not yanked, is allowed over the
+  model. This clears the model's false positives on `requests` 2.32.3 (block) and 2.34.2
+  (warn). The deny list and every other rule still apply.
 - Fail-closed rules for code the scanner cannot read, `.pth` startup hooks that run
   code, and install-time code that starts an AI coding CLI with its permission checks off.
 - Dashboard with a live install feed, verdict explanations with code evidence, a package
@@ -50,7 +54,6 @@ First public release. Not tagged yet.
 
 ### Known issues
 
-- The model scores the `requests` 2.32.3 sdist above the block threshold and warns on
-  `requests` 2.34.2 and `postcss` 8.5.29. Until the next retrain, add `pypi:requests` and
-  `npm:postcss` to `allow` in `customs.toml`.
+- A fresh release of a popular package still gets the model's verdict, false positive or
+  not: `postcss` 8.5.29 (published 2026-10-05) warns until it is 30 days old.
 - Windows is not tested.

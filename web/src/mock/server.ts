@@ -260,6 +260,18 @@ export class MockServer {
     if (young !== undefined && (typeof young !== 'number' || !Number.isInteger(young) || young < 1 || young > 365)) {
       errors.push({ field: 'young_dependency_days', message: 'young_dependency_days must be between 1 and 365' });
     }
+    const est = body.established;
+    if (est !== undefined) {
+      const e: Record<string, unknown> = isRec(est) ? est : {};
+      const top = e.top;
+      if (top !== undefined && (typeof top !== 'number' || !Number.isInteger(top) || top < 1)) {
+        errors.push({ field: 'established.top', message: 'must be at least 1 (set established.enabled = false to disable)' });
+      }
+      const days = e.min_age_days;
+      if (days !== undefined && (typeof days !== 'number' || !Number.isInteger(days) || days < 1 || days > 3650)) {
+        errors.push({ field: 'established.min_age_days', message: 'must be between 1 and 3650' });
+      }
+    }
     for (const f of ['allow', 'deny'] as const) {
       const list = body[f];
       if (!Array.isArray(list) || list.some((x) => typeof x !== 'string' || !ENTRY.test(x))) {

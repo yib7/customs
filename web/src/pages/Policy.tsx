@@ -256,7 +256,19 @@ function PolicyForm({
   }
   const unknownServerErrors = Object.entries(serverErrors).filter(
     ([f]) =>
-      !['mode', 'warn_threshold', 'block_threshold', 'min_age_days', 'dormant_days', 'history_window_days', 'young_dependency_days', 'allow', 'deny'].includes(f),
+      ![
+        'mode',
+        'warn_threshold',
+        'block_threshold',
+        'min_age_days',
+        'dormant_days',
+        'history_window_days',
+        'young_dependency_days',
+        'established.top',
+        'established.min_age_days',
+        'allow',
+        'deny',
+      ].includes(f),
   );
 
   const set = <K extends keyof PolicyDraft>(k: K, v: PolicyDraft[K], field?: PolicyField) => {
@@ -440,6 +452,57 @@ function PolicyForm({
             label="Block install scripts from new packages"
             description="Refuse npm packages with install scripts when they are younger than the minimum age."
           />
+        </div>
+      </Card>
+
+      <Card
+        id="established"
+        title="Established packages"
+        description="A release of a top package that has been on the registry for weeks is allowed whatever the model scores it. The model still runs and its scores show in the verdict; the deny list and every other rule still apply."
+      >
+        <div className="divide-y divide-line">
+          <Switch
+            checked={draft.establishedEnabled}
+            onChange={(v) => set('establishedEnabled', v)}
+            label="Trust established releases of popular packages"
+            description="Hijacked releases are usually found and pulled within days, so the age below is the defence: a new release of a popular package still gets the model's verdict. Off: the model decides for every package."
+          />
+        </div>
+        <div className="mt-3 grid max-w-xl grid-cols-1 gap-4 border-t border-line pt-3 sm:grid-cols-2">
+          <div>
+            <label htmlFor="established-top" className="text-sm font-medium text-ink">
+              Popular packages counted
+            </label>
+            <p className="text-xs text-muted">The most downloaded names of each registry; the lists hold 5,000.</p>
+            <input
+              id="established-top"
+              type="text"
+              inputMode="numeric"
+              className={`${inputCls} mt-2 w-28 font-mono`}
+              value={draft.establishedTop}
+              onChange={(e) => set('establishedTop', e.target.value, 'established.top')}
+              aria-invalid={errors['established.top'] ? true : undefined}
+              aria-describedby={errors['established.top'] ? 'established-top-error' : undefined}
+            />
+            <FieldError id="established-top-error">{errors['established.top']}</FieldError>
+          </div>
+          <div>
+            <label htmlFor="established-age" className="text-sm font-medium text-ink">
+              Release age (days)
+            </label>
+            <p className="text-xs text-muted">Only releases published at least this long ago count.</p>
+            <input
+              id="established-age"
+              type="text"
+              inputMode="numeric"
+              className={`${inputCls} mt-2 w-28 font-mono`}
+              value={draft.establishedMinAgeDays}
+              onChange={(e) => set('establishedMinAgeDays', e.target.value, 'established.min_age_days')}
+              aria-invalid={errors['established.min_age_days'] ? true : undefined}
+              aria-describedby={errors['established.min_age_days'] ? 'established-age-error' : undefined}
+            />
+            <FieldError id="established-age-error">{errors['established.min_age_days']}</FieldError>
+          </div>
         </div>
       </Card>
 

@@ -351,6 +351,9 @@ export function parsePolicy(v: unknown): Policy {
   const dormantDays = asNumber(r.dormant_days);
   const historyWindow = asNumber(r.history_window_days);
   const youngDays = asNumber(r.young_dependency_days);
+  const est = asRecord(r.established);
+  const estTop = asNumber(est.top);
+  const estAge = asNumber(est.min_age_days);
   return {
     mode: parseMode(r.mode),
     warn_threshold: parseThreshold(r.warn_threshold),
@@ -376,6 +379,11 @@ export function parsePolicy(v: unknown): Policy {
     scan_error: parseRuleSeverity(r.scan_error, 'block'),
     allow: asStringArray(r.allow),
     deny: asStringArray(r.deny),
+    established: {
+      enabled: asBool(est.enabled, true),
+      top: estTop === null ? 5000 : estTop,
+      min_age_days: estAge === null ? 30 : estAge,
+    },
     upstream,
   };
 }

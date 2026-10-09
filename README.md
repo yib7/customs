@@ -439,9 +439,11 @@ flags, none in install-time code.
 
 ## Limitations
 
-* The model has false positives on popular packages: the `requests` 2.32.3 sdist scores
-  above the block threshold, and `requests` 2.34.2 and `postcss` 8.5.29 warn. Allow-list
-  them in `customs.toml` until the next retrain.
+* The model has false positives on popular packages (the `requests` sdist scores 0.99).
+  Releases of the 5,000 most popular names per registry that are 30 days old are allowed
+  over the model (`[established]` in `customs.toml`), so a hijacked release of one that
+  stays up a month and trips no rule gets through, and a fresh release still gets the
+  model's verdict: `postcss` 8.5.29 warns until it is 30 days old.
 * Static analysis only. A payload inside a compiled binary, or fetched at run time from a
   URL the code never spells out, gives the scanner nothing to read; the policy rules
   (release age, install scripts in new packages, release history) are the backstop.

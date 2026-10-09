@@ -195,6 +195,40 @@ fn default_history_window_days() -> u32 {
 fn default_young_dependency_days() -> u32 {
     7
 }
+fn default_established_top() -> u32 {
+    5000
+}
+fn default_established_age() -> u32 {
+    30
+}
+
+/// The established-release prior: a release of one of the `top` most popular packages of
+/// its ecosystem (the name model's popularity list), published at least `min_age_days`
+/// ago and not yanked or deprecated, is allowed whatever the model scores it. Hijacked
+/// releases are found and pulled within days, so the age is the defence: a fresh release
+/// of a popular package still gets the model's verdict. The deny list and every other
+/// rule still apply.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Established {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// How many names of the popularity list count (it holds 5,000 per ecosystem).
+    #[serde(default = "default_established_top")]
+    pub top: u32,
+    #[serde(default = "default_established_age")]
+    pub min_age_days: u32,
+}
+
+impl Default for Established {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            top: default_established_top(),
+            min_age_days: default_established_age(),
+        }
+    }
+}
 
 /// The active policy. Field names and defaults follow DESIGN.md section 8.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -302,6 +336,8 @@ pub struct Policy {
     #[serde(default)]
     pub deny: Vec<String>,
     #[serde(default)]
+    pub established: Established,
+    #[serde(default)]
     pub upstream: Upstream,
 }
 
@@ -332,6 +368,7 @@ impl Default for Policy {
             agent_bypass: default_block(),
             allow: Vec::new(),
             deny: Vec::new(),
+            established: Established::default(),
             upstream: Upstream::default(),
         }
     }
@@ -479,6 +516,18 @@ impl Policy {
             return Err(ConfigError::new(
                 "young_dependency_days",
                 "must be between 1 and 365 (set young_dependency_added = \"off\" to disable)",
+            ));
+        }
+        if self.established.top == 0 {
+            return Err(ConfigError::new(
+                "established.top",
+                "must be at least 1 (set established.enabled = false to disable)",
+            ));
+        }
+        if !(1..=3650).contains(&self.established.min_age_days) {
+            return Err(ConfigError::new(
+                "established.min_age_days",
+                "must be between 1 and 3650",
             ));
         }
         for (list, key) in [(&self.allow, "allow"), (&self.deny, "deny")] {
@@ -680,6 +729,39 @@ npm = "https://registry.npmjs.org"
         assert!(e.to_string().contains("publisher_changed"), "{e}");
         let e = Policy::from_toml("provenance_dropped = true").unwrap_err();
         assert!(e.to_string().contains("provenance_dropped"), "{e}");
+    }
+
+    #[test]
+    fn established_keys() {
+        let p = Policy::default();
+        assert!(p.established.enabled);
+        assert_eq!(p.established.top, 5000);
+        assert_eq!(p.established.min_age_days, 30);
+        let p = Policy::from_toml("[established]\nenabled = false\ntop = 1000").unwrap();
+        assert!(!p.established.enabled);
+        assert_eq!(p.established.top, 1000);
+        assert_eq!(p.established.min_age_days, 30);
+        assert_eq!(Policy::from_toml(&p.to_toml()).unwrap(), p);
+        let json = serde_json::to_string(&p).unwrap();
+        assert_eq!(Policy::from_json(&json).unwrap(), p);
+        let p = Policy::from_json(r#"{"established": {"min_age_days": 60}}"#).unwrap();
+        assert_eq!(p.established.min_age_days, 60);
+        assert!(p.established.enabled);
+
+        let e = Policy::from_toml("[established]\ntop = 0").unwrap_err();
+        assert_eq!(e.key, "established.top");
+        let e = Policy::from_toml("[established]\nmin_age_days = 0").unwrap_err();
+        assert_eq!(e.key, "established.min_age_days");
+        let e = Policy::from_json(r#"{"established": {"min_age_days": 4000}}"#).unwrap_err();
+        assert_eq!(e.key, "established.min_age_days");
+        let e = Policy::from_toml("[established]\nbogus = 1").unwrap_err();
+        assert!(e.message.contains("bogus"), "{e}");
+    }
+
+    #[test]
+    fn example_policy_is_the_default() {
+        let p = Policy::from_toml(include_str!("../../../deploy/customs.toml")).unwrap();
+        assert_eq!(p, Policy::default());
     }
 
     #[test]

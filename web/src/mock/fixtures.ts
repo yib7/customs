@@ -484,6 +484,7 @@ export const INITIAL_POLICY = {
   scan_error: 'block',
   allow: ['pypi:requests', 'npm:react'],
   deny: ['npm:event-stream@3.3.6'],
+  established: { enabled: true, top: 5000, min_age_days: 30 },
   upstream: {
     pypi_simple: 'https://pypi.org/simple',
     pypi_files: 'https://files.pythonhosted.org',

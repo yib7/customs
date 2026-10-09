@@ -213,6 +213,16 @@ impl Models {
             .unwrap_or(0)
     }
 
+    /// Position of `name` in the ecosystem's popular-name list (0 is the most popular), or
+    /// `None` when it is not listed or no name model is loaded. Used by the policy, never
+    /// by the scoring.
+    pub fn popular_rank(&self, eco: Ecosystem, name: &str) -> Option<usize> {
+        self.name_model
+            .as_ref()
+            .and_then(|m| m.ecosystem(eco))
+            .and_then(|e| e.popular.rank(&crate::name::normalize(eco, name)))
+    }
+
     /// Run every component that has inputs and combine them.
     pub fn assess(&self, input: &ScoreInput<'_>) -> Assessment {
         self.assess_with(input, None)

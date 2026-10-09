@@ -4,7 +4,8 @@
 //! a release compares with the ones before it), install scripts in young packages, and
 //! explicit allow and deny lists. A verdict's decision is
 //! the most severe of the model decision and every rule hit, except that an allow-list
-//! entry overrides everything but a deny-list entry.
+//! entry overrides everything but a deny-list entry, and that an established release of a
+//! popular package (`established`) takes the model decision out of the combination.
 
 use chrono::{DateTime, Utc};
 use customs_model::{Decision, Thresholds};
@@ -29,6 +30,10 @@ pub struct PolicyContext<'a> {
     pub install_scripts: Vec<String>,
     /// This version and the releases before it, when the full package metadata was read.
     pub history: Option<&'a ReleaseHistory>,
+    /// Position of the name in the ecosystem's popularity list (0 is the most popular).
+    pub popular_rank: Option<usize>,
+    /// The registry marks this version yanked (PyPI) or deprecated (npm).
+    pub yanked: bool,
     pub now: DateTime<Utc>,
 }
 
@@ -38,22 +43,62 @@ pub struct PolicyOutcome {
     pub hits: Vec<PolicyHit>,
     pub allowed: bool,
     pub denied: bool,
+    /// The `established` prior applies: the model decision is set aside.
+    pub established: bool,
 }
 
 impl PolicyOutcome {
     /// Combine with the model decision.
     pub fn decide(&self, model: Decision) -> Decision {
+        self.decide_with(model, &self.hits)
+    }
+
+    /// Combine the model decision with `hits` (these rules' hits plus any others, such as
+    /// the scanner rules'): deny blocks, allow allows, and otherwise the most severe of the
+    /// hits and of the model decision, which the `established` prior replaces with allow.
+    pub fn decide_with(&self, model: Decision, hits: &[PolicyHit]) -> Decision {
         if self.denied {
             return Decision::Block;
         }
         if self.allowed {
             return Decision::Allow;
         }
-        self.hits
-            .iter()
-            .map(|h| h.severity)
-            .fold(model, std::cmp::max)
+        let floor = if self.established {
+            Decision::Allow
+        } else {
+            model
+        };
+        hits.iter().map(|h| h.severity).fold(floor, std::cmp::max)
     }
+}
+
+/// The `established` hit, when the release is one of the `top` most popular names of its
+/// ecosystem, at least `min_age_days` old, and not yanked.
+fn established_hit(policy: &Policy, ctx: &PolicyContext<'_>) -> Option<PolicyHit> {
+    let e = &policy.established;
+    if !e.enabled || ctx.yanked {
+        return None;
+    }
+    let rank = ctx.popular_rank.filter(|r| *r < e.top as usize)?;
+    let published = ctx.published?;
+    let age = ctx.now - published;
+    if age < chrono::Duration::days(e.min_age_days as i64) {
+        return None;
+    }
+    Some(PolicyHit {
+        rule: "established".into(),
+        severity: Decision::Allow,
+        detail: format!(
+            "top-{} {} package (#{}), release published {} ({} ago; policy: {} day{})",
+            e.top,
+            registry_name(ctx.ecosystem),
+            rank + 1,
+            published.format("%Y-%m-%d"),
+            human_duration(age),
+            e.min_age_days,
+            if e.min_age_days == 1 { "" } else { "s" }
+        ),
+    })
 }
 
 pub fn evaluate(policy: &Policy, ctx: &PolicyContext<'_>) -> PolicyOutcome {
@@ -85,6 +130,7 @@ pub fn evaluate(policy: &Policy, ctx: &PolicyContext<'_>) -> PolicyOutcome {
                 })
             })
             .is_some();
+    let established = !denied && established_hit(policy, ctx).map(|h| hits.push(h)).is_some();
 
     if !ctx.exists {
         hits.push(PolicyHit {
@@ -143,6 +189,7 @@ pub fn evaluate(policy: &Policy, ctx: &PolicyContext<'_>) -> PolicyOutcome {
         hits,
         allowed,
         denied,
+        established,
     }
 }
 
@@ -422,8 +469,133 @@ mod tests {
             published: None,
             install_scripts: Vec::new(),
             history: None,
+            popular_rank: None,
+            yanked: false,
             now: Utc::now(),
         }
+    }
+
+    /// A release of the 7th most popular PyPI name, published `days` ago.
+    fn popular<'a>(days: i64) -> PolicyContext<'a> {
+        let mut c = ctx(Ecosystem::Pypi, "requests", Some("2.32.3"));
+        c.popular_rank = Some(6);
+        c.published = Some(c.now - chrono::Duration::days(days));
+        c
+    }
+
+    fn established_hits(o: &PolicyOutcome) -> Vec<&PolicyHit> {
+        o.hits.iter().filter(|h| h.rule == "established").collect()
+    }
+
+    #[test]
+    fn established_release_of_a_popular_package_sets_the_model_aside() {
+        let c = popular(498);
+        let o = evaluate(&Policy::default(), &c);
+        assert!(o.established && !o.allowed && !o.denied);
+        let hits = established_hits(&o);
+        assert_eq!(hits.len(), 1, "{:?}", o.hits);
+        assert_eq!(hits[0].severity, Decision::Allow);
+        let date = c.published.unwrap().format("%Y-%m-%d").to_string();
+        assert_eq!(
+            hits[0].detail,
+            format!(
+                "top-5000 PyPI package (#7), release published {date} (498 days ago; policy: 30 days)"
+            )
+        );
+        assert_eq!(o.decide(Decision::Block), Decision::Allow);
+        assert_eq!(o.decide(Decision::Warn), Decision::Allow);
+    }
+
+    #[test]
+    fn established_does_not_cover_young_releases() {
+        // Younger than established.min_age_days: the model decides as before.
+        let o = evaluate(&Policy::default(), &popular(10));
+        assert!(!o.established);
+        assert!(established_hits(&o).is_empty());
+        assert_eq!(o.decide(Decision::Block), Decision::Block);
+        assert_eq!(o.decide(Decision::Warn), Decision::Warn);
+        // An unknown publication time is not old.
+        let mut c = popular(500);
+        c.published = None;
+        assert_eq!(
+            evaluate(&Policy::default(), &c).decide(Decision::Block),
+            Decision::Block
+        );
+    }
+
+    #[test]
+    fn established_needs_a_popular_name() {
+        let mut c = popular(500);
+        c.popular_rank = None;
+        let o = evaluate(&Policy::default(), &c);
+        assert!(!o.established);
+        assert_eq!(o.decide(Decision::Block), Decision::Block);
+        // Ranked, but below the configured cut.
+        let mut p = Policy::default();
+        p.established.top = 5;
+        let o = evaluate(&p, &popular(500));
+        assert!(!o.established);
+        assert_eq!(o.decide(Decision::Warn), Decision::Warn);
+        p.established.top = 7;
+        assert!(evaluate(&p, &popular(500)).established);
+    }
+
+    #[test]
+    fn deny_beats_established() {
+        let p = Policy {
+            deny: vec!["pypi:requests".into()],
+            ..Policy::default()
+        };
+        let o = evaluate(&p, &popular(500));
+        assert!(o.denied && !o.established);
+        assert!(established_hits(&o).is_empty());
+        assert_eq!(o.decide(Decision::Allow), Decision::Block);
+    }
+
+    #[test]
+    fn established_can_be_switched_off() {
+        let mut p = Policy::default();
+        p.established.enabled = false;
+        let o = evaluate(&p, &popular(500));
+        assert!(!o.established);
+        assert!(established_hits(&o).is_empty());
+        assert_eq!(o.decide(Decision::Block), Decision::Block);
+    }
+
+    #[test]
+    fn established_skips_yanked_releases() {
+        let mut c = popular(500);
+        c.yanked = true;
+        let o = evaluate(&Policy::default(), &c);
+        assert!(!o.established);
+        assert_eq!(o.decide(Decision::Block), Decision::Block);
+    }
+
+    #[test]
+    fn established_leaves_the_other_rules_in_force() {
+        let o = evaluate(&Policy::default(), &popular(500));
+        let scan = PolicyHit {
+            rule: "unread_code".into(),
+            severity: Decision::Block,
+            detail: "setup.py could not be read".into(),
+        };
+        let warn = PolicyHit {
+            rule: "dormant_revival".into(),
+            severity: Decision::Warn,
+            detail: "first release in 400 days".into(),
+        };
+        assert_eq!(
+            o.decide_with(Decision::Block, std::slice::from_ref(&scan)),
+            Decision::Block
+        );
+        assert_eq!(
+            o.decide_with(Decision::Block, std::slice::from_ref(&warn)),
+            Decision::Warn
+        );
+        assert_eq!(o.decide_with(Decision::Block, &[]), Decision::Allow);
+        // Without the prior, the model decision is the floor.
+        let plain = evaluate(&Policy::default(), &popular(10));
+        assert_eq!(plain.decide_with(Decision::Block, &[warn]), Decision::Block);
     }
 
     fn policy() -> Policy {

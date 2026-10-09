@@ -26,3 +26,10 @@ startup_hook = "block"
 agent_bypass = "block"
 allow = []
 deny = []
+# A release of one of the `top` most popular packages of its registry, published at least
+# min_age_days ago and not yanked, is allowed whatever the model scores it. The deny list
+# and every other rule still apply. See docs/DESIGN.md section 8.
+[established]
+enabled = true
+top = 5000
+min_age_days = 30

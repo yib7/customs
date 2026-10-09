@@ -128,6 +128,8 @@ pub struct MetaFacts {
     pub install_scripts: Vec<String>,
     /// The version compared with earlier releases, when the full package metadata was read.
     pub history: Option<ReleaseHistory>,
+    /// The registry marks the version (or the requested file) yanked, or npm deprecated.
+    pub yanked: bool,
     /// An informational hit about how the version was chosen.
     pub note: Option<PolicyHit>,
 }
@@ -465,12 +467,9 @@ impl Engine {
         match result {
             Ok(Some(vm)) => {
                 // Prefer the upload time of this exact file over the release time.
-                facts.published = vm
-                    .files
-                    .iter()
-                    .find(|f| f.filename == req.filename)
-                    .and_then(|f| f.upload_time)
-                    .or(vm.published);
+                let file = vm.files.iter().find(|f| f.filename == req.filename);
+                facts.published = file.and_then(|f| f.upload_time).or(vm.published);
+                facts.yanked = vm.yanked || file.is_some_and(|f| f.yanked);
                 facts.install_scripts = vm.install_scripts;
             }
             Ok(None) => {
@@ -684,21 +683,15 @@ impl Engine {
                 published: meta.published,
                 install_scripts: scripts,
                 history: meta.history.as_ref(),
+                popular_rank: self.models.popular_rank(eco, name),
+                yanked: meta.yanked,
                 now: now(),
             },
         );
         let mut hits = outcome.hits.clone();
         hits.extend(scan_hits(policy, s));
         hits.extend(meta.note.clone());
-        let decision = if outcome.denied {
-            Decision::Block
-        } else if outcome.allowed {
-            Decision::Allow
-        } else {
-            hits.iter()
-                .map(|h| h.severity)
-                .fold(model_decision, std::cmp::max)
-        };
+        let decision = outcome.decide_with(model_decision, &hits);
         Verdict {
             id: None,
             ts: now_ts(),
@@ -863,6 +856,7 @@ impl Engine {
             published: vm.published,
             install_scripts: vm.install_scripts.clone(),
             history,
+            yanked: vm.yanked,
             note,
         };
         let Some(file) = choose_file(eco, &vm.files) else {

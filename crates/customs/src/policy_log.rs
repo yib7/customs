@@ -110,6 +110,17 @@ pub fn loosens(c: &FieldChange) -> bool {
         ("allow", Value::Array(a), Value::Array(b)) => b.iter().any(|v| !a.contains(v)),
         ("deny", Value::Array(a), Value::Array(b)) => a.iter().any(|v| !b.contains(v)),
         (f, _, _) if f.starts_with("upstream") => true,
+        // The established prior sets the model aside: switching it on, or widening it to
+        // more names or younger releases, loosens.
+        ("established.enabled", Value::Bool(a), Value::Bool(b)) => !*a && *b,
+        ("established.top", a, b) => match (a.as_u64(), b.as_u64()) {
+            (Some(x), Some(y)) => y > x,
+            _ => true,
+        },
+        ("established.min_age_days", a, b) => match (a.as_u64(), b.as_u64()) {
+            (Some(x), Some(y)) => y < x,
+            _ => true,
+        },
         (_, Value::Bool(a), Value::Bool(b)) => *a && !*b,
         ("warn_threshold" | "block_threshold", a, b) => match (a.as_f64(), b.as_f64()) {
             (Some(x), Some(y)) => y > x,
@@ -205,5 +216,43 @@ mod tests {
             )),
             "deny: added npm:z; removed npm:x"
         );
+    }
+
+    #[test]
+    fn established_loosens_when_it_widens() {
+        let c = |field: &str, before: Value, after: Value| FieldChange {
+            field: field.into(),
+            before,
+            after,
+        };
+        use serde_json::json;
+        // Switching the prior on sets the model aside for more packages.
+        assert!(loosens(&c(
+            "established.enabled",
+            json!(false),
+            json!(true)
+        )));
+        assert!(!loosens(&c(
+            "established.enabled",
+            json!(true),
+            json!(false)
+        )));
+        assert!(loosens(&c("established.top", json!(5000), json!(10000))));
+        assert!(!loosens(&c("established.top", json!(5000), json!(100))));
+        assert!(loosens(&c("established.min_age_days", json!(30), json!(7))));
+        assert!(!loosens(&c(
+            "established.min_age_days",
+            json!(30),
+            json!(90)
+        )));
+        let a = Policy::default();
+        let mut b = a.clone();
+        b.established.enabled = false;
+        let d = diff(&a, &b);
+        assert_eq!(
+            d.iter().map(describe).collect::<Vec<_>>(),
+            vec!["established.enabled: true -> false"]
+        );
+        assert!(!loosens(&d[0]));
     }
 }

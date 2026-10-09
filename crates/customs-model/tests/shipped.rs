@@ -93,3 +93,22 @@ fn name_model_matches_training() {
         assert!((got - want).abs() < 1e-4, "{name}: {got} vs {want}");
     }
 }
+
+#[test]
+fn popular_rank_reads_the_shipped_lists() {
+    let Some(models) = shipped() else {
+        return;
+    };
+    assert_eq!(models.popular_rank(Ecosystem::Pypi, "requests"), Some(6));
+    assert_eq!(
+        models.popular_rank(Ecosystem::Pypi, "Typing_Extensions"),
+        Some(2)
+    );
+    assert_eq!(models.popular_rank(Ecosystem::Npm, "postcss"), Some(48));
+    assert_eq!(models.popular_rank(Ecosystem::Pypi, "reqeusts"), None);
+    assert_eq!(models.popular_rank(Ecosystem::Npm, "requests"), None);
+    assert_eq!(
+        Models::empty().popular_rank(Ecosystem::Pypi, "requests"),
+        None
+    );
+}

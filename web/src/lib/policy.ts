@@ -19,6 +19,8 @@ export type PolicyField =
   | 'dormant_days'
   | 'history_window_days'
   | 'young_dependency_days'
+  | 'established.top'
+  | 'established.min_age_days'
   | 'allow'
   | 'deny';
 
@@ -46,6 +48,9 @@ export interface PolicyDraft {
   scan_error: RuleSeverity;
   allow: string[];
   deny: string[];
+  establishedEnabled: boolean;
+  establishedTop: string;
+  establishedMinAgeDays: string;
 }
 
 const LIST_ENTRY = /^(pypi|npm):(@[a-z0-9~-][a-z0-9._~-]*\/)?[a-z0-9~-][a-z0-9._~-]*(@[A-Za-z0-9.+!_-]+)?$/i;
@@ -94,6 +99,9 @@ export function policyToDraft(p: Policy): PolicyDraft {
     scan_error: p.scan_error,
     allow: [...p.allow],
     deny: [...p.deny],
+    establishedEnabled: p.established.enabled,
+    establishedTop: String(p.established.top),
+    establishedMinAgeDays: String(p.established.min_age_days),
   };
 }
 
@@ -151,6 +159,18 @@ export function validateDraft(d: PolicyDraft): DraftResult {
     errors.young_dependency_days = 'Enter a whole number of days from 1 to 365.';
   }
 
+  const topText = d.establishedTop.trim();
+  const top = Number(topText);
+  if (!/^\d+$/.test(topText) || top < 1) {
+    errors['established.top'] = 'Enter a whole number of at least 1 (the lists hold 5,000 names).';
+  }
+
+  const estAgeText = d.establishedMinAgeDays.trim();
+  const estAge = Number(estAgeText);
+  if (!/^\d+$/.test(estAgeText) || estAge < 1 || estAge > 3650) {
+    errors['established.min_age_days'] = 'Enter a whole number of days from 1 to 3650.';
+  }
+
   const badAllow = d.allow.find((e) => validateListEntry(e) !== null);
   if (badAllow !== undefined) errors.allow = `Invalid entry: ${badAllow.slice(0, 80)}`;
   const badDeny = d.deny.find((e) => validateListEntry(e) !== null);
@@ -183,6 +203,7 @@ export function validateDraft(d: PolicyDraft): DraftResult {
       scan_error: d.scan_error,
       allow: d.allow.map((e) => e.trim()),
       deny: d.deny.map((e) => e.trim()),
+      established: { enabled: d.establishedEnabled, top, min_age_days: estAge },
     },
   };
 }

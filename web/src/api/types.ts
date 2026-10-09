@@ -123,6 +123,16 @@ export type HistoryRule =
   | 'nonregistry_dependency_added'
   | 'young_dependency_added';
 
+/**
+ * The established-release prior: a release of one of the `top` most popular names, published
+ * at least `min_age_days` ago and not yanked, is allowed whatever the model scores it.
+ */
+export interface EstablishedPolicy {
+  enabled: boolean;
+  top: number;
+  min_age_days: number;
+}
+
 export interface Policy {
   mode: PolicyMode;
   warn_threshold: Threshold;
@@ -149,6 +159,7 @@ export interface Policy {
   scan_error: RuleSeverity;
   allow: string[];
   deny: string[];
+  established: EstablishedPolicy;
   upstream: Record<string, string>;
 }
 

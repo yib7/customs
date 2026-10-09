@@ -85,6 +85,20 @@ fn pypi_packages() -> Vec<(&'static str, &'static str, &'static [u8], String)> {
             b"benign rolling 1.1.0",
             (Utc::now() - chrono::Duration::hours(1)).to_rfc3339(),
         ),
+        // A popular name (in models/dev/popular_pypi.txt) whose archives the dev model
+        // flags: a release older than `established.min_age_days`, and one younger.
+        (
+            "six",
+            "1.16.0",
+            b"EVIL but established",
+            (Utc::now() - chrono::Duration::days(200)).to_rfc3339(),
+        ),
+        (
+            "six",
+            "1.17.0",
+            b"EVIL and recent",
+            (Utc::now() - chrono::Duration::days(10)).to_rfc3339(),
+        ),
         // 1.0.0 carries PEP 740 provenance in the JSON simple index, 1.1.0 does not.
         (
             "unsigned",
@@ -800,6 +814,66 @@ async fn new_versions_hit_min_age() {
         body.contains("min_age_days: published 2 hours ago (policy: 3 days)"),
         "{body}"
     );
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn established_releases_of_popular_packages_skip_the_model() {
+    let h = Harness::start(|_| {}).await;
+    // Through the proxy: the model blocks, the established prior serves it.
+    let r = h.get(&pypi_file_path("six", "1.16.0")).await;
+    assert_eq!(r.status(), 200);
+    assert_eq!(r.headers()["x-customs-decision"], "allow");
+    let (status, v) = h.check("pypi", "six", Some("1.16.0")).await;
+    assert_eq!(status, 200);
+    assert_eq!(v["decision"], "allow");
+    // The dev model warns on the archive (its name model lowers the risk of a popular
+    // name); the trained one blocks requests 2.32.3. Either is set aside.
+    let model = v["model_decision"].clone();
+    assert_ne!(model, "allow", "{v}");
+    assert!(v["risk"].as_f64().unwrap() >= v["thresholds"]["warn"].as_f64().unwrap());
+    let hit = v["policy_hits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["rule"] == "established")
+        .unwrap_or_else(|| panic!("{v}"));
+    assert_eq!(hit["severity"], "allow");
+    let detail = hit["detail"].as_str().unwrap();
+    assert!(
+        detail.starts_with("top-5000 PyPI package (#")
+            && detail.ends_with("(200 days ago; policy: 30 days)"),
+        "{detail}"
+    );
+    // A popular name with a release younger than 30 days gets the model's verdict.
+    let r = h.get(&pypi_file_path("six", "1.17.0")).await;
+    assert_ne!(r.headers()["x-customs-decision"], "allow");
+    let (_, v) = h.check("pypi", "six", Some("1.17.0")).await;
+    assert_ne!(v["decision"], "allow", "{v}");
+    assert_eq!(v["decision"], v["model_decision"]);
+    assert!(rules_of(&v).iter().all(|r| r != "established"), "{v}");
+    // An unpopular name at any age gets the model's verdict.
+    let (_, v) = h.check("pypi", "evilpkg", None).await;
+    assert_eq!(v["decision"], "block");
+    assert!(rules_of(&v).iter().all(|r| r != "established"), "{v}");
+    h.stop().await;
+
+    // The deny list still wins.
+    let h = Harness::start(|p| p.deny = vec!["pypi:six".into()]).await;
+    let r = h.get(&pypi_file_path("six", "1.16.0")).await;
+    assert_eq!(r.status(), 403);
+    let (_, v) = h.check("pypi", "six", Some("1.16.0")).await;
+    assert_eq!(v["decision"], "block");
+    assert_eq!(rules_of(&v), vec!["deny"]);
+    h.stop().await;
+
+    // Switched off, the model decides.
+    let h = Harness::start(|p| p.established.enabled = false).await;
+    let r = h.get(&pypi_file_path("six", "1.16.0")).await;
+    assert_eq!(r.headers()["x-customs-decision"], model.as_str().unwrap());
+    let (_, v) = h.check("pypi", "six", Some("1.16.0")).await;
+    assert_eq!(v["decision"], model);
+    assert!(rules_of(&v).is_empty(), "{v}");
     h.stop().await;
 }
 

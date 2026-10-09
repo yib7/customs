@@ -115,6 +115,28 @@ describe('Policy page', () => {
       dormant_days: 180,
     });
   });
+
+  it('edits the established-release prior', async () => {
+    const user = userEvent.setup();
+    renderApp('/policy');
+    const trust = await screen.findByRole('switch', { name: /Trust established releases of popular packages/ });
+    expect(trust).toBeChecked();
+    const age = screen.getByRole('textbox', { name: 'Release age (days)' });
+    expect(age).toHaveValue('30');
+    expect(screen.getByRole('textbox', { name: 'Popular packages counted' })).toHaveValue('5000');
+    await user.clear(age);
+    await user.type(age, '0');
+    await user.click(screen.getByRole('button', { name: 'Save policy' }));
+    expect(await screen.findByText('Enter a whole number of days from 1 to 3650.')).toBeInTheDocument();
+    await user.clear(age);
+    await user.type(age, '60');
+    await user.click(trust);
+    await user.click(screen.getByRole('button', { name: 'Save policy' }));
+    expect(await screen.findByTestId('policy-saved')).toBeInTheDocument();
+    expect(window.__customsMock?.server.policy).toMatchObject({
+      established: { enabled: false, top: 5000, min_age_days: 60 },
+    });
+  });
 });
 
 describe('Check page', () => {

@@ -27,6 +27,7 @@ const POLICY: Policy = {
   scan_error: 'block',
   allow: ['pypi:requests', 'npm:react'],
   deny: ['npm:event-stream@3.3.6'],
+  established: { enabled: true, top: 5000, min_age_days: 30 },
   upstream: {},
 };
 
@@ -75,6 +76,7 @@ describe('validateDraft', () => {
       scan_error: 'block',
       allow: ['pypi:requests', 'npm:react'],
       deny: ['npm:event-stream@3.3.6'],
+      established: { enabled: true, top: 5000, min_age_days: 30 },
     });
   });
 
@@ -123,6 +125,17 @@ describe('validateDraft', () => {
     expect(validateDraft({ ...d, youngDependencyDays: '366' }).errors.young_dependency_days).toBeDefined();
     const r = validateDraft({ ...d, youngDependencyDays: '30', history: { ...d.history, young_dependency_added: 'warn' } });
     expect(r.policy).toMatchObject({ young_dependency_days: 30, young_dependency_added: 'warn', nonregistry_dependency_added: 'block' });
+  });
+
+  it('validates the established-release prior', () => {
+    const d = policyToDraft(POLICY);
+    expect(d).toMatchObject({ establishedEnabled: true, establishedTop: '5000', establishedMinAgeDays: '30' });
+    expect(validateDraft({ ...d, establishedTop: '0' }).errors['established.top']).toMatch(/at least 1/);
+    expect(validateDraft({ ...d, establishedTop: 'many' }).errors['established.top']).toBeDefined();
+    expect(validateDraft({ ...d, establishedMinAgeDays: '0' }).errors['established.min_age_days']).toMatch(/1 to 3650/);
+    expect(validateDraft({ ...d, establishedMinAgeDays: '3651' }).errors['established.min_age_days']).toBeDefined();
+    const r = validateDraft({ ...d, establishedEnabled: false, establishedTop: ' 1000 ', establishedMinAgeDays: '60' });
+    expect(r.policy?.established).toEqual({ enabled: false, top: 1000, min_age_days: 60 });
   });
 
   it('rejects an entry on both lists', () => {

@@ -679,10 +679,12 @@ probabilities: the gbdt calibrated probability, sigmoid of the CNN and name logi
 ```
 `decision` is the most severe of the model decision and every policy hit, except that an
 allow-list entry makes it `allow` and a deny-list entry makes it `block` (deny wins over
-allow). `risk` and component scores are `null` when that part of the model could not run
+allow), and that an `established` hit drops the model decision from the combination (the
+rule hits still count). `risk` and component scores are `null` when that part of the model could not run
 (for example a package that does not exist has only a name score). `thresholds` are the
 effective ones (policy overrides applied). Policy `severity` is `allow` for informational
-hits (`allow`, `not_scanned`), else `warn` or `block`. Rules: `deny`, `allow`,
+hits (`allow`, `established`, `not_scanned`), else `warn` or `block`. Rules: `deny`, `allow`,
+`established` (an established release of a popular package, section 8),
 `block_nonexistent`, `min_age_days`, `block_install_scripts_from_new`, the release history
 rules of section 8 (`provenance_dropped`, `install_script_added`, `publisher_changed`,
 `dormant_revival`, `version_anomaly`, `nonregistry_dependency_added`,
@@ -895,8 +897,8 @@ allow-listing a package turns protection off for everyone using the server. The 
 then one line per field (`mode: enforce -> monitor`, `allow: added npm:left-pad`), and the
 policy page link. It says "loosened" instead when a change can let through what the old
 policy stopped: monitor mode, a lower rule severity, a higher threshold, a shorter age
-limit, a switch turned off, an allow-list entry added or a deny-list entry removed, or a
-new upstream. The JSON body is `{ "text", "policy_change", "loosened" }`.
+limit, a switch turned off, the `established` prior switched on or widened, an allow-list
+entry added or a deny-list entry removed, or a new upstream. The JSON body is `{ "text", "policy_change", "loosened" }`.
 
 ## 8. Policy (`customs.toml`)
 
@@ -927,6 +929,10 @@ agent_bypass = "block"      # install-time code runs an AI coding CLI with permi
 scan_error = "block"        # the scanner rejected the archive (limits, bomb, corrupt)
 allow = ["pypi:requests", "npm:react"]  # always allow (exact names)
 deny  = ["npm:event-stream@3.3.6"]
+[established]               # releases of popular packages that have stood for a while
+enabled = true
+top = 5000                  # names counted from models/popular_{pypi,npm}.txt
+min_age_days = 30           # the release must be at least this old
 [upstream]
 pypi_simple = "https://pypi.org/simple"
 pypi_files = "https://files.pythonhosted.org"
@@ -943,6 +949,24 @@ turns nonexistent names into warnings. Unknown keys and bad values are rejected 
 key that holds them. Without `--config`, the server reads `./customs.toml`, then
 `<data-dir>/policy.toml`, and `PUT /api/policy` writes to the file it read (or
 `<data-dir>/policy.toml`).
+
+**Established releases.** The classifier has false positives on popular packages that look
+like malware for ordinary reasons: the `requests` sdist has test fixtures full of raw IP
+URLs and a `setup.py` that runs `os.system`, and scores 0.99. Retraining is the real fix;
+until then the policy layer carries a prior. A release whose exact name is among the
+`top` names of its ecosystem's popularity list (the name model's list, 5,000 per
+registry), published at least `established.min_age_days` ago (30 by default) and not
+yanked (PyPI) or deprecated (npm), gets an `established` hit with severity `allow`, and
+the model decision drops out of the combination. The model still runs and its scores and
+reasons stay in the verdict. The deny list wins over it, and every rule hit (cooldown,
+release history, scanner rules) still counts, so a release that adds an install script or
+ships a `.pth` startup hook is blocked as before. The tradeoff: against a hijacked release
+of a popular package whose code the rules miss, the age gate is the defence. Such releases
+are usually found and pulled within days (310 of the 327 compromised npm releases in the
+corpus have since been unpublished; EVALUATION.md, "Release history rules on compromised
+npm releases"), and a release younger than the gate still gets the model's verdict. One
+that stays on the registry for 30 days and trips no rule is allowed. Set
+`established.enabled = false` to let the model decide for every package.
 
 **Resolving past young releases.** A minimum age that only blocks breaks every unpinned
 install for days after each upstream release: `pip install foo` and `npm install foo` pick

@@ -546,6 +546,7 @@ pub fn rule_label(rule: &str) -> String {
     match rule {
         "deny" => "On the deny list".into(),
         "allow" => "On the allow list".into(),
+        "established" => "Established release of a popular package".into(),
         "block_nonexistent" => "Package does not exist (possible hallucination)".into(),
         "min_age_days" => "Published too recently".into(),
         "block_install_scripts_from_new" => "New package with install scripts".into(),

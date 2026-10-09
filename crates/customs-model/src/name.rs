@@ -314,6 +314,14 @@ impl PopularIndex {
         self.full.contains(normalized)
     }
 
+    /// Position of a normalized full name in the list (0 is the most popular).
+    pub fn rank(&self, normalized: &str) -> Option<usize> {
+        if !self.full.contains(normalized) {
+            return None;
+        }
+        self.names.iter().position(|n| n == normalized)
+    }
+
     /// Smallest OSA distance from `bare_name` to a different popular bare name, as
     /// `(distance, nearest full name)`. Distances above `max_distance` are reported as
     /// `max_distance + 1` with no name. Ties go to the more popular name.
@@ -907,6 +915,21 @@ mod tests {
         // Same bare name as a popular package: distance 0 is ignored.
         let f = compute_features(Ecosystem::Npm, "@acme/core", &p, 4, &mut s);
         assert!(f.distance > 1);
+    }
+
+    #[test]
+    fn rank_is_the_position_in_the_list() {
+        let p = PopularIndex::from_text(
+            Ecosystem::Pypi,
+            "boto3\n# c\nTyping_Extensions\nboto3\nidna\n",
+        );
+        assert_eq!(p.rank("boto3"), Some(0));
+        assert_eq!(p.rank("typing-extensions"), Some(1));
+        assert_eq!(p.rank("idna"), Some(2));
+        assert_eq!(p.rank("requests"), None);
+        let n = PopularIndex::new(Ecosystem::Npm, ["@types/node", "react"]);
+        assert_eq!(n.rank("react"), Some(1));
+        assert_eq!(n.rank("node"), None);
     }
 
     #[test]
