@@ -1467,5 +1467,7 @@ SARIF 2.1.0 with one run (driver `Customs`), rules `customs/model-block`,
 `customs/install-scripts-from-new-package`, `customs/scan-error`), and one result per warned
 or blocked package, or mismatched entry, at its lockfile line (path relative to the working directory) with
 `partialFingerprints.customsPackage/v1 = <ecosystem>/<name>/<version>`, so GitHub keeps one
-alert per package version across runs. `action.yml` wraps this for GitHub Actions
+alert per package version across runs. Not-checked entries that fetch code (git, URL,
+custom index, unrecognised MCP launcher; not local paths or unpinned ranges) are
+note-level results under `customs/unchecked-source`, which never affect `--fail-on`. `action.yml` wraps this for GitHub Actions
 (`docs/github-action.md`).

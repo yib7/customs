@@ -157,6 +157,12 @@ fn rule(id: &str) -> Rule {
             "The registry has no installable files for the pinned version; it may have been removed.",
             "warning",
         ),
+        "customs/unchecked-source" => (
+            "UncheckedSource",
+            "Dependency is fetched from a source Customs did not check",
+            "The entry installs code from a git repository, a URL, a custom package index or a launcher Customs does not recognise, so no verdict covers it. Check where it comes from, or install it from the public registry.",
+            "note",
+        ),
         _ => ("", "", "", "warning"),
     };
     if name.is_empty() {
@@ -363,6 +369,37 @@ pub fn to_sarif(report: &Report, cwd: &Path) -> Value {
             "properties": properties,
         }));
     }
+    // Entries that fetch code nothing checked; the project's own files and unpinned ranges
+    // are left out. Notes, so `--fail-on` is unaffected.
+    for k in report.skipped.iter().filter(|k| k.fetched()) {
+        let rule_id = "customs/unchecked-source";
+        let index = match rule_ids.iter().position(|r| r == rule_id) {
+            Some(i) => i,
+            None => {
+                rule_ids.push(rule_id.into());
+                strongest.push("note");
+                rule_ids.len() - 1
+            }
+        };
+        results.push(json!({
+            "ruleId": rule_id,
+            "ruleIndex": index,
+            "level": "note",
+            "message": { "text": format!("{} was not checked: {}.", k.spec, k.reason) },
+            "locations": [{
+                "physicalLocation": {
+                    "artifactLocation": {
+                        "uri": display_path(&k.file, cwd),
+                        "uriBaseId": "%SRCROOT%",
+                    },
+                    "region": { "startLine": k.line },
+                }
+            }],
+            "partialFingerprints": {
+                "customsPackage/v1": format!("unchecked/{}", k.spec),
+            },
+        }));
+    }
     let rules: Vec<Value> = rule_ids
         .iter()
         .zip(&strongest)
@@ -379,7 +416,11 @@ pub fn to_sarif(report: &Report, cwd: &Path) -> Value {
                 "shortDescription": { "text": r.short },
                 "fullDescription": { "text": r.full },
                 "helpUri": format!("{INFORMATION_URI}/blob/main/docs/github-action.md"),
-                "help": { "text": format!("{} Review the package before installing it; to accept it, add it to `allow` in customs.toml.", r.full) },
+                "help": { "text": if r.id == "customs/unchecked-source" {
+                    r.full.clone()
+                } else {
+                    format!("{} Review the package before installing it; to accept it, add it to `allow` in customs.toml.", r.full)
+                } },
                 "defaultConfiguration": { "level": r.level },
                 "properties": {
                     "tags": ["security", "supply-chain"],
@@ -436,6 +477,7 @@ pub fn to_sarif(report: &Report, cwd: &Path) -> Value {
 mod tests {
     use super::super::tests::{checked, finding, verdict};
     use super::*;
+    use crate::audit::{SkipKind, Skipped};
     use std::path::PathBuf;
 
     #[test]
@@ -546,6 +588,66 @@ mod tests {
             inv["toolExecutionNotifications"].as_array().unwrap().len(),
             1
         );
+    }
+
+    #[test]
+    fn git_entries_become_notes() {
+        let skip = |line: usize, spec: &str, kind: SkipKind| Skipped {
+            file: PathBuf::from("requirements.txt"),
+            line,
+            spec: spec.into(),
+            kind,
+            reason: "installed from a URL or VCS".into(),
+        };
+        let report = Report {
+            files: vec![PathBuf::from("requirements.txt")],
+            findings: vec![],
+            skipped: vec![
+                skip(1, "git+https://github.com/x/y.git", SkipKind::Source),
+                skip(2, "flask>=2", SkipKind::Unpinned),
+                skip(3, "./lib", SkipKind::Local),
+                skip(4, "corp-tool==1.0", SkipKind::CustomIndex),
+            ],
+            errors: vec![],
+            via: "test".into(),
+        };
+        let s = to_sarif(&report, Path::new("/work"));
+        let run = &s["runs"][0];
+        let results = run["results"].as_array().unwrap();
+        // Code fetched from somewhere Customs did not check; not the project's own files
+        // or ranges a resolver pins later.
+        let got: Vec<(&str, &str, u64)> = results
+            .iter()
+            .map(|r| {
+                (
+                    r["ruleId"].as_str().unwrap(),
+                    r["level"].as_str().unwrap(),
+                    r["locations"][0]["physicalLocation"]["region"]["startLine"]
+                        .as_u64()
+                        .unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("customs/unchecked-source", "note", 1),
+                ("customs/unchecked-source", "note", 4)
+            ]
+        );
+        assert!(results[0]["message"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("git+https://github.com/x/y.git"));
+        assert_eq!(
+            results[1]["partialFingerprints"]["customsPackage/v1"],
+            "unchecked/corp-tool==1.0"
+        );
+        let idx = results[0]["ruleIndex"].as_u64().unwrap() as usize;
+        let r = &run["tool"]["driver"]["rules"][idx];
+        assert_eq!(r["name"], "UncheckedSource");
+        // Notes never fail the build.
+        assert_eq!(report.exit_code(super::super::FailOn::Warn), 0);
     }
 
     #[test]

@@ -15,6 +15,11 @@ pinned version or, without one, at the newest release. A server without an exact
 also gets a note-level alert (`customs/unpinned-mcp-server`), since each agent start runs
 whatever release is newest.
 
+Entries that fetch code Customs cannot check (git and URL dependencies, packages from a
+custom index, MCP servers with a launcher it does not recognise) get a note-level alert
+(`customs/unchecked-source`) at their line. Notes never fail the job, whatever `fail-on`
+says.
+
 ## Workflow
 
 Save this as `.github/workflows/customs.yml`:
