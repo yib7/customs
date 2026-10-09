@@ -1319,14 +1319,13 @@ fn model_roots(
 /// Find a model directory among [`model_roots`] (each, or its `dev/` subdirectory). Real
 /// models in a directory win over its `dev/` placeholders.
 pub fn find_models_dir(explicit: Option<&Path>, project_dir: Option<&Path>) -> Option<PathBuf> {
+    first_models_dir(&default_model_roots(explicit, project_dir))
+}
+
+fn default_model_roots(explicit: Option<&Path>, project_dir: Option<&Path>) -> Vec<PathBuf> {
     let exe = std::env::current_exe().ok();
     let env_models = std::env::var_os("CUSTOMS_MODELS").map(PathBuf::from);
-    first_models_dir(&model_roots(
-        explicit,
-        project_dir,
-        env_models,
-        exe.as_deref(),
-    ))
+    model_roots(explicit, project_dir, env_models, exe.as_deref())
 }
 
 fn first_models_dir(roots: &[PathBuf]) -> Option<PathBuf> {
@@ -1353,7 +1352,14 @@ pub fn load_models(explicit: Option<&Path>, project_dir: Option<&Path>) -> anyho
             if let Some(p) = explicit {
                 anyhow::bail!("no manifest.json in {} or {}/dev", p.display(), p.display());
             }
-            tracing::warn!("no models found; verdicts use policy rules only");
+            let tried: Vec<String> = default_model_roots(None, project_dir)
+                .iter()
+                .map(|r| r.display().to_string())
+                .collect();
+            tracing::error!(
+                tried = %tried.join(", "),
+                "no models found: the classifier is OFF and verdicts use the policy rules only;                  pass --models DIR or set CUSTOMS_MODELS"
+            );
             Ok(Models::empty())
         }
     }

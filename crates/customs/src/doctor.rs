@@ -951,6 +951,42 @@ async fn health(server: &str) -> Result<Value, String> {
     r.json::<Value>().await.map_err(|e| e.to_string())
 }
 
+/// What the server's `/healthz` says about enforcement: monitor mode blocks nothing, and a
+/// server without (trained) models judges on the policy rules alone.
+pub fn server_finding(server: &str, h: &Value) -> Finding {
+    let mode = h["mode"].as_str().unwrap_or("?");
+    let version = h["model_version"].as_str().unwrap_or("?");
+    // Servers before `models_loaded` report "none" for a missing model directory.
+    let loaded = h["models_loaded"].as_bool().unwrap_or(version != "none");
+    let untrained = h["untrained"].as_bool().unwrap_or(false);
+    let answers = format!("{server} answers: mode {mode}, models {version}");
+    if mode != "enforce" {
+        return finding(
+            Level::Warn,
+            "server",
+            answers,
+            "in this mode the proxy records verdicts but blocks nothing; set mode = \"enforce\" in the policy",
+        );
+    }
+    if !loaded {
+        return finding(
+            Level::Warn,
+            "server",
+            format!("{answers}; it runs without the classifier, so only the policy rules judge packages"),
+            "pass --models DIR or set CUSTOMS_MODELS for `customs serve`",
+        );
+    }
+    if untrained {
+        return finding(
+            Level::Warn,
+            "server",
+            format!("{answers}; these are the untrained development placeholders, not a trained classifier"),
+            "point --models or CUSTOMS_MODELS at the trained models/ directory",
+        );
+    }
+    finding(Level::Ok, "server", answers, "")
+}
+
 pub struct DoctorOptions {
     pub dir: PathBuf,
     pub server: String,
@@ -971,24 +1007,7 @@ pub async fn run(opts: DoctorOptions) -> i32 {
     };
     let mut findings = inspect(&inputs);
     match health(&opts.server).await {
-        Ok(h) => {
-            let mode = h["mode"].as_str().unwrap_or("?");
-            let level = if mode == "enforce" { Level::Ok } else { Level::Warn };
-            findings.push(finding(
-                level,
-                "server",
-                format!(
-                    "{} answers: mode {mode}, models {}",
-                    opts.server,
-                    h["model_version"].as_str().unwrap_or("?")
-                ),
-                if mode == "enforce" {
-                    ""
-                } else {
-                    "in this mode the proxy records verdicts but blocks nothing; set mode = \"enforce\" in the policy"
-                },
-            ));
-        }
+        Ok(h) => findings.push(server_finding(&opts.server, &h)),
         Err(e) => findings.push(finding(
             Level::Bypass,
             "server",
@@ -1390,5 +1409,29 @@ command = "customs hook codex"
         let b = bypasses(&run_with(d.path(), None, full_env()));
         assert_eq!(b.len(), 1);
         assert_eq!(b[0].0, "Poetry");
+    }
+
+    #[test]
+    fn a_server_without_a_trained_classifier_is_a_warning() {
+        let f = |v: Value| server_finding(SERVER, &v);
+        let ok = f(json!({"mode": "enforce", "model_version": "2026.06",
+            "models_loaded": true, "untrained": false}));
+        assert_eq!(ok.level, Level::Ok, "{ok:?}");
+        let none = f(json!({"mode": "enforce", "model_version": "none",
+            "models_loaded": false, "untrained": true}));
+        assert_eq!(none.level, Level::Warn);
+        assert!(none.detail.contains("without the classifier"), "{none:?}");
+        assert!(none.fix.contains("CUSTOMS_MODELS"), "{none:?}");
+        let dev = f(json!({"mode": "enforce", "model_version": "dev-untrained",
+            "models_loaded": true, "untrained": true}));
+        assert_eq!(dev.level, Level::Warn);
+        assert!(dev.detail.contains("untrained"), "{dev:?}");
+        // An older server reports only the model version.
+        let old = f(json!({"mode": "enforce", "model_version": "none"}));
+        assert_eq!(old.level, Level::Warn);
+        let monitor = f(json!({"mode": "monitor", "model_version": "2026.06",
+            "models_loaded": true, "untrained": false}));
+        assert_eq!(monitor.level, Level::Warn);
+        assert!(monitor.fix.contains("enforce"), "{monitor:?}");
     }
 }

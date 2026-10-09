@@ -295,12 +295,16 @@ async fn metrics(State(state): State<AppState>) -> Response {
 
 async fn healthz(State(state): State<AppState>) -> Response {
     let p = state.engine.policy();
+    let m = &state.engine.models;
     (
         StatusCode::OK,
         Json(json!({
             "status": "ok",
             "version": env!("CARGO_PKG_VERSION"),
-            "model_version": state.engine.models.model_version(),
+            "model_version": m.model_version(),
+            // False: no models were found and verdicts come from the policy rules alone.
+            "models_loaded": m.code_gbdt.is_some() || m.code_nn.is_some() || m.name_model.is_some(),
+            "untrained": m.manifest.untrained,
             "mode": p.mode,
         })),
     )

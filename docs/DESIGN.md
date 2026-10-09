@@ -827,7 +827,11 @@ proxies `/api` with the browser's `Host`, so its dashboard is same-origin as wel
   `customs_cache_total{result}`, `customs_singleflight_joins_total`,
   `customs_policy_changes_total{result}`,
   `customs_scan_duration_seconds`, `customs_upstream_fetch_duration_seconds{kind}`).
-  `GET /healthz`: `{ "status": "ok", "version", "model_version", "mode" }`.
+  `GET /healthz`: `{ "status": "ok", "version", "model_version", "models_loaded",
+  "untrained", "mode" }`. `models_loaded` is false when no model directory was found and
+  verdicts come from the policy rules alone (the server logs an error naming the paths it
+  tried); `customs doctor` warns about that, about untrained placeholder models, and about
+  monitor mode.
 - `GET /` and static assets: the dashboard from `--ui-dir` or `CUSTOMS_UI_DIR` (default `web/dist`, then `../../web/dist` and `../share/customs/ui` beside the binary), with
   unknown non-API paths served `index.html`; a placeholder page when it is not built.
 

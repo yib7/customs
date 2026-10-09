@@ -3262,3 +3262,51 @@ async fn the_vite_dev_origin_cannot_change_the_policy() {
     assert_eq!(r.status(), 200);
     h.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn healthz_says_whether_the_models_are_trained() {
+    let h = Harness::start(|_| {}).await;
+    let v: Value = h.get("/healthz").await.json().await.unwrap();
+    assert_eq!(v["status"], "ok");
+    assert_eq!(v["untrained"], true, "{v}");
+    assert_eq!(v["models_loaded"], true, "{v}");
+    h.stop().await;
+
+    // A server that found no models runs on the policy rules alone, and says so.
+    let dir = tempfile::tempdir().unwrap();
+    let engine = Engine::new(EngineConfig {
+        data_dir: dir.path().to_path_buf(),
+        models: Models::empty(),
+        policy: Policy::default(),
+        policy_path: dir.path().join("policy.toml"),
+        scanner: fake_scanner(Arc::default()),
+        limits: Limits::default(),
+        metrics: Arc::new(Metrics::new()),
+    })
+    .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(customs::server::serve_with(
+        listener,
+        engine,
+        None,
+        ServeOptions::default(),
+        async move {
+            let _ = rx.await;
+        },
+    ));
+    let http = reqwest::Client::builder().no_proxy().build().unwrap();
+    let v: Value = http
+        .get(format!("{base}/healthz"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(v["models_loaded"], false, "{v}");
+    assert_eq!(v["model_version"], "none", "{v}");
+    let _ = tx.send(());
+    server.await.unwrap().unwrap();
+}
