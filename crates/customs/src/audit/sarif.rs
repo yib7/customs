@@ -12,7 +12,7 @@ use super::{display_path, normalize, top_reasons, Finding, Outcome, Report};
 use crate::util::ecosystem_str;
 use crate::verdict::Verdict;
 
-pub const INFORMATION_URI: &str = "https://github.com/yib7/customs";
+const INFORMATION_URI: &str = "https://github.com/yib7/customs";
 const SCHEMA: &str = "https://json.schemastore.org/sarif-2.1.0.json";
 
 struct Rule {
@@ -194,7 +194,7 @@ fn capitalize(s: &str) -> String {
 }
 
 /// SARIF rule id for a policy rule (`block_nonexistent` -> `customs/nonexistent-package`).
-pub fn policy_rule_id(rule: &str) -> String {
+fn policy_rule_id(rule: &str) -> String {
     match rule {
         "deny" => "customs/deny-list".into(),
         "block_nonexistent" => "customs/nonexistent-package".into(),
