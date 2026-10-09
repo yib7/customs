@@ -61,12 +61,18 @@ describe('Policy page', () => {
       await user.clear(age);
       await user.type(age, '5');
       await user.click(screen.getByRole('button', { name: 'Save policy' }));
-      expect(await screen.findByTestId('policy-server-error')).toHaveTextContent('The server refused the change');
+      const refused = await screen.findByTestId('policy-server-error');
+      expect(refused).toHaveTextContent('The server refused the change');
+      // After a save the page moves focus to the status message on the next frame; typing
+      // before that lands in the message, not the field.
+      const statusFocused = () => waitFor(() => expect(screen.getByTestId('policy-server-error').parentElement).toHaveFocus());
+      await statusFocused();
       const token = screen.getByLabelText('Admin token');
       await user.type(token, 'wrong-token');
       await user.click(screen.getByRole('button', { name: 'Save policy' }));
       expect(await screen.findByText('the admin token is not valid')).toBeInTheDocument();
       expect(mock.policy).toMatchObject({ min_age_days: 3 });
+      await statusFocused();
       await user.clear(token);
       await user.type(token, 'team-token-0123456789');
       await user.click(screen.getByRole('button', { name: 'Save policy' }));
