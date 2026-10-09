@@ -1,5 +1,5 @@
 import { Link } from 'react-router';
-import type { Thresholds, Verdict } from '../api/types';
+import type { EventKind, Thresholds, Verdict } from '../api/types';
 import { allowlistSnippet, checkCommand } from '../lib/commands';
 import { formatDuration, registryUrl, safeLabel, shortSha } from '../lib/format';
 import { DecisionBadge, EcosystemBadge } from './Badges';
@@ -8,11 +8,28 @@ import { RiskGauge } from './RiskGauge';
 import { Card, CommandBlock, CopyButton } from './ui';
 import { ComponentScores, ContributionBars, EvidenceList, PolicyHits } from './VerdictParts';
 
-const SUMMARY: Record<Verdict['decision'], string> = {
-  block: 'Customs blocked this package. It was not installed.',
-  warn: 'Customs let this package through with a warning. Review the signals below.',
-  allow: 'Customs found nothing that warrants action.',
-};
+/**
+ * One sentence on what the decision meant. `kind` is how the verdict came about, when known:
+ * a check (`/api/check`) installs nothing, and in monitor mode a blocked install went through.
+ */
+function summary(v: Verdict, kind: EventKind | null): string {
+  const check = kind === 'check';
+  if (v.decision === 'allow') return 'Customs found nothing that warrants action.';
+  if (v.decision === 'warn') {
+    return check
+      ? 'Customs would let this package through with a warning. Review the signals below.'
+      : 'Customs let this package through with a warning. Review the signals below.';
+  }
+  if (check) {
+    return v.mode === 'monitor'
+      ? 'Customs would block this package in enforce mode. The policy is in monitor mode, so an install would go through.'
+      : 'Customs would block this package.';
+  }
+  if (v.mode === 'monitor') {
+    return kind === null ? 'Would have been blocked (monitor mode).' : 'Would have been blocked (monitor mode). It was installed.';
+  }
+  return 'Customs blocked this package. It was not installed.';
+}
 
 function HowToProceed({ v, level }: { v: Verdict; level: 2 | 3 }) {
   const reg = registryUrl(v.ecosystem, v.name);
@@ -78,10 +95,13 @@ function HowToProceed({ v, level }: { v: Verdict; level: 2 | 3 }) {
 export function VerdictView({
   verdict: v,
   thresholds,
+  kind = null,
   headingLevel = 1,
 }: {
   verdict: Verdict;
   thresholds: Thresholds | null;
+  /** How the verdict came about (the event kind), when known. */
+  kind?: EventKind | null;
   headingLevel?: 1 | 2;
 }) {
   const Heading = headingLevel === 1 ? 'h1' : 'h2';
@@ -107,7 +127,7 @@ export function VerdictView({
           </div>
           <DecisionBadge decision={v.decision} size="lg" />
         </div>
-        <p className="mt-2 text-sm text-ink-2">{SUMMARY[v.decision]}</p>
+        <p className="mt-2 text-sm text-ink-2">{summary(v, kind)}</p>
         <dl className="mt-4 grid grid-cols-1 gap-x-6 gap-y-2 text-xs sm:grid-cols-2 lg:grid-cols-4">
           <div className="min-w-0">
             <dt className="text-muted">Archive</dt>

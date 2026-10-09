@@ -215,6 +215,8 @@ export function parseVerdict(v: unknown): Verdict {
     model_version: asString(body.model_version),
     cached: asBool(body.cached, false),
     thresholds: parseThresholds(body.thresholds),
+    model_decision: parseDecision(body.model_decision),
+    mode: body.mode === 'enforce' || body.mode === 'monitor' ? body.mode : null,
   };
 }
 

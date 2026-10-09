@@ -138,6 +138,8 @@ describe('Check page', () => {
     await user.click(screen.getByRole('button', { name: 'Check' }));
     expect(await screen.findByTestId('verdict')).toBeInTheDocument();
     expect(screen.getByRole('heading', { level: 2, name: /reqeusts/ })).toBeInTheDocument();
+    // A check installs nothing.
+    expect(screen.getByText('Customs would block this package.')).toBeInTheDocument();
   });
 
   it('explains nonexistent packages', async () => {

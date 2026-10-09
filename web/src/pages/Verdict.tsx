@@ -1,5 +1,6 @@
-import { Link, useNavigate, useParams } from 'react-router';
+import { Link, useLocation, useNavigate, useParams } from 'react-router';
 import { ApiError, api } from '../api/client';
+import type { EventKind } from '../api/types';
 import { IconArrowLeft } from '../components/Icons';
 import { ReleaseDiffCard } from '../components/ReleaseDiffCard';
 import { VerdictView } from '../components/VerdictView';
@@ -10,9 +11,17 @@ import { useThresholds } from '../lib/thresholds';
 import { useAsync } from '../lib/useAsync';
 import { useTitle } from '../lib/useTitle';
 
+function eventKind(state: unknown): EventKind | null {
+  const kind = typeof state === 'object' && state !== null ? (state as { kind?: unknown }).kind : null;
+  return kind === 'install' || kind === 'check' || kind === 'nonexistent_package' ? kind : null;
+}
+
 export function VerdictPage() {
   const { id = '' } = useParams();
   const navigate = useNavigate();
+  const location = useLocation();
+  // The event kind, passed by the links from the activity list, the live feed and the check page.
+  const kind = eventKind(location.state);
   const verdict = useAsync((signal) => api.verdict(id, signal), `verdict:${id}`);
   const thresholds = useThresholds(verdict.data);
   const v = verdict.data;
@@ -45,7 +54,7 @@ export function VerdictPage() {
           <ErrorBox error={verdict.error} title="Could not load this verdict" onRetry={verdict.reload} />
         )
       ) : null}
-      {v ? <VerdictView verdict={v} thresholds={thresholds} /> : null}
+      {v ? <VerdictView verdict={v} thresholds={thresholds} kind={kind} /> : null}
       {v ? <ReleaseDiffCard key={v.id ?? v.name} verdict={v} /> : null}
     </>
   );

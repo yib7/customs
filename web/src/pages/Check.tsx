@@ -204,12 +204,16 @@ export function CheckPage() {
           <>
             {result.verdict.id ? (
               <p className="mb-3 text-sm">
-                <Link to={`/verdicts/${encodeURIComponent(result.verdict.id)}`} className="font-medium text-accent hover:underline">
+                <Link
+                  to={`/verdicts/${encodeURIComponent(result.verdict.id)}`}
+                  state={{ kind: 'check' }}
+                  className="font-medium text-accent hover:underline"
+                >
                   Open the full verdict page
                 </Link>
               </p>
             ) : null}
-            <VerdictView verdict={result.verdict} thresholds={thresholds} headingLevel={2} />
+            <VerdictView verdict={result.verdict} thresholds={thresholds} kind="check" headingLevel={2} />
           </>
         ) : null}
       </div>

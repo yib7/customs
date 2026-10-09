@@ -251,6 +251,7 @@ export function ActivityPage() {
                         {e.verdict_id ? (
                           <Link
                             to={`/verdicts/${encodeURIComponent(e.verdict_id)}`}
+                            state={{ kind: e.kind }}
                             className="min-w-0 truncate rounded hover:underline"
                             aria-label={`View verdict for ${safeLabel(e.name, 80)}${e.version ? ` version ${safeLabel(e.version, 20)}` : ''}`}
                           >

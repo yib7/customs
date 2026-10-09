@@ -88,6 +88,15 @@ describe('parseVerdict', () => {
     expect(v.name).toBe('foo');
   });
 
+  it('reads the policy mode and the model decision', () => {
+    const v = parseVerdict({ ...DESIGN_VERDICT, mode: 'monitor', model_decision: 'warn' });
+    expect(v.mode).toBe('monitor');
+    expect(v.model_decision).toBe('warn');
+    const bare = parseVerdict(DESIGN_VERDICT);
+    expect(bare.mode).toBeNull();
+    expect(bare.model_decision).toBeNull();
+  });
+
   it('throws on unusable input', () => {
     expect(() => parseVerdict(null)).toThrow(ParseError);
     expect(() => parseVerdict({ decision: 'block' })).toThrow(ParseError);

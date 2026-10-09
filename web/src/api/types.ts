@@ -65,6 +65,10 @@ export interface Verdict {
   cached: boolean;
   /** Optional extension: thresholds in effect when the verdict was made. */
   thresholds: Thresholds | null;
+  /** Decision from the model alone, before policy rules. Null when the server did not say. */
+  model_decision: Decision | null;
+  /** Policy mode the verdict was made in; in `monitor` mode nothing is refused. */
+  mode: PolicyMode | null;
 }
 
 export interface CustomsEvent {
