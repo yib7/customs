@@ -315,6 +315,37 @@ def evaluate() -> dict:
     return summary
 
 
+def place_rows(corpus: pd.DataFrame, rows: pd.DataFrame) -> pd.DataFrame:
+    """Give MalRegistry rows corpus cluster ids, and drop training rows that would leak.
+
+    ``evaluate`` clusters MalRegistry archives against training malware only, and its
+    cluster ids are positions in that combined list, not corpus ids. Here the rows are
+    clustered against all corpus malware: a row that near-duplicates corpus malware takes
+    that sample's ``cluster`` (so ``novel_mask`` and the grouped split see one campaign),
+    other rows get fresh ids above every corpus id, and a row bound for training
+    (``split_temporal == "train"``) is dropped when its cluster holds corpus malware in
+    the validation or test split of either scheme, or a row that is not trained on.
+    """
+    mal = corpus[corpus.label == 1]
+    docs = list(mal.tokens) + list(rows.tokens)
+    labels = dedup.cluster(docs)
+    n = len(mal)
+    corpus_id: dict[int, int] = {}
+    protected: set[int] = set()
+    held_out = (mal.split_temporal != "train") | (mal.split_grouped != "train")
+    for lab, cid, h in zip(labels[:n], mal.cluster, held_out, strict=True):
+        corpus_id[lab] = min(corpus_id.get(lab, int(cid)), int(cid))
+        if h:
+            protected.add(lab)
+    ext_labels = labels[n:]
+    trains = (rows.split_temporal == "train").to_numpy()
+    protected |= {lab for lab, t in zip(ext_labels, trains, strict=True) if not t}
+    base = int(corpus.cluster.max()) + 1
+    out = rows.assign(cluster=[corpus_id.get(lab, base + int(lab)) for lab in ext_labels])
+    keep = [not (t and lab in protected) for lab, t in zip(ext_labels, trains, strict=True)]
+    return out[keep].reset_index(drop=True)
+
+
 def _corpus_rows(df: pd.DataFrame, sel: pd.DataFrame, work_dir: Path) -> pd.DataFrame:
     """MalRegistry archives as corpus table rows (split taken from ``sel.split``)."""
     from . import name_model, names
@@ -322,7 +353,6 @@ def _corpus_rows(df: pd.DataFrame, sel: pd.DataFrame, work_dir: Path) -> pd.Data
     reports = features.scan_paths(list(sel.path), tokens=True)
     pop = name_model.Popular.from_list("pypi", names.popular("pypi"))
     nm = json.loads((work_dir / "name_model.json").read_text(encoding="utf-8"))
-    base = int(df.cluster.max()) + 1
     rows = []
     for r, rep in zip(sel.itertuples(), reports, strict=True):
         if "features" not in rep:
@@ -338,7 +368,7 @@ def _corpus_rows(df: pd.DataFrame, sel: pd.DataFrame, work_dir: Path) -> pd.Data
             "canonical_path": r.path,
             "scan_error": None,
             "tokens": rep.get("tokens") or [],
-            "cluster": base + int(r.cluster),
+            "cluster": -1,  # set by place_rows
             "split_temporal": r.split,
             "split_grouped": r.split,
             "name_logit": name_model.score_exported(nm, "pypi", r.name, pop),
@@ -347,7 +377,18 @@ def _corpus_rows(df: pd.DataFrame, sel: pd.DataFrame, work_dir: Path) -> pd.Data
         }
         row.update({f"f_{k}": v for k, v in rep["features"].items()})
         rows.append(row)
-    return pd.DataFrame(rows)
+    rows = pd.DataFrame(rows)
+    if rows.empty:
+        rows.attrs["dropped_near_heldout"] = 0
+        return rows
+    placed = place_rows(df, rows)
+    dropped = len(rows) - len(placed)
+    placed.attrs["dropped_near_heldout"] = dropped
+    if dropped:
+        from .pipeline import log
+
+        log(f"malregistry: {dropped} rows dropped, near-duplicates of validation or test malware")
+    return placed
 
 
 def adapt(fraction: float = 1.0, seed: int = 0) -> dict:
@@ -358,8 +399,10 @@ def adapt(fraction: float = 1.0, seed: int = 0) -> dict:
     novel or not, or a random ``fraction`` of its clusters) joins the training split;
     novel held-out samples are added under split ``external`` so every stage scores them
     but none trains on them. Halves are drawn per near-duplicate cluster, so no held-out
-    sample has a relative in the added data. Scores are code-only (no name model), as in
-    ``evaluate``, and compared with the main models at matched benign test FPR.
+    sample has a relative in the added data, and ``place_rows`` drops any added row that
+    near-duplicates corpus validation or test malware or a scored held-out sample. Scores
+    are code-only (no name model), as in ``evaluate``, and compared with the main models at
+    matched benign test FPR.
     """
     import os
 
@@ -449,8 +492,10 @@ def stage_train_rows() -> None:
     """Pipeline stage ``malregistry``: add the MalRegistry dev half to the training split.
 
     The held-out half stays out, so it remains a test of campaigns from a second source
-    that no model has seen. Rows are marked ``source = "malregistry"``; rerunning the stage
-    replaces them.
+    that no model has seen. ``evaluate`` de-duplicates MalRegistry against training malware
+    only, so ``place_rows`` re-clusters the dev half against all corpus malware and drops
+    dev-half rows that near-duplicate validation or test malware. Rows are marked
+    ``source = "malregistry"``; rerunning the stage replaces them.
     """
     from .pipeline import load_table, log, work
 
@@ -460,7 +505,13 @@ def stage_train_rows() -> None:
     ext = pd.read_parquet(work() / "external_malregistry.parquet")
     dev = ext[ext.half == "dev"].assign(split="train")
     rows = _corpus_rows(df, dev, work())
+    dropped = int(rows.attrs.get("dropped_near_heldout", 0))
     df["source"] = None
     out = pd.concat([df, rows], ignore_index=True)
     log(f"malregistry: {len(rows)} dev-half archives added to the training split")
     out.to_parquet(work() / "dataset.parquet")
+    # The report reads this to say whether the dev half was checked against held-out malware.
+    (work() / "malregistry_stage.json").write_text(
+        json.dumps({"added": int(len(rows)), "dropped_near_heldout": dropped}),
+        encoding="utf-8",
+    )

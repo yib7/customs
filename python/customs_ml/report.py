@@ -37,6 +37,32 @@ def num(x, digits: int = 3) -> str:
     return "n/a" if v is None else f"{v:.{digits}f}"
 
 
+def second_source_note(stage: dict | None) -> str:
+    """The Data bullet on MalRegistry training rows. ``stage`` is ``malregistry_stage.json``,
+    written by the ``malregistry`` stage once it checked the dev half against held-out
+    malware; without it the models were trained on an unchecked dev half."""
+    note = (
+        "* **Second source.** Training malware also includes the dev half of MalRegistry "
+        "(collected in 2022 and 2023, before the test period); its held-out half is a "
+        "separate test, below. The training counts include augmented copies."
+    )
+    if stage is None:
+        return note + (
+            " **Caveat:** the dev half was de-duplicated against training malware only, not "
+            "against validation or test malware, so dev-half archives that near-duplicate "
+            "test malware were trained on. Every in-domain test number from models trained "
+            "with the dev half (the shipped models: headline, components, GuardDog, slices "
+            "including `novel_campaigns`, misses, the *after* columns, end to end, retrain "
+            "variance, calibration; and the *Plus MalRegistry dev half* in-domain columns) may "
+            "be inflated by an amount not yet measured; measuring it needs the dataset and a "
+            "retrain. The MalRegistry held-out numbers are not affected."
+        )
+    return note + (
+        f" Dev-half archives that near-duplicate validation or test malware are left out "
+        f"({stage['dropped_near_heldout']:,} of them)."
+    )
+
+
 def render(scheme: str = SCHEME) -> str:
     ev = _load(f"eval_{scheme}.json")
     base = _load(f"baseline_eval_{scheme}.json")
@@ -70,11 +96,7 @@ def render(scheme: str = SCHEME) -> str:
         "before. The model never saw a sample from the test period."
     )
     if _load("external_malregistry_before_training.json"):
-        add(
-            "* **Second source.** Training malware also includes the dev half of MalRegistry "
-            "(collected in 2022 and 2023, before the test period); its held-out half is a "
-            "separate test, below. The training counts include augmented copies."
-        )
+        add(second_source_note(_load("malregistry_stage.json")))
     add(
         "* **Benign packages** are split at random by near-duplicate cluster in the same "
         "proportions, sampled across three popularity tiers (top, mid, long tail) of PyPI "

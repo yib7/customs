@@ -1372,6 +1372,12 @@ the data directory gets the dev half (all of its clusters, or a random fraction)
 training malware, every model is retrained, and the held-out half is scored code-only.
 The pipeline stage `malregistry` does the same for the shipped models, after `augment`
 (augmentation draws only from the primary corpus). The held-out half never enters training.
+Novelty and halves are decided against training malware only, so before dev-half rows
+join training they are clustered again against all corpus malware (`place_rows`): a row
+takes the corpus cluster id of the malware it near-duplicates, and a row whose cluster
+holds validation or test malware (either split scheme) or a scored held-out sample is
+dropped. The shipped models were trained before this check existed (see
+`docs/EVALUATION.md`).
 
 ### 10.2 Experiment: release diff model (`customs_ml/diff.py`, `customs-scan delta`)
 
