@@ -209,7 +209,9 @@ pub struct Engine {
     policy_changes: broadcast::Sender<PolicyChange>,
     /// Serializes policy changes, so each diff is taken against the policy it replaces.
     policy_write: Mutex<()>,
-    inflight: Mutex<HashMap<String, Flight>>,
+    /// In-progress evaluations by artifact URL, with the event kind and client that started
+    /// each one.
+    inflight: Mutex<HashMap<String, (Flight, EventKind, Option<String>)>>,
     tmp_counter: AtomicU64,
     /// Bytes downloaded since the cache size was last checked.
     cache_growth: AtomicU64,
@@ -341,17 +343,20 @@ impl Engine {
         req: ArtifactRequest,
     ) -> Result<Outcome, EngineError> {
         let key = req.url.clone();
-        let cell = {
+        let me = (req.kind, req.client.clone());
+        // `Some` when this call joined a flight another kind of request or client started.
+        let (cell, joined_other) = {
             let mut map = self.inflight.lock().unwrap_or_else(|e| e.into_inner());
             match map.get(&key) {
-                Some(c) => {
+                Some((c, kind, client)) => {
                     self.metrics.singleflight_join();
-                    c.clone()
+                    let other = (*kind, client.clone()) != me;
+                    (c.clone(), other.then_some(me))
                 }
                 None => {
                     let c: Flight = Arc::new(OnceCell::new());
-                    map.insert(key.clone(), c.clone());
-                    c
+                    map.insert(key.clone(), (c.clone(), me.0, me.1.clone()));
+                    (c, None)
                 }
             }
         };
@@ -366,9 +371,16 @@ impl Engine {
             })
             .await
             .clone();
-        let mut map = self.inflight.lock().unwrap_or_else(|e| e.into_inner());
-        if map.get(&key).is_some_and(|c| Arc::ptr_eq(c, &cell)) {
-            map.remove(&key);
+        {
+            let mut map = self.inflight.lock().unwrap_or_else(|e| e.into_inner());
+            if map.get(&key).is_some_and(|(c, ..)| Arc::ptr_eq(c, &cell)) {
+                map.remove(&key);
+            }
+        }
+        // The evaluation recorded one event, for the request that started it. A proxy
+        // install that joined a check (or a check that joined an install) is its own event.
+        if let (Ok(o), Some((kind, client))) = (&result, joined_other) {
+            self.record_event(&o.verdict, kind, client)?;
         }
         result
     }
@@ -801,6 +813,31 @@ impl Engine {
         // No subscribers is fine.
         let _ = self.events.send(event);
         Ok(v)
+    }
+
+    /// Record another request answered by the already stored verdict `v`.
+    fn record_event(
+        &self,
+        v: &Verdict,
+        kind: EventKind,
+        client: Option<String>,
+    ) -> Result<(), EngineError> {
+        let event = self
+            .store
+            .insert_event(NewEvent {
+                ecosystem: v.ecosystem,
+                name: v.name.clone(),
+                version: v.version.clone(),
+                client,
+                kind,
+                decision: Some(v.decision),
+                risk: v.risk,
+                verdict_id: v.id,
+            })
+            .map_err(internal)?;
+        self.metrics.event(kind.as_str());
+        let _ = self.events.send(event);
+        Ok(())
     }
 
     /// Record a request for a name the registry does not know (from the proxy).

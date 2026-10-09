@@ -3246,3 +3246,61 @@ async fn check_also_reads_the_pure_python_wheel() {
     assert_eq!(h.events().await.len(), 2);
     h.stop().await;
 }
+
+/// Wait until `/metrics` contains `needle`, or fail after a generous deadline.
+async fn wait_for_metric(h: &Harness, needle: &str) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let m = h.get("/metrics").await.text().await.unwrap();
+        if m.contains(needle) {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no `{needle}` in /metrics:\n{m}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Hold every mock file download until the test releases it.
+fn hold_downloads(h: &Harness) -> Arc<tokio::sync::Semaphore> {
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    *h.mock.file_gate.lock().unwrap() = Some(gate.clone());
+    gate
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_proxy_install_joining_a_check_records_an_install_event() {
+    let h = Arc::new(Harness::start(|_| {}).await);
+    let gate = hold_downloads(&h);
+    let check = {
+        let h = h.clone();
+        tokio::spawn(async move { h.check("pypi", "goodpkg", Some("1.0.0")).await })
+    };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while h.mock.hits("packages/ab/cd/goodpkg-1.0.0.tar.gz") == 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "check never fetched"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let install = {
+        let h = h.clone();
+        tokio::spawn(async move { h.get(&pypi_file_path("goodpkg", "1.0.0")).await.status() })
+    };
+    wait_for_metric(&h, "customs_singleflight_joins_total 1").await;
+    gate.add_permits(1);
+    let (status, v) = check.await.unwrap();
+    assert_eq!(status, 200, "{v}");
+    assert_eq!(install.await.unwrap(), 200);
+    assert_eq!(h.scans.load(Ordering::SeqCst), 1);
+
+    let ev = h.events().await;
+    let mut kinds: Vec<&str> = ev.iter().map(|e| e["kind"].as_str().unwrap()).collect();
+    kinds.sort();
+    assert_eq!(kinds, ["check", "install"], "{ev:?}");
+    assert!(ev.iter().all(|e| e["verdict_id"] == v["id"]), "{ev:?} {v}");
+    Arc::try_unwrap(h).ok().unwrap().stop().await;
+}
