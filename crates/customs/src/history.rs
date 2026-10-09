@@ -97,6 +97,18 @@ pub fn is_nonregistry_spec(spec: &str) -> bool {
     if PREFIXES.iter().any(|p| s.starts_with(p)) {
         return true;
     }
+    // Local paths, as npm-package-arg recognises them: `.`/`..` relative, `/` and `~/`
+    // absolute, Windows drive and UNC paths.
+    let b = s.as_bytes();
+    if s.starts_with(['.', '/', '\\'])
+        || s.starts_with("~/")
+        || (b.len() > 2
+            && b[0].is_ascii_alphabetic()
+            && b[1] == b':'
+            && matches!(b[2], b'/' | b'\\'))
+    {
+        return true;
+    }
     // `owner/repo` and `owner/repo#ref`: GitHub shorthand.
     let repo = s.split('#').next().unwrap_or("");
     let mut parts = repo.split('/');
@@ -297,6 +309,17 @@ mod tests {
             "owner/repo",
             "owner/repo#main",
             "gitlab:a/b",
+            // Local paths, which npm installs without the registry.
+            "./x",
+            "../x",
+            "~/x",
+            "/abs/x",
+            "../../x",
+            "./a/b",
+            "C:\\x",
+            "c:/x",
+            "\\\\server\\share",
+            ".",
         ] {
             assert!(is_nonregistry_spec(s), "{s}");
         }
