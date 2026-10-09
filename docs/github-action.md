@@ -59,7 +59,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: yib7/new_proj@main
+      - uses: yib7/customs@main
         with:
           paths: .
           recursive: true

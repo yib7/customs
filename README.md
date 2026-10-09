@@ -1,6 +1,6 @@
 # Customs
 
-[![CI](https://github.com/yib7/new_proj/actions/workflows/ci.yml/badge.svg)](https://github.com/yib7/new_proj/actions/workflows/ci.yml)
+[![CI](https://github.com/yib7/customs/actions/workflows/ci.yml/badge.svg)](https://github.com/yib7/customs/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 **A package firewall for AI coding agents.** Customs sits between `pip`/`uv`/`npm` (and
@@ -93,7 +93,7 @@ with npm. The first build takes a few minutes.
 **Step 1.** Clone the repository.
 
 ```sh
-git clone https://github.com/yib7/new_proj.git customs
+git clone https://github.com/yib7/customs.git customs
 cd customs
 ```
 

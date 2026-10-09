@@ -6,7 +6,7 @@ members = ["crates/customs-scan", "crates/customs-model", "crates/customs", "cra
 version = "0.9.0"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/yib7/new_proj"
+repository = "https://github.com/yib7/customs"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }

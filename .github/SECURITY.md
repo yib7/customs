@@ -8,7 +8,7 @@ Only the latest release gets fixes.
 
 ## Reporting a vulnerability
 
-Use [private vulnerability reporting](https://github.com/yib7/new_proj/security/advisories/new)
+Use [private vulnerability reporting](https://github.com/yib7/customs/security/advisories/new)
 on this repository. Please do not open a public issue for a vulnerability.
 
 Include the version (`customs --version`), what you did, what you expected, and what
