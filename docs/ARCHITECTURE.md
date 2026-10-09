@@ -104,6 +104,7 @@ executed or installed. [EVALUATION.md](EVALUATION.md) has the numbers.
 | `CUSTOMS_BIND` | `127.0.0.1:7878` | Address the server listens on |
 | `CUSTOMS_DATA_DIR` | `.customs` for the server, the user cache directory for the hook and CLI | Database and archive cache |
 | `CUSTOMS_MODELS` | `./models`, then paths next to the binary | Model directory |
+| `CUSTOMS_UI_DIR` | `./web/dist`, then paths next to the binary | Dashboard files |
 | `CUSTOMS_SERVER` | `http://127.0.0.1:7878` | Server the hook and CLI talk to |
 | `CUSTOMS_ADMIN_TOKEN` | unset | Required for policy changes when set |
 

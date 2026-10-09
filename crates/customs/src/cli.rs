@@ -71,8 +71,9 @@ pub struct ServeArgs {
     pub bind: String,
     #[arg(long, default_value = ".customs", env = "CUSTOMS_DATA_DIR")]
     pub data_dir: PathBuf,
-    #[arg(long, default_value = "web/dist")]
-    pub ui_dir: PathBuf,
+    /// Dashboard directory. Default: ./web/dist, then paths relative to the executable.
+    #[arg(long, env = "CUSTOMS_UI_DIR")]
+    pub ui_dir: Option<PathBuf>,
     /// Model directory (falls back to its dev/ placeholders).
     #[arg(long, env = "CUSTOMS_MODELS")]
     pub models: Option<PathBuf>,
@@ -426,13 +427,9 @@ async fn serve(a: ServeArgs) -> anyhow::Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("binding {}: {e}", a.bind))?;
     let addr = listener.local_addr()?;
-    let ui = a
-        .ui_dir
-        .join("index.html")
-        .is_file()
-        .then(|| a.ui_dir.clone());
+    let ui = find_ui_dir(a.ui_dir.as_deref());
     if ui.is_none() {
-        tracing::warn!(ui_dir = %a.ui_dir.display(), "dashboard not built; serving a placeholder page");
+        tracing::warn!("dashboard not built (npm run build in web/); serving a placeholder page");
     }
     if let Some(url) = a.notify_url.filter(|u| !u.trim().is_empty()) {
         let public_url = a
@@ -735,9 +732,64 @@ pub fn env_vars(server: &str) -> Vec<(&'static str, String)> {
     vars
 }
 
+/// The built dashboard: `explicit` if given, else the first of [`ui_dir_candidates`]
+/// that holds an `index.html`.
+fn find_ui_dir(explicit: Option<&Path>) -> Option<PathBuf> {
+    match explicit {
+        Some(dir) => first_ui_dir(&[dir.to_path_buf()]),
+        None => first_ui_dir(&ui_dir_candidates(std::env::current_exe().ok().as_deref())),
+    }
+}
+
+/// `web/dist` under the working directory, then beside the executable: in a checkout
+/// (`target/release/customs`) and in an install prefix (`bin/customs`).
+fn ui_dir_candidates(exe: Option<&Path>) -> Vec<PathBuf> {
+    let mut dirs = vec![PathBuf::from("web/dist")];
+    if let Some(dir) = exe.and_then(Path::parent) {
+        dirs.push(dir.join("../../web/dist"));
+        dirs.push(dir.join("../share/customs/ui"));
+    }
+    dirs
+}
+
+fn first_ui_dir(candidates: &[PathBuf]) -> Option<PathBuf> {
+    candidates
+        .iter()
+        .find(|d| d.join("index.html").is_file())
+        .cloned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dashboard_is_found_beside_an_installed_binary() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("bin")).unwrap();
+        let exe = root.path().join("bin/customs");
+        let candidates = ui_dir_candidates(Some(&exe));
+        assert_eq!(candidates[0], PathBuf::from("web/dist"));
+        assert!(candidates.contains(&root.path().join("bin/../../web/dist")));
+        let share = root.path().join("bin/../share/customs/ui");
+        assert!(candidates.contains(&share));
+
+        assert_eq!(first_ui_dir(&candidates), None);
+        std::fs::create_dir_all(root.path().join("share/customs/ui")).unwrap();
+        std::fs::write(root.path().join("share/customs/ui/index.html"), "<html>").unwrap();
+        assert_eq!(first_ui_dir(&candidates), Some(share));
+    }
+
+    #[test]
+    fn an_explicit_dashboard_dir_is_the_only_one_tried() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(find_ui_dir(Some(dir.path())), None);
+        std::fs::write(dir.path().join("index.html"), "<html>").unwrap();
+        assert_eq!(
+            find_ui_dir(Some(dir.path())),
+            Some(dir.path().to_path_buf())
+        );
+    }
 
     #[test]
     fn package_args() {

@@ -820,7 +820,7 @@ API (JSON). CORS allows only `http://localhost:5173` (the Vite dev server).
   `customs_policy_changes_total{result}`,
   `customs_scan_duration_seconds`, `customs_upstream_fetch_duration_seconds{kind}`).
   `GET /healthz`: `{ "status": "ok", "version", "model_version", "mode" }`.
-- `GET /` and static assets: the dashboard from `--ui-dir` (default `web/dist`), with
+- `GET /` and static assets: the dashboard from `--ui-dir` or `CUSTOMS_UI_DIR` (default `web/dist`, then `../../web/dist` and `../share/customs/ui` beside the binary), with
   unknown non-API paths served `index.html`; a placeholder page when it is not built.
 
 Clients: `customs env` prints the variables that point installers at the proxy, checked with
