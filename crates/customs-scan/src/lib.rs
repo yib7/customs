@@ -11,6 +11,7 @@
 mod archive;
 mod delta;
 mod indicators;
+mod installer;
 mod large;
 mod lexer;
 mod manifest;
@@ -858,53 +859,123 @@ impl<'a> Scanner<'a> {
     /// each enclosing package, and imported names that are submodules. Absolute imports
     /// resolve only to top-level packages shipped in the archive (at the root or in `src/`).
     fn python_module_files(&self, dir: &str, imp: &indicators::PyImport) -> Vec<String> {
-        let mut base: Vec<String> = if imp.level > 0 {
-            let mut parts: Vec<String> = dir
-                .split('/')
-                .filter(|p| !p.is_empty())
-                .map(str::to_string)
-                .collect();
-            for _ in 1..imp.level {
-                if parts.pop().is_none() {
-                    return Vec::new();
-                }
+        python_module_files(dir, imp, &|p| self.index.contains_key(p))
+    }
+
+    /// Paths of modules that setup-time Python files import, counting files that exist
+    /// only as link entries.
+    fn setup_import_candidates(&self) -> HashSet<String> {
+        let links: HashSet<&str> = self.c.links.iter().map(|l| l.path.as_str()).collect();
+        let has = |p: &str| self.index.contains_key(p) || links.contains(p);
+        let mut out = HashSet::new();
+        for (&idx, &u) in &self.entry_unit {
+            let unit = &self.units[u];
+            if !unit.inst || unit.lang != Lang::Python || !self.follows_imports(idx) {
+                continue;
             }
-            parts
-        } else {
-            let Some(top) = imp.module.split('.').next().filter(|t| !t.is_empty()) else {
-                return Vec::new();
-            };
-            let shipped = |root: &str| {
-                self.index
-                    .contains_key(format!("{root}{top}/__init__.py").as_str())
-                    || self.index.contains_key(format!("{root}{top}.py").as_str())
-            };
-            if shipped("") {
-                Vec::new()
-            } else if shipped("src/") {
-                vec!["src".to_string()]
-            } else {
-                return Vec::new();
+            let path = &self.c.entries[idx].path;
+            let dir = path.rsplit_once('/').map_or("", |(d, _)| d);
+            for imp in indicators::python_imports(&unit.text) {
+                out.extend(python_module_files(dir, &imp, &has));
             }
-        };
-        let mut out = Vec::new();
-        for part in imp.module.split('.').filter(|p| !p.is_empty()) {
-            base.push(part.to_string());
-            out.push(format!("{}/__init__.py", base.join("/")));
-        }
-        if !base.is_empty() {
-            out.push(format!("{}.py", base.join("/")));
-        }
-        for name in &imp.names {
-            let mut sub = base.clone();
-            sub.push(name.clone());
-            let sub = sub.join("/");
-            out.push(format!("{sub}.py"));
-            out.push(format!("{sub}/__init__.py"));
         }
         out
     }
 
+    /// Code files the installer extracts differently from how the scanner read them (see
+    /// the `installer` module), as `unread_code` labels.
+    fn installer_unread(&self) -> Vec<String> {
+        let dups = installer::duplicates(self.c);
+        let dup_paths: HashSet<String> = dups.iter().map(|(p, _)| p.clone()).collect();
+        let mut out: Vec<String> = dups.into_iter().map(|(_, label)| label).collect();
+        match self.eco {
+            Ecosystem::Npm => {
+                out.extend(installer::npm_mismatches(self.c, &self.index, &dup_paths))
+            }
+            Ecosystem::Pypi => {
+                let imported = self.setup_import_candidates();
+                out.extend(installer::pypi_links(self.c, &self.index, &|p| {
+                    pypi_install_time(p) || imported.contains(p)
+                }));
+            }
+        }
+        out
+    }
+}
+
+/// Whether pip runs a file at this package-root path while installing or at interpreter
+/// start: the build files, `.pth` files, site customization hooks and top-level package
+/// `__init__.py` files.
+fn pypi_install_time(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    let top = lower.strip_prefix("src/").unwrap_or(&lower);
+    let parts: Vec<&str> = path.split('/').collect();
+    matches!(
+        path,
+        "setup.py" | "setup.cfg" | "pyproject.toml" | "PKG-INFO"
+    ) || lower.ends_with(".pth")
+        || matches!(top, "sitecustomize.py" | "usercustomize.py")
+        || matches!(
+            parts.as_slice(),
+            [_, "__init__.py"] | ["src", _, "__init__.py"]
+        )
+}
+
+/// Files in the archive that an import loads: the module itself, the `__init__.py` of
+/// each enclosing package, and imported names that are submodules. Absolute imports
+/// resolve only to top-level packages shipped in the archive (at the root or in `src/`),
+/// which `has` tells.
+fn python_module_files(
+    dir: &str,
+    imp: &indicators::PyImport,
+    has: &dyn Fn(&str) -> bool,
+) -> Vec<String> {
+    let mut base: Vec<String> = if imp.level > 0 {
+        let mut parts: Vec<String> = dir
+            .split('/')
+            .filter(|p| !p.is_empty())
+            .map(str::to_string)
+            .collect();
+        for _ in 1..imp.level {
+            if parts.pop().is_none() {
+                return Vec::new();
+            }
+        }
+        parts
+    } else {
+        let Some(top) = imp.module.split('.').next().filter(|t| !t.is_empty()) else {
+            return Vec::new();
+        };
+        let shipped = |root: &str| {
+            has(&format!("{root}{top}/__init__.py")) || has(&format!("{root}{top}.py"))
+        };
+        if shipped("") {
+            Vec::new()
+        } else if shipped("src/") {
+            vec!["src".to_string()]
+        } else {
+            return Vec::new();
+        }
+    };
+    let mut out = Vec::new();
+    for part in imp.module.split('.').filter(|p| !p.is_empty()) {
+        base.push(part.to_string());
+        out.push(format!("{}/__init__.py", base.join("/")));
+    }
+    if !base.is_empty() {
+        out.push(format!("{}.py", base.join("/")));
+    }
+    for name in &imp.names {
+        let mut sub = base.clone();
+        sub.push(name.clone());
+        let sub = sub.join("/");
+        out.push(format!("{sub}.py"));
+        out.push(format!("{sub}/__init__.py"));
+    }
+    out
+}
+
+impl<'a> Scanner<'a> {
     fn run(mut self, filename: &str, sha256: String) -> ScanReport {
         let meta = match self.eco {
             Ecosystem::Npm => self.npm_surface().unwrap_or_default(),
@@ -1096,6 +1167,7 @@ impl<'a> Scanner<'a> {
             })
             .map(|e| e.path.clone())
             .chain(self.c.unread.iter().cloned())
+            .chain(self.installer_unread())
             .collect();
         let mut errors = self.c.errors.clone();
         errors.append(&mut self.errors);

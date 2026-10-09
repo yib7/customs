@@ -124,6 +124,7 @@ pub fn delta(prev: &Contents, cur: &Contents) -> (Contents, DeltaStats) {
                         data: part,
                         full: true,
                         depth: 0,
+                        raw: e.raw.clone(),
                     });
                 }
             }
@@ -156,6 +157,9 @@ pub fn delta(prev: &Contents, cur: &Contents) -> (Contents, DeltaStats) {
         stripped_prefix: cur.stripped_prefix.clone(),
         errors: Vec::new(),
         unread: cur.unread.clone(),
+        // Like `n_links`: a link's target may be an unchanged file the delta leaves out.
+        links: Vec::new(),
+        format: cur.format,
     };
     (out, stats)
 }
@@ -278,6 +282,7 @@ mod tests {
             data: data.to_vec(),
             full: true,
             depth: 0,
+            raw: path.into(),
         }
     }
 
