@@ -1252,10 +1252,18 @@ fn pipenv(args: &[String], cwd: &Path, out: &mut Vec<Install>, depth: usize) {
                 targets: pypi_args(&rest, cwd),
             })
         }
-        "install" | "sync" => out.push(Install {
-            tool: format!("pipenv {sub}"),
-            targets: vec![project(Manager::Pipenv, cwd, None)],
-        }),
+        "install" | "sync" => {
+            let mut target = project(Manager::Pipenv, cwd, None);
+            if rest.iter().any(|a| a == "--dev" || a == "-d") {
+                if let Target::Project { extras, .. } = &mut target {
+                    extras.push("dev".into());
+                }
+            }
+            out.push(Install {
+                tool: format!("pipenv {sub}"),
+                targets: vec![target],
+            })
+        }
         _ => {}
     }
 }
@@ -3683,10 +3691,15 @@ mod tests {
             vec![proj(Manager::Poetry, "/w/svc")]
         );
         assert_eq!(at("poetry sync"), vec![proj(Manager::Poetry, "/w")]);
-        assert_eq!(
-            at("pipenv install --dev"),
-            vec![proj(Manager::Pipenv, "/w")]
-        );
+        // `--dev` adds the Pipfile's `[dev-packages]`.
+        let dev = Target::Project {
+            manager: Manager::Pipenv,
+            dir: PathBuf::from("/w"),
+            extras: vec!["dev".into()],
+            unlocked_only: false,
+        };
+        assert_eq!(at("pipenv install --dev"), vec![dev.clone()]);
+        assert_eq!(at("pipenv sync -d"), vec![dev]);
         assert_eq!(at("pipenv sync"), vec![proj(Manager::Pipenv, "/w")]);
         assert_eq!(
             at("pipenv install --python 3.12 requests==2.31.0"),

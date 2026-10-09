@@ -8,13 +8,16 @@
 //! fetches hundreds of them, and at the warn threshold's false-positive rate nearly every
 //! install would stop for review.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
+use customs_scan::Ecosystem;
 use serde_json::Value;
 
 use super::parse::{deno_spec, parse_npm_spec, parse_pypi_spec, Manager, Target};
 use crate::audit;
+use crate::registry::{PackageMeta, VersionMeta};
+use crate::resolve;
 use crate::util::ecosystem_str;
 
 /// What a project install would fetch.
@@ -50,7 +53,8 @@ impl Manager {
 pub fn expand(manager: Manager, dir: &Path, extras: &[String]) -> Expanded {
     let eco = manager.ecosystem();
     let mut out = Expanded::default();
-    let mut pinned = HashSet::new();
+    // Locked versions by package name.
+    let mut pinned: HashMap<String, Vec<String>> = HashMap::new();
     let mut unchecked = Vec::new();
     let lock = manager
         .lockfiles()
@@ -74,7 +78,10 @@ pub fn expand(manager: Manager, dir: &Path, extras: &[String]) -> Expanded {
                 unchecked = p.skipped.into_iter().filter(|k| k.fetched()).collect();
                 out.locked = p.deps.len();
                 for d in p.deps {
-                    pinned.insert(d.name.clone());
+                    pinned
+                        .entry(package_key(d.ecosystem, &d.name))
+                        .or_default()
+                        .push(d.version.clone());
                     out.targets.push(Target::Package {
                         ecosystem: d.ecosystem,
                         name: d.name,
@@ -92,7 +99,18 @@ pub fn expand(manager: Manager, dir: &Path, extras: &[String]) -> Expanded {
     }
     for t in manifest_targets(manager, dir, extras) {
         match &t {
-            Target::Package { name, .. } if pinned.contains(name) => continue,
+            Target::Package {
+                ecosystem,
+                name,
+                version,
+            } if pinned
+                .get(&package_key(*ecosystem, name))
+                .is_some_and(|locked| {
+                    lock_satisfies(*ecosystem, name, version.as_deref(), locked)
+                }) =>
+            {
+                continue
+            }
             // With a lockfile, git and URL dependencies are pinned there under their own
             // terms; without one they are fetched as written and need a look.
             Target::Unverifiable { .. } if lock.is_some() => continue,
@@ -123,6 +141,58 @@ pub fn expand(manager: Manager, dir: &Path, extras: &[String]) -> Expanded {
     out
 }
 
+/// A package name as the registry compares it: PyPI ignores case and treats runs of `-`,
+/// `_` and `.` alike.
+fn package_key(eco: Ecosystem, name: &str) -> String {
+    match eco {
+        Ecosystem::Npm => name.to_string(),
+        Ecosystem::Pypi => {
+            let mut key = String::new();
+            for c in name.chars() {
+                if matches!(c, '-' | '_' | '.') {
+                    if !key.ends_with('-') {
+                        key.push('-');
+                    }
+                } else {
+                    key.push(c.to_ascii_lowercase());
+                }
+            }
+            key
+        }
+    }
+}
+
+/// A locked version satisfies the manifest's `version` (an exact version or a range), so
+/// the install fetches what the lockfile pins rather than something new. A range Customs
+/// cannot read counts as satisfied, as it did when only names were compared.
+fn lock_satisfies(eco: Ecosystem, name: &str, version: Option<&str>, locked: &[String]) -> bool {
+    let meta = PackageMeta {
+        ecosystem: eco,
+        name: name.to_string(),
+        latest: None,
+        dist_tags: BTreeMap::new(),
+        versions: locked
+            .iter()
+            .map(|v| VersionMeta {
+                version: v.clone(),
+                ..VersionMeta::default()
+            })
+            .collect(),
+        created: None,
+        people: Vec::new(),
+    };
+    // A bare PyPI version is exact (Poetry and Pipfile write them that way).
+    let exact;
+    let version = match version {
+        Some(v) if eco == Ecosystem::Pypi && v.starts_with(|c: char| c.is_ascii_digit()) => {
+            exact = format!("=={v}");
+            Some(exact.as_str())
+        }
+        v => v,
+    };
+    resolve::resolve_version(&meta, version).is_ok()
+}
+
 /// Unchecked lockfile entries listed one by one before the rest are counted.
 const MAX_UNCHECKED_SHOWN: usize = 5;
 
@@ -135,7 +205,7 @@ fn manifest_targets(manager: Manager, dir: &Path, extras: &[String]) -> Vec<Targ
         Manager::Uv | Manager::Poetry | Manager::Pip => {
             pyproject(&dir.join("pyproject.toml"), manager, extras)
         }
-        Manager::Pipenv => pipfile(&dir.join("Pipfile")),
+        Manager::Pipenv => pipfile(&dir.join("Pipfile"), extras),
         Manager::Deno => {
             let mut t = deno_json(dir);
             t.extend(package_json(&dir.join("package.json")));
@@ -231,7 +301,21 @@ fn package_json(path: &Path) -> Vec<Target> {
         return vec![];
     };
     let mut out = Vec::new();
-    for section in ["dependencies", "devDependencies", "optionalDependencies"] {
+    // npm 7 and later install peer dependencies unless `peerDependenciesMeta` marks them
+    // optional.
+    let optional_peer = |name: &str| {
+        doc.get("peerDependenciesMeta")
+            .and_then(|m| m.get(name))
+            .and_then(|m| m.get("optional"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    };
+    for section in [
+        "dependencies",
+        "devDependencies",
+        "optionalDependencies",
+        "peerDependencies",
+    ] {
         let Some(deps) = doc.get(section).and_then(Value::as_object) else {
             continue;
         };
@@ -239,7 +323,7 @@ fn package_json(path: &Path) -> Vec<Target> {
             let Some(range) = range.as_str() else {
                 continue;
             };
-            if local_npm_range(range) {
+            if local_npm_range(range) || (section == "peerDependencies" && optional_peer(name)) {
                 continue;
             }
             out.push(parse_npm_spec(&format!("{name}@{range}")));
@@ -304,27 +388,41 @@ fn pyproject(path: &Path, manager: Manager, extras: &[String]) -> Vec<Target> {
                 .and_then(|o| o.get(extra.as_str())),
         ));
     }
+    let mut indexes = Vec::new();
     if manager == Manager::Uv {
         // `uv sync` installs the dev group by default.
         reqs.extend(strings(
             doc.get("dependency-groups").and_then(|g| g.get("dev")),
         ));
+        let uv_indexes = doc
+            .get("tool")
+            .and_then(|t| t.get("uv"))
+            .and_then(|u| u.get("index"))
+            .and_then(toml::Value::as_array);
+        for index in uv_indexes.into_iter().flatten() {
+            indexes.extend(
+                index
+                    .get("url")
+                    .and_then(toml::Value::as_str)
+                    .map(str::to_string),
+            );
+        }
     }
     if manager == Manager::Poetry {
         let poetry = doc.get("tool").and_then(|t| t.get("poetry"));
-        let tables = [
-            poetry.and_then(|p| p.get("dependencies")),
-            poetry
-                .and_then(|p| p.get("group"))
-                .and_then(|g| g.get("dev"))
-                .and_then(|d| d.get("dependencies")),
-            poetry.and_then(|p| p.get("dev-dependencies")),
-        ];
-        for t in tables
+        // Poetry installs every dependency group not marked `optional = true`.
+        let groups = poetry
+            .and_then(|p| p.get("group"))
+            .and_then(toml::Value::as_table)
             .into_iter()
             .flatten()
-            .filter_map(toml::Value::as_table)
-        {
+            .filter(|(_, g)| g.get("optional").and_then(toml::Value::as_bool) != Some(true))
+            .map(|(_, g)| g.get("dependencies"));
+        let tables = [poetry.and_then(|p| p.get("dependencies"))]
+            .into_iter()
+            .chain(groups)
+            .chain([poetry.and_then(|p| p.get("dev-dependencies"))]);
+        for t in tables.flatten().filter_map(toml::Value::as_table) {
             for (name, v) in t {
                 if name != "python" {
                     reqs.extend(toml_requirement(name, v));
@@ -332,26 +430,66 @@ fn pyproject(path: &Path, manager: Manager, extras: &[String]) -> Vec<Target> {
             }
         }
     }
-    reqs.iter().map(|r| parse_pypi_spec(r)).collect()
+    let mut out: Vec<Target> = reqs.iter().map(|r| parse_pypi_spec(r)).collect();
+    out.extend(custom_indexes(
+        indexes,
+        "pyproject.toml names it in `tool.uv.index`",
+    ));
+    out
 }
 
-fn pipfile(path: &Path) -> Vec<Target> {
+/// `extras` holds `dev` for `pipenv install --dev`, which adds `[dev-packages]`.
+fn pipfile(path: &Path, extras: &[String]) -> Vec<Target> {
     let Some(doc) = read_toml(path) else {
         return vec![];
     };
-    let Some(pkgs) = doc.get("packages").and_then(toml::Value::as_table) else {
-        return vec![];
-    };
-    pkgs.iter()
+    let mut sections = vec!["packages"];
+    if extras.iter().any(|e| e == "dev") {
+        sections.push("dev-packages");
+    }
+    let mut out: Vec<Target> = sections
+        .into_iter()
+        .filter_map(|s| doc.get(s).and_then(toml::Value::as_table))
+        .flatten()
         .filter_map(|(name, v)| toml_requirement(name, v))
         .map(|r| parse_pypi_spec(&r))
+        .collect();
+    let sources = doc
+        .get("source")
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|s| s.get("url").and_then(toml::Value::as_str))
+        .map(str::to_string)
+        .collect();
+    out.extend(custom_indexes(
+        sources,
+        "the Pipfile names it as a `[[source]]`",
+    ));
+    out
+}
+
+/// Package indexes other than PyPI, which serve packages Customs does not check. With a
+/// lockfile they are dropped again: the lockfile's own entries say where each comes from.
+fn custom_indexes(urls: Vec<String>, why: &str) -> Vec<Target> {
+    urls.into_iter()
+        .filter(|u| {
+            let host = url::Url::parse(u)
+                .ok()
+                .and_then(|u| u.host_str().map(str::to_ascii_lowercase));
+            !matches!(host.as_deref(), Some("pypi.org" | "pypi.python.org"))
+        })
+        .map(|u| Target::Unverifiable {
+            ecosystem: Ecosystem::Pypi,
+            spec: u,
+            reason: format!("a package index other than PyPI, which Customs cannot check ({why})"),
+        })
         .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use customs_scan::Ecosystem;
 
     fn write(dir: &Path, name: &str, text: &str) {
         std::fs::write(dir.join(name), text).unwrap();
@@ -493,6 +631,138 @@ httpx = {version = ">=0.27", extras = ["http2"]}
         let e = expand(Manager::Pipenv, Path::new("/nonexistent"), &[]);
         assert!(e.targets.is_empty() && e.lockfile.is_none());
         assert_eq!(Manager::Pipenv.ecosystem(), Ecosystem::Pypi);
+    }
+
+    #[test]
+    fn manifest_version_outside_the_lock_is_checked() {
+        let d = tempfile::tempdir().unwrap();
+        write(
+            d.path(),
+            "package-lock.json",
+            r#"{"lockfileVersion": 3, "packages": {
+  "": {"name": "app"},
+  "node_modules/left-pad": {"version": "1.3.0", "resolved": "https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz"}
+}}"#,
+        );
+        // The manifest was bumped past the lock: npm fetches 9.9.9.
+        write(
+            d.path(),
+            "package.json",
+            r#"{"dependencies": {"left-pad": "9.9.9"}}"#,
+        );
+        let e = expand(Manager::Npm, d.path(), &[]);
+        assert_eq!(names(&e), vec!["left-pad 1.3.0", "left-pad 9.9.9"]);
+        assert_eq!(e.locked, 1);
+        // A range the locked version satisfies installs the locked version.
+        write(
+            d.path(),
+            "package.json",
+            r#"{"dependencies": {"left-pad": "^1.3.0"}}"#,
+        );
+        assert_eq!(
+            names(&expand(Manager::Npm, d.path(), &[])),
+            vec!["left-pad 1.3.0"]
+        );
+
+        let d = tempfile::tempdir().unwrap();
+        write(
+            d.path(),
+            "uv.lock",
+            "version = 1\n\n[[package]]\nname = \"requests\"\nversion = \"2.32.3\"\nsource = { registry = \"https://pypi.org/simple\" }\n",
+        );
+        write(
+            d.path(),
+            "pyproject.toml",
+            "[project]\nname = \"app\"\ndependencies = [\"Requests>=3\"]\n",
+        );
+        assert_eq!(
+            names(&expand(Manager::Uv, d.path(), &[])),
+            vec!["requests 2.32.3", "requests >=3"]
+        );
+        write(
+            d.path(),
+            "pyproject.toml",
+            "[project]\nname = \"app\"\ndependencies = [\"Requests>=2,<3\"]\n",
+        );
+        assert_eq!(
+            names(&expand(Manager::Uv, d.path(), &[])),
+            vec!["requests 2.32.3"]
+        );
+
+        let d = tempfile::tempdir().unwrap();
+        write(
+            d.path(),
+            "poetry.lock",
+            "[[package]]\nname = \"attrs\"\nversion = \"23.2.0\"\ndescription = \"\"\noptional = false\npython-versions = \">=3.7\"\nfiles = []\n",
+        );
+        write(
+            d.path(),
+            "pyproject.toml",
+            "[tool.poetry.dependencies]\npython = \"^3.10\"\nattrs = \"24.1.0\"\n",
+        );
+        assert_eq!(
+            names(&expand(Manager::Poetry, d.path(), &[])),
+            vec!["attrs 23.2.0", "attrs 24.1.0"]
+        );
+    }
+
+    #[test]
+    fn project_installs_more_than_the_main_dependencies() {
+        let d = tempfile::tempdir().unwrap();
+        // npm 7 and later install peer dependencies.
+        write(
+            d.path(),
+            "package.json",
+            r#"{"dependencies": {"a": "1.0.0"}, "peerDependencies": {"react": "^18"}}"#,
+        );
+        assert_eq!(
+            names(&expand(Manager::Npm, d.path(), &[])),
+            vec!["a 1.0.0", "react ^18"]
+        );
+        // Poetry installs every group that is not optional.
+        write(
+            d.path(),
+            "pyproject.toml",
+            r#"
+[tool.poetry.dependencies]
+attrs = "23.2.0"
+[tool.poetry.group.docs.dependencies]
+sphinx = "*"
+[tool.poetry.group.extra]
+optional = true
+[tool.poetry.group.extra.dependencies]
+heavy = "*"
+"#,
+        );
+        assert_eq!(
+            names(&expand(Manager::Poetry, d.path(), &[])),
+            vec!["attrs 23.2.0", "sphinx -"]
+        );
+        // `pipenv install --dev` adds the dev packages; an index other than PyPI with no
+        // lockfile is fetched from as written.
+        write(
+            d.path(),
+            "Pipfile",
+            "[[source]]\nurl = \"https://pypi.org/simple\"\nname = \"pypi\"\n\n[[source]]\nurl = \"https://evil.example/simple\"\nname = \"corp\"\n\n[packages]\nrequests = \"*\"\n\n[dev-packages]\npytest = \"*\"\n",
+        );
+        assert_eq!(
+            names(&expand(Manager::Pipenv, d.path(), &[])),
+            vec!["requests -", "? https://evil.example/simple"]
+        );
+        assert_eq!(
+            names(&expand(Manager::Pipenv, d.path(), &["dev".into()])),
+            vec!["requests -", "pytest -", "? https://evil.example/simple"]
+        );
+        // So is a uv index.
+        write(
+            d.path(),
+            "pyproject.toml",
+            "[project]\nname = \"app\"\ndependencies = []\n[[tool.uv.index]]\nname = \"corp\"\nurl = \"https://evil.example/simple\"\n",
+        );
+        assert_eq!(
+            names(&expand(Manager::Uv, d.path(), &[])),
+            vec!["? https://evil.example/simple"]
+        );
     }
 
     #[test]

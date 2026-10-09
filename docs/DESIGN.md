@@ -1170,11 +1170,18 @@ first five by name with their lockfile line, then a count): a lockfile edit can 
 entry at any host under a trusted name, and a test with Deno 2.9 installed such an entry
 without going through the proxy. The project's own local folders do not count. Direct dependencies in the manifest that the
 lockfile does not pin yet are checked too, as the ranges they name: `package.json`
-`dependencies`, `devDependencies` and `optionalDependencies` (skipping `workspace:`,
-`file:`, `link:` and `portal:`), `pyproject.toml` `[project].dependencies` (plus
-`[dependency-groups].dev` for uv and the Poetry dependency tables for Poetry), and
-Pipfile `[packages]`. This is the case where an agent adds a dependency to `package.json`
-and then runs `npm install`. `pip install .`, `pip install -e .` and `uv pip install -e
+`dependencies`, `devDependencies`, `optionalDependencies` and `peerDependencies` (npm 7
+installs peers; skipping peers `peerDependenciesMeta` marks optional and `workspace:`,
+`file:`, `link:` and `portal:` ranges), `pyproject.toml` `[project].dependencies` (plus
+`[dependency-groups].dev` for uv, and for Poetry its main table, `dev-dependencies` and every
+group not marked `optional = true`), and Pipfile `[packages]` (plus `[dev-packages]` for
+`pipenv install|sync --dev`). This is the case where an agent adds a dependency to
+`package.json` and then runs `npm install`. "Pinned" means a locked version of that name
+satisfies the manifest's range (`resolve::resolve_version` over the locked versions), so a
+manifest bumped past the lock (`"left-pad": "9.9.9"` with `1.3.0` locked) is checked at the
+version the install will fetch; a range Customs cannot parse counts as satisfied. PyPI names
+are compared normalized. Without a lockfile, a Pipfile `[[source]]` or `tool.uv.index` URL
+other than PyPI produces `ask`: the packages it serves are not checked. `pip install .`, `pip install -e .` and `uv pip install -e
 '.[dev]'` (also `-e` lines in requirements files) are treated the same way when the
 directory has a `pyproject.toml`: there is no lockfile, so the hook checks
 `[project].dependencies` plus the optional-dependency groups named as extras. The local
