@@ -19,15 +19,15 @@ import pandas as pd
 from . import config
 from .malicious import canonicalize_benign
 
-REPO_BIN = config.REPO_ROOT / "target" / "release" / "customs-scan"
-
 
 def scanner_bin() -> str:
+    """``$CUSTOMS_SCAN_BIN``, else this checkout's release build, else ``customs-scan`` on PATH."""
     env = os.environ.get("CUSTOMS_SCAN_BIN")
     if env:
         return env
-    if REPO_BIN.exists():
-        return str(REPO_BIN)
+    repo_bin = config.repo_binary("customs-scan")
+    if repo_bin.exists():
+        return str(repo_bin)
     found = shutil.which("customs-scan")
     if not found:
         raise FileNotFoundError(

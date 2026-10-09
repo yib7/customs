@@ -158,7 +158,9 @@ Code's settings, pointing pip or npm back at the public registry) come back to y
 confirmation. A server set up for a team takes policy changes only with its admin token
 (`CUSTOMS_ADMIN_TOKEN`). See [`deploy/hooks/README.md`](deploy/hooks/README.md).
 
-`scripts/demo.sh` runs the whole tour against the live registries.
+`scripts/demo.sh` runs the whole tour against the live registries. It and the
+`scripts/replay.py` and `scripts/loadtest.py` harnesses run `$CUSTOMS_BIN` when it is set,
+else `target/release/customs` (under `$CARGO_TARGET_DIR` when that is set).
 
 ### Beyond the proxy
 

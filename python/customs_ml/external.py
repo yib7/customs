@@ -103,30 +103,36 @@ def fetch(listing: Path, workers: int = 16) -> Path:
 def score_with_binary(
     paths: list[str], names: list[str], jobs: int = 4, models: Path | None = None
 ) -> list[dict]:
-    """Verdicts from the shipped binary (`customs scan --json`), so this tests what ships."""
-    binary = str(ROOT / "target/release/customs")
+    """Verdicts from the shipped binary (`customs scan --json`), so this tests what ships.
+
+    The binary is ``$CUSTOMS_BIN``, else this checkout's release build (``config.customs_bin``).
+    """
+    binary = config.customs_bin()
     models = models or ROOT / "models"
 
     def one(args):
         path, name = args
-        p = subprocess.run(
-            [
-                binary,
-                "scan",
-                path,
-                "--ecosystem",
-                "pypi",
-                "--name",
-                name,
-                "--json",
-                "--models",
-                str(models),
-            ],
-            capture_output=True,
-            text=True,
-            timeout=300,
-            encoding="utf-8",
-        )
+        try:
+            p = subprocess.run(
+                [
+                    binary,
+                    "scan",
+                    path,
+                    "--ecosystem",
+                    "pypi",
+                    "--name",
+                    name,
+                    "--json",
+                    "--models",
+                    str(models),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=300,
+                encoding="utf-8",
+            )
+        except subprocess.TimeoutExpired:
+            return {"error": "timeout"}
         try:
             v = json.loads(p.stdout)
         except ValueError:

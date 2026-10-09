@@ -96,3 +96,14 @@ def test_training_row_next_to_a_scored_external_row_is_dropped():
     out = external.place_rows(corpus, rows)
     assert set(out.name) == {"scored", "dev-other"}
     assert out.cluster.min() > 7
+
+
+def test_score_with_binary_timeout_is_recorded(monkeypatch):
+    import subprocess
+
+    def slow(cmd, **kw):
+        raise subprocess.TimeoutExpired(cmd, kw.get("timeout"))
+
+    monkeypatch.setattr(subprocess, "run", slow)
+    monkeypatch.setenv("CUSTOMS_BIN", "/opt/customs")
+    assert external.score_with_binary(["a.tar.gz"], ["a"]) == [{"error": "timeout"}]

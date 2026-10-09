@@ -15,7 +15,8 @@ at it, and measures:
 
     CUSTOMS_DATA=/path/to/data python scripts/loadtest.py --n 150 --concurrency 1 4 16
 
-Writes `$CUSTOMS_DATA/work/loadtest.json`.
+Writes `$CUSTOMS_DATA/work/loadtest.json`. The firewall binary is `$CUSTOMS_BIN`, else
+`target/release/customs` (under `$CARGO_TARGET_DIR` when set).
 """
 
 from __future__ import annotations
@@ -151,10 +152,11 @@ def main() -> None:
         encoding="utf-8",
     )
     proxy = f"http://127.0.0.1:{args.port}"
+    replay.require_free_port(args.port)
     with open(work / "server.log", "w", encoding="utf-8") as log:
         server = subprocess.Popen(
             [
-                str(ROOT / "target/release/customs"),
+                replay.customs_bin(),
                 "serve",
                 "--bind",
                 f"127.0.0.1:{args.port}",
@@ -172,12 +174,7 @@ def main() -> None:
         )
         res: dict = {"archives": len(rows), "cpus": os.cpu_count()}
         try:
-            for _ in range(100):
-                try:
-                    urllib.request.urlopen(f"{proxy}/healthz", timeout=1)
-                    break
-                except OSError:
-                    time.sleep(0.1)
+            replay.wait_healthy(proxy, server, work / "server.log")
             res["archive_kb"] = {
                 "p50": float(rows.bytes.quantile(0.5) / 1024),
                 "p95": float(rows.bytes.quantile(0.95) / 1024),
