@@ -526,8 +526,48 @@ fn environment(inputs: &Inputs, out: &mut Vec<Finding>) {
     }
 }
 
-fn read(path: &Path) -> Option<String> {
-    std::fs::read_to_string(path).ok()
+/// The text of a file doctor inspects. A missing file is skipped quietly; one it cannot
+/// read or decode is a warning, so a bypass in it is not silently missed. UTF-16 with a
+/// byte order mark (what Windows PowerShell 5.1 `>` writes) is decoded.
+fn read(path: &Path, out: &mut Vec<Finding>) -> Option<String> {
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => return unreadable(path, &e.to_string(), out),
+    };
+    let utf16 = |be: bool| {
+        let units: Vec<u16> = bytes[2..]
+            .chunks_exact(2)
+            .map(|c| {
+                if be {
+                    u16::from_be_bytes([c[0], c[1]])
+                } else {
+                    u16::from_le_bytes([c[0], c[1]])
+                }
+            })
+            .collect();
+        String::from_utf16(&units).ok()
+    };
+    let text = match bytes.as_slice() {
+        [0xff, 0xfe, ..] => utf16(false),
+        [0xfe, 0xff, ..] => utf16(true),
+        [0xef, 0xbb, 0xbf, rest @ ..] => String::from_utf8(rest.to_vec()).ok(),
+        _ => String::from_utf8(bytes.clone()).ok(),
+    };
+    match text {
+        Some(t) => Some(t),
+        None => unreadable(path, "it is not UTF-8 or UTF-16 text", out),
+    }
+}
+
+fn unreadable(path: &Path, why: &str, out: &mut Vec<Finding>) -> Option<String> {
+    out.push(finding(
+        Level::Warn,
+        &display(path),
+        format!("could not read it ({why}), so it was not inspected for registry settings"),
+        "save it as UTF-8 and make it readable, then run customs doctor again",
+    ));
+    None
 }
 
 fn display(path: &Path) -> String {
@@ -537,7 +577,7 @@ fn display(path: &Path) -> String {
 const SCOPE_FIX: &str = "Customs does not check these packages; if that registry also serves public packages, route it through the proxy instead";
 
 fn npmrc(path: &Path, proxy: &str, out: &mut Vec<Finding>) {
-    let Some(text) = read(path) else {
+    let Some(text) = read(path, out) else {
         return;
     };
     for line in text.lines() {
@@ -562,7 +602,7 @@ fn npmrc(path: &Path, proxy: &str, out: &mut Vec<Finding>) {
 }
 
 fn bunfig(path: &Path, proxy: &str, out: &mut Vec<Finding>) {
-    let Some(doc) = read(path).and_then(|t| toml::from_str::<toml::Value>(&t).ok()) else {
+    let Some(doc) = read(path, out).and_then(|t| toml::from_str::<toml::Value>(&t).ok()) else {
         return;
     };
     let Some(scopes) = doc
@@ -594,7 +634,7 @@ fn bunfig(path: &Path, proxy: &str, out: &mut Vec<Finding>) {
 }
 
 fn yarnrc(path: &Path, proxy: &str, out: &mut Vec<Finding>) {
-    let Some(text) = read(path) else {
+    let Some(text) = read(path, out) else {
         return;
     };
     // `npmScopes:` then `  name:` then `    npmRegistryServer: "url"`.
@@ -656,24 +696,47 @@ fn pip_config_files(inputs: &Inputs) -> Vec<PathBuf> {
 }
 
 fn pip_config(path: &Path, out: &mut Vec<Finding>) {
-    let Some(text) = read(path) else {
+    let Some(text) = read(path, out) else {
         return;
     };
-    for line in text.lines() {
-        let Some((key, value)) = line.split_once('=') else {
-            continue;
-        };
-        let key = key.trim().replace('_', "-");
-        if matches!(key.as_str(), "extra-index-url" | "find-links") && !value.trim().is_empty() {
+    // configparser rules: `#`/`;` comment lines, `=` or `:` between key and value, and
+    // indented lines continue the previous value (pip splits values on whitespace).
+    let mut key: Option<String> = None;
+    let push = |key: &str, value: &str, out: &mut Vec<Finding>| {
+        for url in value.split_whitespace() {
             out.push(finding(
                 Level::Bypass,
                 &display(path),
-                format!(
-                    "{key} = {}: pip also installs from there without the proxy",
-                    value.trim()
-                ),
+                format!("{key} = {url}: pip also installs from there without the proxy"),
                 "remove it; an extra index also lets a public package shadow a private one",
             ));
+        }
+    };
+    for line in text.lines() {
+        let t = line.trim();
+        if t.is_empty() || t.starts_with('#') || t.starts_with(';') {
+            continue;
+        }
+        if line.starts_with([' ', '\t']) {
+            if let Some(k) = &key {
+                push(k, t, out);
+            }
+            continue;
+        }
+        if t.starts_with('[') {
+            key = None;
+            continue;
+        }
+        let Some(at) = t.find(['=', ':']) else {
+            key = None;
+            continue;
+        };
+        let k = t[..at].trim().replace('_', "-");
+        if matches!(k.as_str(), "extra-index-url" | "find-links") {
+            push(&k, &t[at + 1..], out);
+            key = Some(k);
+        } else {
+            key = None;
         }
     }
 }
@@ -688,7 +751,7 @@ fn python_project(dir: &Path, out: &mut Vec<Finding>) {
             .collect();
         names.sort();
         for n in names {
-            let Some(text) = read(&dir.join(&n)) else {
+            let Some(text) = read(&dir.join(&n), out) else {
                 continue;
             };
             for (i, line) in text.lines().enumerate() {
@@ -721,8 +784,9 @@ fn python_project(dir: &Path, out: &mut Vec<Finding>) {
         }
     }
     let pyproject =
-        read(&dir.join("pyproject.toml")).and_then(|t| toml::from_str::<toml::Value>(&t).ok());
-    let uv_toml = read(&dir.join("uv.toml")).and_then(|t| toml::from_str::<toml::Value>(&t).ok());
+        read(&dir.join("pyproject.toml"), out).and_then(|t| toml::from_str::<toml::Value>(&t).ok());
+    let uv_toml =
+        read(&dir.join("uv.toml"), out).and_then(|t| toml::from_str::<toml::Value>(&t).ok());
     let uv_tables = [
         pyproject
             .as_ref()
@@ -778,7 +842,7 @@ fn python_project(dir: &Path, out: &mut Vec<Finding>) {
         ));
     }
     if let Some(doc) =
-        read(&dir.join("Pipfile")).and_then(|t| toml::from_str::<toml::Value>(&t).ok())
+        read(&dir.join("Pipfile"), out).and_then(|t| toml::from_str::<toml::Value>(&t).ok())
     {
         for s in doc
             .get("source")
@@ -902,7 +966,7 @@ fn lockfiles(dir: &Path, proxy: &str, out: &mut Vec<Finding>) {
         "deno.lock",
         "uv.lock",
     ] {
-        let Some(text) = read(&dir.join(name)) else {
+        let Some(text) = read(&dir.join(name), out) else {
             continue;
         };
         let Some(hosts) = direct_urls(name, &text, proxy) else {
@@ -1468,30 +1532,17 @@ command = "customs hook codex"
         write(
             home.path(),
             ".config/pip/pip.conf",
-            &format!(
-                "[global]
-extra-index-url = {url}
-"
-            ),
+            &format!("[global]\nextra-index-url = {url}\n"),
         );
         write(
             d.path(),
             "requirements.txt",
-            &format!(
-                "--index-url {url}
-x==1
-"
-            ),
+            &format!("--index-url {url}\nx==1\n"),
         );
         write(
             d.path(),
             "uv.toml",
-            &format!(
-                "[[index]]
-name = \"corp\"
-url = \"{url}\"
-"
-            ),
+            &format!("[[index]]\nname = \"corp\"\nurl = \"{url}\"\n"),
         );
         let mut env = full_env();
         env.insert("PIP_INDEX_URL", url.to_string());
@@ -1514,16 +1565,12 @@ url = \"{url}\"
         write(
             sys.path(),
             "pip.conf",
-            "[global]
-extra-index-url = https://sys.example/simple
-",
+            "[global]\nextra-index-url = https://sys.example/simple\n",
         );
         write(
             appdata.path(),
             "pip/pip.ini",
-            "[global]
-find-links = https://win.example/links
-",
+            "[global]\nfind-links = https://win.example/links\n",
         );
         let lookup = |k: &str| (k == "APPDATA").then(|| appdata.path().display().to_string());
         let configs = [sys.path().join("pip.conf")];
@@ -1540,5 +1587,54 @@ find-links = https://win.example/links
         // Without system configs nothing outside the inputs is read (no /etc/pip.conf).
         let f = run_with(d.path(), None, HashMap::new());
         assert!(f.iter().all(|f| !f.subject.contains("pip.conf")), "{f:?}");
+    }
+
+    #[test]
+    fn pip_config_continuation_lines_are_bypasses() {
+        let d = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        write(
+            home.path(),
+            ".config/pip/pip.conf",
+            "[global]\nindex-url = https://pypi.org/simple\nextra-index-url =\n    \
+             https://a.example/simple\n\thttps://b.example/simple\n\
+             # find-links = https://commented.example\n; also a comment\n\
+             find-links: https://c.example/links\ntimeout = 60\n    https://not-a-key.example\n",
+        );
+        let b = bypasses(&run_with(d.path(), Some(home.path()), full_env()));
+        let details: Vec<&str> = b.iter().map(|(_, d)| d.as_str()).collect();
+        assert_eq!(details.len(), 3, "{details:#?}");
+        assert!(details[0].starts_with("extra-index-url = https://a.example/simple"));
+        assert!(details[1].starts_with("extra-index-url = https://b.example/simple"));
+        assert!(details[2].starts_with("find-links = https://c.example/links"));
+    }
+
+    #[test]
+    fn unreadable_project_file_is_a_warning() {
+        let d = tempfile::tempdir().unwrap();
+        // PowerShell 5.1 `>` writes UTF-16LE with a byte order mark.
+        let mut utf16 = vec![0xff, 0xfe];
+        for u in "--extra-index-url https://x.example/simple\r\ntorch\r\n".encode_utf16() {
+            utf16.extend(u.to_le_bytes());
+        }
+        std::fs::write(d.path().join("requirements.txt"), utf16).unwrap();
+        // Latin-1, not UTF-8.
+        std::fs::write(
+            d.path().join(".npmrc"),
+            b"# caf\xe9\n@corp:registry=https://npm.corp.example/\n",
+        )
+        .unwrap();
+        let f = run_with(d.path(), None, full_env());
+        let b = bypasses(&f);
+        assert!(
+            b.iter()
+                .any(|(s, d)| s == "requirements.txt:1" && d.contains("x.example")),
+            "{f:#?}"
+        );
+        let warn = f
+            .iter()
+            .find(|f| f.level == Level::Warn && f.subject.ends_with(".npmrc"))
+            .unwrap_or_else(|| panic!("{f:#?}"));
+        assert!(warn.detail.contains("not inspected"), "{warn:?}");
     }
 }
