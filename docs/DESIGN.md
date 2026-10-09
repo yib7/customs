@@ -739,10 +739,11 @@ Registry proxy:
 API (JSON). CORS allows only `http://localhost:5173` (the Vite dev server).
 - `POST /api/check` `{ "ecosystem": "pypi", "name": "foo", "version": null, "client": "cli" }`:
   `version` is null (latest), an exact version, a range (`>=1,<2`, `~=1.4`, `^1.2`, npm
-  ranges), or an npm dist-tag; it resolves to the newest matching non-yanked version. The
-  server applies policy, fetches (PyPI prefers the sdist, then a pure wheel, then the
-  smallest wheel), scans, and returns a verdict. When the release has both an sdist and a
-  pure-Python (`-none-any`) wheel, both are read, since pip installs the wheel: both
+  ranges), or an npm dist-tag; it resolves to the newest matching non-yanked version. A
+  PyPI version matches by PEP 440 equality (`1.0.0` is `1.0`), and an unpublished exact
+  version is a 422, never the latest. The server applies policy, fetches (PyPI prefers
+  the sdist, then a pure wheel, then the smallest wheel), scans, and returns a verdict.
+  When the release has both an sdist and a pure-Python (`-none-any`) wheel, both are read, since pip installs the wheel: both
   verdicts are recorded, each with an `also_checked` hit naming the other file, and the
   stricter is returned. A payload only in a platform-specific wheel is caught by the proxy,
   which scans exactly what the installer downloads, not by a hook-only check. Each

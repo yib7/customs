@@ -35,16 +35,32 @@ pub fn resolve_version(meta: &PackageMeta, spec: Option<&str>) -> Result<String,
     }
     match meta.ecosystem {
         Ecosystem::Npm => resolve_npm(meta, spec),
-        Ecosystem::Pypi => resolve_pypi(meta, spec),
+        // A bare PEP 440 version is a pin: an unlisted one is an error, not the latest.
+        Ecosystem::Pypi => match Pep440::parse(strip_exact(Ecosystem::Pypi, spec)) {
+            Some(_) => resolve_pypi(meta, &format!("=={}", strip_exact(Ecosystem::Pypi, spec))),
+            None => resolve_pypi(meta, spec),
+        },
     }
     .unwrap_or_else(|| latest().map_err(|e| e.to_string()))
 }
 
 /// The version `spec` names exactly (`1.2.3`, `==1.2.3`, `=1.2.3`, npm `v1.2.3`), when
-/// `meta` has it.
+/// `meta` has it. PyPI versions match by PEP 440 equality, so `1.0.0` finds `1.0`.
 pub fn exact_version(meta: &PackageMeta, spec: Option<&str>) -> Option<String> {
     let exact = strip_exact(meta.ecosystem, spec?);
-    meta.version(exact).map(|_| exact.to_string())
+    if meta.version(exact).is_some() {
+        return Some(exact.to_string());
+    }
+    if meta.ecosystem != Ecosystem::Pypi {
+        return None;
+    }
+    let want = Pep440::parse(exact)?;
+    let equal = |v: &&crate::registry::VersionMeta| {
+        Pep440::parse(&v.version).is_some_and(|p| p.cmp(&want).is_eq())
+    };
+    let mut equals = meta.versions.iter().filter(equal);
+    let first = equals.clone().find(|v| !v.yanked).or_else(|| equals.next());
+    first.map(|v| v.version.clone())
 }
 
 /// `spec` without the `==`, `=` or npm `v` that may mark an exact version.
@@ -188,6 +204,26 @@ impl Clause {
     }
 }
 
+/// `release` with its last component bumped, carrying past components already at
+/// `u64::MAX` (`1.MAX` becomes `2`); `None` when every component is at the maximum.
+fn bump_last(mut release: Vec<u64>) -> Option<Vec<u64>> {
+    while let Some(last) = release.pop() {
+        if let Some(n) = last.checked_add(1) {
+            release.push(n);
+            return Some(release);
+        }
+    }
+    None
+}
+
+fn upper_bound(release: Vec<u64>) -> Clause {
+    Clause {
+        op: "<".into(),
+        version: Pep440::from_release(release),
+        wildcard: false,
+    }
+}
+
 /// Parse `>=1.0,<2`, `~=1.4.2`, `==1.2.*`, and Poetry-style `^1.2` / `~1.2`.
 fn parse_pep440_specifier(spec: &str) -> Option<Vec<Clause>> {
     let spec = spec.trim().trim_start_matches('(').trim_end_matches(')');
@@ -202,38 +238,24 @@ fn parse_pep440_specifier(spec: &str) -> Option<Vec<Clause>> {
             let mut hi = lo.release.clone();
             let idx = hi.iter().position(|x| *x != 0).unwrap_or(hi.len() - 1);
             hi.truncate(idx + 1);
-            hi[idx] += 1;
             out.push(Clause {
                 op: ">=".into(),
                 version: lo,
                 wildcard: false,
             });
-            out.push(Clause {
-                op: "<".into(),
-                version: Pep440::from_release(hi),
-                wildcard: false,
-            });
+            out.extend(bump_last(hi).map(upper_bound));
             continue;
         }
         if let Some(v) = c.strip_prefix('~').filter(|v| !v.starts_with('=')) {
             let lo = Pep440::parse(v)?;
             let mut hi = lo.release.clone();
-            if hi.len() >= 2 {
-                hi.truncate(2);
-                hi[1] += 1;
-            } else {
-                hi[0] += 1;
-            }
+            hi.truncate(2);
             out.push(Clause {
                 op: ">=".into(),
                 version: lo,
                 wildcard: false,
             });
-            out.push(Clause {
-                op: "<".into(),
-                version: Pep440::from_release(hi),
-                wildcard: false,
-            });
+            out.extend(bump_last(hi).map(upper_bound));
             continue;
         }
         let op_len = ["===", "==", "!=", "~=", ">=", "<=", ">", "<"]
@@ -494,6 +516,31 @@ mod tests {
         assert!(resolve_version(&m, Some(">=5")).is_err());
         // Unparseable falls back to latest.
         assert_eq!(r("@@@"), "2.0");
+    }
+
+    #[test]
+    fn pypi_exact_matches_by_pep440_equality() {
+        let m = meta(Ecosystem::Pypi, &["1.0", "2.0"], "2.0");
+        assert_eq!(exact_version(&m, Some("1.0.0")).as_deref(), Some("1.0"));
+        assert_eq!(exact_version(&m, Some("==1.0.0")).as_deref(), Some("1.0"));
+        assert_eq!(exact_version(&m, Some("V1.0")).as_deref(), Some("1.0"));
+        assert_eq!(resolve_version(&m, Some("1.0.0")).unwrap(), "1.0");
+        // A bare version nobody published is an error, not the latest release.
+        assert!(resolve_version(&m, Some("3.0")).is_err());
+        assert!(resolve_version(&m, Some("1.0.1")).is_err());
+        assert_eq!(exact_version(&m, Some("1.0.1")), None);
+    }
+
+    #[test]
+    fn huge_version_components_do_not_overflow() {
+        let m = meta(Ecosystem::Pypi, &["1.0", "18446744073709551615.0"], "1.0");
+        let r = |s: &str| resolve_version(&m, Some(s)).unwrap();
+        assert_eq!(r("^18446744073709551615"), "18446744073709551615.0");
+        assert_eq!(r("~18446744073709551615"), "18446744073709551615.0");
+        // `~1.MAX` carries into `<2`: nothing between 1.MAX and 2 is published.
+        assert!(resolve_version(&m, Some("~1.18446744073709551615")).is_err());
+        let carried = parse_pep440_specifier("^0.0.18446744073709551615").unwrap();
+        assert_eq!(carried[1].version, Pep440::from_release(vec![0, 1]));
     }
 
     #[test]
