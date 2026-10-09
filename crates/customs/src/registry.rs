@@ -27,6 +27,10 @@ const META_TTL: Duration = Duration::from_secs(300);
 /// long before another miss refetches it, so requests for a version that does not exist
 /// cannot turn every lookup into an upstream request.
 const META_REFRESH_GAP: Duration = Duration::from_secs(5);
+/// Past this many cached documents, an insert first drops the expired ones.
+const META_SOFT_CAP: usize = 512;
+/// The cache never holds more documents than this; the oldest go first.
+const META_HARD_CAP: usize = 4096;
 
 #[derive(Debug, thiserror::Error)]
 pub enum FetchError {
@@ -154,6 +158,23 @@ struct MetaEntry {
     meta: Arc<PackageMeta>,
     /// Fetched because the copy before it did not list a version a caller needed.
     refreshed: bool,
+}
+
+/// Cache `entry` under `key`, keeping the map bounded: past [`META_SOFT_CAP`] entries the
+/// expired ones are dropped, and past [`META_HARD_CAP`] the oldest quarter goes too.
+fn insert_meta(map: &mut HashMap<String, MetaEntry>, key: String, entry: MetaEntry, now: Instant) {
+    if map.len() >= META_SOFT_CAP {
+        map.retain(|_, e| now.saturating_duration_since(e.fetched) < META_TTL);
+    }
+    map.insert(key, entry);
+    if map.len() > META_HARD_CAP {
+        let mut ages: Vec<(Instant, String)> =
+            map.iter().map(|(k, e)| (e.fetched, k.clone())).collect();
+        ages.sort();
+        for (_, k) in ages.into_iter().take(map.len() - META_HARD_CAP * 3 / 4) {
+            map.remove(&k);
+        }
+    }
 }
 
 fn parse_time(v: &Value) -> Option<DateTime<Utc>> {
@@ -333,13 +354,16 @@ impl Registry {
         }
         .ok_or_else(|| FetchError::Other(format!("unexpected metadata format for {key}")))?;
         let m = Arc::new(parsed);
-        self.meta.lock().unwrap_or_else(|e| e.into_inner()).insert(
+        let now = Instant::now();
+        insert_meta(
+            &mut self.meta.lock().unwrap_or_else(|e| e.into_inner()),
             key,
             MetaEntry {
-                fetched: Instant::now(),
+                fetched: now,
                 meta: m.clone(),
                 refreshed,
             },
+            now,
         );
         Ok(Some(m))
     }
@@ -676,6 +700,46 @@ pub fn parse_npm_packument(v: &Value) -> Option<PackageMeta> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_metadata_cache_stays_bounded() {
+        let meta = Arc::new(PackageMeta {
+            ecosystem: Ecosystem::Npm,
+            name: "x".into(),
+            latest: None,
+            dist_tags: BTreeMap::new(),
+            versions: vec![],
+            created: None,
+            people: vec![],
+        });
+        let entry = |fetched: Instant| MetaEntry {
+            fetched,
+            meta: meta.clone(),
+            refreshed: false,
+        };
+        let t0 = Instant::now();
+        let mut map = HashMap::new();
+        for i in 0..META_SOFT_CAP {
+            insert_meta(&mut map, format!("old{i}"), entry(t0), t0);
+        }
+        assert_eq!(map.len(), META_SOFT_CAP);
+        // Once the old entries have expired, the next insert past the bound sweeps them.
+        let later = t0 + META_TTL + Duration::from_secs(1);
+        insert_meta(&mut map, "new".into(), entry(later), later);
+        assert_eq!(map.len(), 1);
+        assert!(map.contains_key("new"));
+
+        // Fresh entries are never swept, but the hard cap drops the oldest.
+        let mut map = HashMap::new();
+        for i in 0..META_HARD_CAP + 10 {
+            let t = t0 + Duration::from_millis(i as u64);
+            insert_meta(&mut map, format!("k{i}"), entry(t), t);
+        }
+        assert!(map.len() <= META_HARD_CAP);
+        let last = format!("k{}", META_HARD_CAP + 9);
+        assert!(map.contains_key(&last));
+        assert!(!map.contains_key("k0"));
+    }
 
     #[test]
     fn parses_pypi_project() {
