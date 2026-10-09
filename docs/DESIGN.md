@@ -1442,8 +1442,11 @@ package and version back out of every registry tarball URL (`<name>/-/<base>-<ve
 scoped and percent-encoded names, any path prefix such as the proxy's `/npm/`) and reports a
 `mismatch` when they differ from the entry or the URL is not a tarball path. A mismatch
 counts as block, and the package the URL actually serves is checked in its place. uv
-records file URLs too, but it validates the downloaded distribution's name and version
-against the lock entry, so `uv.lock` gets no such check.
+records file URLs too (`sdist.url`, `wheels[].url`) and downloads them as written: an entry
+whose file is on a host other than PyPI is listed as not checked (custom index), and one
+whose wheel or sdist file name names another package or version is a `mismatch`, with the
+named file checked in its place. A registry entry with no `version` is listed as not
+checked.
 
 Pins are checked through the same client as `customs check` (a running server, else
 in-process), `--jobs` (default 8) at a time; PyPI pins are sent as `==version` so a version

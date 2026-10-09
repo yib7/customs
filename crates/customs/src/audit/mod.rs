@@ -147,11 +147,24 @@ impl Parsed {
         });
     }
 
+    /// An npm entry that installs another package than it names.
     fn mismatch(&mut self, name: &str, version: &str, file: &Path, line: usize, message: String) {
+        self.mismatch_in(Ecosystem::Npm, name, version, file, line, message);
+    }
+
+    fn mismatch_in(
+        &mut self,
+        eco: Ecosystem,
+        name: &str,
+        version: &str,
+        file: &Path,
+        line: usize,
+        message: String,
+    ) {
         self.mismatches.push(Mismatch {
             dep: Dependency {
-                ecosystem: Ecosystem::Npm,
-                name: normalize_name(Ecosystem::Npm, name),
+                ecosystem: eco,
+                name: normalize_name(eco, name),
                 version: version.to_string(),
                 file: file.to_path_buf(),
                 line,
