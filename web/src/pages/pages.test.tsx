@@ -1,6 +1,6 @@
 import { act, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { renderApp } from '../test/render';
 
 describe('Policy page', () => {
@@ -210,4 +210,19 @@ describe('Overview page', () => {
     await waitFor(() => expect(within(screen.getByTestId('live-feed')).getAllByTestId('feed-row')[0]).toHaveAttribute('data-event-id', id));
     expect(id).not.toBe(before);
   });
+
+  it('recovers the feed when the server comes up after the dashboard', async () => {
+    const mock = renderApp('/');
+    mock.server.events = [];
+    const handle = mock.server.handle.bind(mock.server);
+    let down = true;
+    vi.spyOn(mock.server, 'handle').mockImplementation((method, url, body, headers) =>
+      down && url.pathname === '/api/events' ? { status: 503, body: '' } : handle(method, url, body, headers),
+    );
+    mock.setStreamAvailable(false);
+    expect(await screen.findByText('Could not load events')).toBeInTheDocument();
+    down = false;
+    mock.setStreamAvailable(true);
+    expect(await screen.findByText('No installs yet', {}, { timeout: 8000 })).toBeInTheDocument();
+  }, 10000);
 });

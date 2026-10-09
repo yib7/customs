@@ -17,19 +17,32 @@ export function LiveProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     let cancelled = false;
+    // Whether the newest events have been loaded once, by the initial request or, when that
+    // failed (for example because the server was not up yet), by a later catch-up.
+    let ready = false;
+    const markReady = () => {
+      if (cancelled || ready) return;
+      ready = true;
+      setLoaded(true);
+      setError(null);
+    };
     const conn = new LiveConnection({
       fetchEvents: () => api.events({ limit: 50 }),
+      onCatchUp: markReady,
       onStatus: (s) => {
         if (!cancelled) setStatus(s);
       },
       onEvent: (e) => {
         if (cancelled) return;
         setEvents((prev) => [e, ...prev.filter((p) => p.id !== e.id)].slice(0, MAX_EVENTS));
-        setLiveIds((prev) => {
-          const next = new Set(prev);
-          next.add(e.id);
-          return next;
-        });
+        // Events that fill an empty feed after a failed initial load are not highlighted as new.
+        if (ready) {
+          setLiveIds((prev) => {
+            const next = new Set(prev);
+            next.add(e.id);
+            return next;
+          });
+        }
         setRevision((r) => r + 1);
         for (const l of listeners.current) l(e);
       },
@@ -43,11 +56,10 @@ export function LiveProvider({ children }: { children: ReactNode }) {
           const ids = new Set(prev.map((p) => p.id));
           return [...prev, ...initial.filter((e) => !ids.has(e.id))].slice(0, MAX_EVENTS);
         });
-        setLoaded(true);
-        setError(null);
+        markReady();
       },
       (e: unknown) => {
-        if (cancelled || (e instanceof DOMException && e.name === 'AbortError')) return;
+        if (cancelled || ready || (e instanceof DOMException && e.name === 'AbortError')) return;
         setError(e instanceof Error ? e : new Error(String(e)));
         setLoaded(true);
       },
