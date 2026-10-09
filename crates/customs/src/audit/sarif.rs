@@ -67,6 +67,18 @@ fn rule(id: &str) -> Rule {
             "The scanner rejected the archive, so the malware classifier could not inspect its code.",
             "warning",
         ),
+        "customs/not-scanned" => (
+            "NotScanned",
+            "Package archive was not scanned",
+            "The archive is above the scan size limit, so the malware classifier did not inspect its code. The policy allows such archives unless a rule says otherwise.",
+            "note",
+        ),
+        "customs/min-age-resolution" => (
+            "MinAgeResolution",
+            "Resolved to an older release because of the minimum age",
+            "The newest matching release is younger than min_age_days, so Customs resolved the request to an older release.",
+            "note",
+        ),
         "customs/install-script-added" => (
             "InstallScriptAdded",
             "Release added or changed an install script",
@@ -84,6 +96,30 @@ fn rule(id: &str) -> Rule {
             "Release added a brand-new dependency",
             "This version adds a dependency first published days before it by accounts that do not maintain the package, or one the registry does not know. Hijacked releases pull in their payload this way.",
             "error",
+        ),
+        "customs/provenance-dropped" => (
+            "ProvenanceDropped",
+            "Release dropped its provenance attestation",
+            "This version has no provenance attestation, but the previous release had one. A release published with a stolen token, rather than from the project's CI, usually loses its provenance.",
+            "warning",
+        ),
+        "customs/publisher-changed" => (
+            "PublisherChanged",
+            "Release published by a new account",
+            "The npm account that published this version published none of the previous five releases. Account takeovers and hostile handovers show up this way.",
+            "warning",
+        ),
+        "customs/dormant-revival" => (
+            "DormantRevival",
+            "First release after a long dormancy",
+            "The previous release is older than dormant_days. Abandoned packages taken over by someone else often publish their first release in years.",
+            "warning",
+        ),
+        "customs/version-anomaly" => (
+            "VersionAnomaly",
+            "Unusual version number",
+            "The major version jumps by more than one, or the release extends an old major line that saw no release for dormant_days while a newer one exists, which reaches users who pin the old range.",
+            "warning",
         ),
         "customs/lockfile-mismatch" => (
             "LockfileResolvedMismatch",
@@ -256,8 +292,21 @@ fn describe(f: &Finding) -> Option<(String, &'static str, String)> {
     }
 }
 
+/// Severity order of SARIF levels.
+fn rank(level: &str) -> u8 {
+    match level {
+        "error" => 3,
+        "warning" => 2,
+        "note" => 1,
+        _ => 0,
+    }
+}
+
 pub fn to_sarif(report: &Report, cwd: &Path) -> Value {
     let mut rule_ids: Vec<String> = vec!["customs/model-block".into(), "customs/model-warn".into()];
+    // The most severe level each rule's results reach: a rule configured above its default
+    // severity is rated by what it reports.
+    let mut strongest: Vec<&'static str> = vec!["note", "note"];
     let mut results = Vec::new();
     for f in &report.findings {
         let Some((rule_id, lvl, message)) = describe(f) else {
@@ -267,9 +316,13 @@ pub fn to_sarif(report: &Report, cwd: &Path) -> Value {
             Some(i) => i,
             None => {
                 rule_ids.push(rule_id.clone());
+                strongest.push("note");
                 rule_ids.len() - 1
             }
         };
+        if rank(lvl) > rank(strongest[index]) {
+            strongest[index] = lvl;
+        }
         let eco = ecosystem_str(f.dep.ecosystem);
         let verdict = match &f.outcome {
             Outcome::Checked { verdict, url } => Some((verdict, url)),
@@ -312,8 +365,14 @@ pub fn to_sarif(report: &Report, cwd: &Path) -> Value {
     }
     let rules: Vec<Value> = rule_ids
         .iter()
-        .map(|id| {
+        .zip(&strongest)
+        .map(|(id, seen)| {
             let r = rule(id);
+            let rated = if rank(seen) > rank(r.level) {
+                *seen
+            } else {
+                r.level
+            };
             json!({
                 "id": r.id,
                 "name": r.name,
@@ -324,8 +383,8 @@ pub fn to_sarif(report: &Report, cwd: &Path) -> Value {
                 "defaultConfiguration": { "level": r.level },
                 "properties": {
                     "tags": ["security", "supply-chain"],
-                    "precision": if r.level == "error" { "high" } else { "medium" },
-                    "security-severity": match r.level {
+                    "precision": if rated == "error" { "high" } else { "medium" },
+                    "security-severity": match rated {
                         "error" => "9.0",
                         "warning" => "5.0",
                         _ => "2.0",
@@ -487,6 +546,62 @@ mod tests {
             inv["toolExecutionNotifications"].as_array().unwrap().len(),
             1
         );
+    }
+
+    #[test]
+    fn every_policy_rule_has_metadata() {
+        // Every rule policy.rs and engine.rs can report, except the allow-only `allow` and
+        // `established`.
+        for policy in [
+            "deny",
+            "block_nonexistent",
+            "min_age_days",
+            "block_install_scripts_from_new",
+            "install_script_added",
+            "nonregistry_dependency_added",
+            "provenance_dropped",
+            "publisher_changed",
+            "dormant_revival",
+            "young_dependency_added",
+            "version_anomaly",
+            "scan_error",
+            "not_scanned",
+            "unread_code",
+            "startup_hook",
+            "agent_bypass",
+            "min_age_resolution",
+        ] {
+            let r = rule(&policy_rule_id(policy));
+            assert!(
+                !r.short.starts_with("Customs policy rule"),
+                "{policy} has no SARIF metadata"
+            );
+        }
+    }
+
+    #[test]
+    fn security_severity_follows_the_strongest_result() {
+        // provenance_dropped warns by default; configured to block, its alerts are errors.
+        let report = Report {
+            files: vec![PathBuf::from("package-lock.json")],
+            findings: vec![finding(
+                "x",
+                1,
+                checked(verdict("x", Decision::Block, Some("provenance_dropped"))),
+            )],
+            skipped: vec![],
+            errors: vec![],
+            via: "test".into(),
+        };
+        let s = to_sarif(&report, Path::new("/work"));
+        let run = &s["runs"][0];
+        let result = &run["results"][0];
+        assert_eq!(result["ruleId"], "customs/provenance-dropped");
+        assert_eq!(result["level"], "error");
+        let idx = result["ruleIndex"].as_u64().unwrap() as usize;
+        let r = &run["tool"]["driver"]["rules"][idx];
+        assert_eq!(r["defaultConfiguration"]["level"], "warning");
+        assert_eq!(r["properties"]["security-severity"], "9.0");
     }
 
     #[test]
