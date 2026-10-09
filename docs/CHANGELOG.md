@@ -43,6 +43,11 @@ First public release. Not tagged yet.
   wraps it as a GitHub Action.
 - `customs diff` shows what a release adds over an earlier one.
 
+### Distribution
+
+- Each GitHub release carries prebuilt archives for Linux (x86_64) and macOS (Apple
+  silicon) with the binaries, models and dashboard, plus a container image on ghcr.io.
+
 ### Known issues
 
 - The model scores the `requests` 2.32.3 sdist above the block threshold and warns on

@@ -1,13 +1,33 @@
+# Build output
 /target
-**/node_modules
 web/dist
+*.egg-info/
+# The Python binding when built in place (maturin develop)
+*.so
+
+# Dependencies and caches
+**/node_modules
+.venv/
 __pycache__/
 *.pyc
-.venv/
 .pytest_cache/
 .ruff_cache/
-*.egg-info/
-/data/
+
+# Data directory that `customs serve` creates in the working directory
 /.customs/
-*.so
-.claude/worktrees/
+
+# Secrets and local settings
+.env
+.env.*
+# Vite settings for the mock API (no secrets)
+!web/.env.mock
+
+# Editors and OS files
+.vscode/
+.idea/
+.DS_Store
+*.log
+
+# Local agent and release-checklist files
+.claude/
+.autopilot/

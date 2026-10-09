@@ -8,3 +8,5 @@ python
 .git
 .claude
 docs
+.autopilot
+.env

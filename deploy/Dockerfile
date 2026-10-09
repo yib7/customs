@@ -8,7 +8,7 @@ RUN npm ci --no-audit --no-fund
 COPY web/ ./
 RUN npm run build
 
-FROM rust:1-bookworm AS rust
+FROM rust:1.99-bookworm AS rust
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
