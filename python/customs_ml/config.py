@@ -35,6 +35,19 @@ def data_dir() -> Path:
     return root
 
 
+def write_atomic(dest: Path, data: bytes) -> None:
+    """Write ``dest`` through a ``.part`` file, so an interrupted write never leaves a
+    truncated file that a later run would take for a finished one."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    part = dest.with_name(dest.name + ".part")
+    try:
+        part.write_bytes(data)
+        part.replace(dest)
+    except BaseException:
+        part.unlink(missing_ok=True)
+        raise
+
+
 def sub(*parts: str) -> Path:
     p = data_dir().joinpath(*parts)
     p.mkdir(parents=True, exist_ok=True)

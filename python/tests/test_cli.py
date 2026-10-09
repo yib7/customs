@@ -1,5 +1,7 @@
 import subprocess
 
+import pytest
+
 from customs_ml import cli
 
 
@@ -27,3 +29,44 @@ def test_datadog_listing_keeps_non_ascii_sample_paths(tmp_path):
     _git("add", ".", cwd=repo)
     _git("commit", "-q", "-m", "x", cwd=repo)
     assert sorted(cli._datadog_listing(repo.as_uri())) == sorted(paths[:2])
+
+
+class _Resp:
+    def __init__(self, status: int, content: bytes = b""):
+        self.status_code, self.content, self.ok = status, content, status < 400
+
+
+class _Session:
+    def __init__(self, resp):
+        self.resp = resp
+
+    def get(self, url, timeout):
+        return self.resp
+
+
+def test_fetch_is_atomic(monkeypatch, tmp_path):
+    from pathlib import Path
+
+    dest = tmp_path / "npm" / "x" / "sample.zip"
+    real = Path.write_bytes
+
+    def torn(self, data):  # the process dies halfway through the write
+        real(self, data[: len(data) // 2])
+        raise OSError("disk full")
+
+    monkeypatch.setattr(Path, "write_bytes", torn)
+    with pytest.raises(OSError):
+        cli.fetch_to(_Session(_Resp(200, b"0123456789")), "https://x/sample.zip", dest)
+    monkeypatch.undo()
+    # A torn download must not look like a finished one (`fetch` skips existing files).
+    assert not dest.exists()
+    assert cli.fetch_to(_Session(_Resp(200, b"0123456789")), "https://x/sample.zip", dest)
+    assert dest.read_bytes() == b"0123456789"
+    assert not list(dest.parent.glob("*.part"))
+
+
+def test_fetch_reports_a_failed_download(tmp_path, capsys):
+    dest = tmp_path / "sample.zip"
+    assert not cli.fetch_to(_Session(_Resp(404)), "https://x/sample.zip", dest)
+    assert not dest.exists()
+    assert "404" in capsys.readouterr().out

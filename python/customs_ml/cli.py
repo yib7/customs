@@ -96,6 +96,16 @@ def pick_samples(paths: list[str], cap_intent: int, cap_compromised: int, seed: 
     return picked
 
 
+def fetch_to(session: requests.Session, url: str, dest: Path) -> bool:
+    """Download ``url`` to ``dest`` atomically; report and skip a failed download."""
+    r = session.get(url, timeout=60)
+    if not r.ok:
+        print(f"skipped {url}: HTTP {r.status_code}")
+        return False
+    config.write_atomic(dest, r.content)
+    return True
+
+
 def cmd_malicious(args) -> None:
     picked = pick_samples(_datadog_listing(), args.cap_intent, args.cap_compromised, args.seed)
     raw_dir = config.sub("datadog_raw")
@@ -104,12 +114,8 @@ def cmd_malicious(args) -> None:
 
     def fetch(rel: str) -> None:
         dest = raw_dir / rel
-        if dest.exists():
-            return
-        r = session.get(DATADOG_RAW + requests.utils.quote(rel), timeout=60)
-        if r.ok:
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_bytes(r.content)
+        if not dest.exists():
+            fetch_to(session, DATADOG_RAW + requests.utils.quote(rel), dest)
 
     # Download and ingest in chunks, deleting the encrypted zips after each chunk, so the
     # disk only ever holds one chunk of raw samples.

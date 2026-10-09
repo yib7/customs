@@ -94,8 +94,7 @@ def canonicalize_benign_corpus(
             except Exception:  # noqa: BLE001 - malformed upstream archive, skip it
                 canon.append(None)
                 continue
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_bytes(blob)
+            config.write_atomic(dest, blob)
         if delete_original and Path(row.path).exists():
             Path(row.path).unlink()
         canon.append(str(dest))
