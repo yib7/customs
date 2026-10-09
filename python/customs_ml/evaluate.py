@@ -177,6 +177,9 @@ def _guarddog(T: pd.DataFrame, y, cl, s) -> dict:
     m = T.merge(gd, left_on="canonical_path", right_on="path", how="left")
     ok = (m.gd_error == "").to_numpy()
     yy, cc, ss = y[ok], cl[ok], s[ok]
+    if yy.sum() == 0 or (yy == 0).sum() == 0:
+        log("GuardDog returned results for one class only: comparison skipped")
+        return {}
     g = m.gd_score.to_numpy()[ok]
     flagged = (g > 0).astype(float)
     gd_fpr = float(flagged[yy == 0].mean())
@@ -195,7 +198,7 @@ def _guarddog(T: pd.DataFrame, y, cl, s) -> dict:
         if lab.sum() == 0 or (lab == 0).sum() == 0:
             continue
         deltas.append(np.mean(a[lab == 1] >= t_match) - np.mean(b[lab == 1] > 0.5))
-    lo, hi = np.percentile(deltas, [2.5, 97.5])
+    lo, hi = np.percentile(deltas, [2.5, 97.5]) if deltas else (np.nan, np.nan)
     gd_high = (m.gd_label.to_numpy()[ok] == "high_risk").astype(float)
     high_fpr = float(gd_high[yy == 0].mean())
     t_high = metrics.threshold_at_fpr(yy, ss, high_fpr)
@@ -238,7 +241,7 @@ def _figures(df: pd.DataFrame, T: pd.DataFrame, scheme: str, res: dict) -> None:
     ax.set_xlim(1e-4, 1)
     ax.set_xlabel("False-positive rate (benign packages flagged), log scale")
     ax.set_ylabel("Detection rate (malicious packages caught)")
-    ax.set_title("Test set ROC, temporal split")
+    ax.set_title(f"Test set ROC, {scheme} split")
     ax.legend(loc="lower right", fontsize=8)
     ax.grid(alpha=0.3)
     fig.tight_layout()

@@ -135,7 +135,12 @@ def cluster_bootstrap(
         if len(np.unique(yy)) < 2:
             continue
         vals.append(stat(yy, ss))
-    lo, hi = np.nanpercentile(vals, [100 * alpha / 2, 100 * (1 - alpha / 2)])
+    vals = np.asarray(vals, dtype=float)
+    vals = vals[~np.isnan(vals)]
+    if not len(vals):
+        # No resample had both classes (or the statistic was never defined): no interval.
+        return float(point), float("nan"), float("nan")
+    lo, hi = np.percentile(vals, [100 * alpha / 2, 100 * (1 - alpha / 2)])
     return float(point), float(lo), float(hi)
 
 

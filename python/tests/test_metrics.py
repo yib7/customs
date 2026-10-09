@@ -38,3 +38,14 @@ def test_cluster_bootstrap_ci_contains_point():
         y, s, clusters, lambda a, b: metrics.summarize(a, b, {}).roc_auc, n_boot=200
     )
     assert lo <= pt <= hi and hi - lo < 0.1
+
+
+def test_cluster_bootstrap_single_class_returns_nan_bounds():
+    import warnings
+
+    y = np.array([1, 1, 1])
+    s = np.array([0.1, 0.5, 0.9])
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        point, lo, hi = metrics.cluster_bootstrap(y, s, np.arange(3), lambda a, b: 0.5)
+    assert point == 0.5 and np.isnan(lo) and np.isnan(hi)
