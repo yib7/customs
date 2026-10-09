@@ -151,7 +151,9 @@ tool call. `customs audit` checks the servers already configured.
 | `--data-dir DIR` | `CUSTOMS_DATA_DIR` | `~/.cache/customs` | Cache for in-process checks |
 
 By default the hook fails open: if it cannot check a package it writes the reason to
-stderr and returns no decision, so a broken Customs setup does not stop your work. Use
+stderr and returns no decision, so a broken Customs setup does not stop your work.
+Tampering and specs that cannot be checked (a git URL, a downloaded script) still come
+back for review then. Use
 `--fail-closed` where an unchecked install is worse than a blocked command.
 
 # Cursor, Gemini CLI and Codex hooks

