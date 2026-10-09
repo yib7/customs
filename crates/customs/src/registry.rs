@@ -627,9 +627,9 @@ pub fn parse_npm_packument(v: &Value) -> Option<PackageMeta> {
                             upload_time: published,
                             sha256: None,
                             packagetype: "tarball".into(),
-                            size: dist
-                                .and_then(|d| d.get("unpackedSize"))
-                                .and_then(Value::as_u64),
+                            // The packument has no tarball size; `dist.unpackedSize` is
+                            // whatever the publisher wrote, so it is not used.
+                            size: None,
                             yanked: false,
                         }],
                         install_scripts,

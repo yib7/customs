@@ -683,7 +683,7 @@ allow), and that an `established` hit drops the model decision from the combinat
 rule hits still count). `risk` and component scores are `null` when that part of the model could not run
 (for example a package that does not exist has only a name score). `thresholds` are the
 effective ones (policy overrides applied). Policy `severity` is `allow` for informational
-hits (`allow`, `established`, `not_scanned`), else `warn` or `block`. Rules: `deny`, `allow`,
+hits (`allow`, `established`, `not_scanned` from the proxy), else `warn` or `block`. Rules: `deny`, `allow`,
 `established` (an established release of a popular package, section 8),
 `block_nonexistent`, `min_age_days`, `block_install_scripts_from_new`, the release history
 rules of section 8 (`provenance_dropped`, `install_script_added`, `publisher_changed`,
@@ -693,7 +693,8 @@ rules of section 8 (`provenance_dropped`, `install_script_added`, `publisher_cha
 (a `.pth` file that launches, connects, downloads or reads secrets, block by default),
 `agent_bypass` (install-time code runs an AI coding CLI with its permission checks off,
 block by default), `not_scanned`
-(archive above the scan size limit).
+(archive above the scan size limit; `warn` from `POST /api/check` for a wheel above the
+check limit, which it does not download).
 `reasons` mix model features (positive contributions to the stacked logit, largest first)
 and name signals (`name_dist1`, `name_contains_popular_token`, ...). In `monitor` mode the
 proxy records the verdict and serves the artifact anyway (`mode` says which applied).
@@ -739,7 +740,11 @@ API (JSON). CORS allows only `http://localhost:5173` (the Vite dev server).
   `version` is null (latest), an exact version, a range (`>=1,<2`, `~=1.4`, `^1.2`, npm
   ranges), or an npm dist-tag; it resolves to the newest matching non-yanked version. The
   server applies policy, fetches (PyPI prefers the sdist, then a pure wheel, then the
-  smallest wheel), scans, and returns a verdict. Errors: 400 bad input, 404
+  smallest wheel), scans, and returns a verdict. A wheel whose registry size is above the
+  64 MiB check limit is scored on name and metadata only, with a `warn` `not_scanned` hit;
+  an sdist or npm tarball is always downloaded (up to the 2 GiB download limit) and read
+  like the proxy reads it, since its install-time code runs (npm's `unpackedSize` is
+  written by the publisher and is not trusted). Errors: 400 bad input, 404
   `{ "error", "code": "nonexistent_package", "verdict": {...} }` when the registry does not
   know the name (the verdict carries the `block_nonexistent` decision), 422 no matching
   version, 502 upstream failure; all as `{ "error": "..." }`. Optional `"resolve"`:
@@ -803,8 +808,8 @@ API (JSON). CORS allows only `http://localhost:5173` (the Vite dev server).
   them). `new_evidence` lists findings of `to` with no finding of the same indicator, file
   and code in `from`, ignoring the line, since an edit above a finding moves it; both
   sides come from capped evidence lists (50 items), so a release with more findings than
-  that can list some old ones as new. An archive above the check limit is not
-  downloaded and one above the scan limit is not compared; `files_note` says why. Errors:
+  that can list some old ones as new. A wheel above the check limit is not
+  downloaded and an archive above the scan limit is not compared; `files_note` says why. Errors:
   404 for an unknown package, 422 for a version that does not resolve, no earlier
   release, or `from` equal to `to`. The dashboard's verdict page runs the comparison on
   request, since it downloads and scans the earlier release.

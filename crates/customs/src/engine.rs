@@ -52,7 +52,8 @@ pub struct Limits {
     pub max_download_bytes: u64,
     /// Artifacts larger than this are served but only scored on name and metadata.
     pub max_scan_bytes: u64,
-    /// `POST /api/check` does not download artifacts larger than this.
+    /// `POST /api/check` does not download a wheel the registry says is larger than this;
+    /// sdists and npm tarballs are always read, up to `max_download_bytes`.
     pub max_check_bytes: u64,
     /// The artifact cache is trimmed (least recently used first) when it grows past this.
     pub max_cache_bytes: u64,
@@ -132,8 +133,8 @@ pub struct MetaFacts {
     pub yanked: bool,
     /// Metadata read fresh does not list the version or file, so its age is unknown.
     pub age_unknown: bool,
-    /// An informational hit about how the version was chosen.
-    pub note: Option<PolicyHit>,
+    /// Hits about how the version or the archive was chosen.
+    pub notes: Vec<PolicyHit>,
 }
 
 /// One artifact to evaluate.
@@ -734,7 +735,7 @@ impl Engine {
         );
         let mut hits = outcome.hits.clone();
         hits.extend(scan_hits(policy, s));
-        hits.extend(meta.note.clone());
+        hits.extend(meta.notes.iter().cloned());
         let decision = outcome.decide_with(model_decision, &hits);
         Verdict {
             id: None,
@@ -917,24 +918,32 @@ impl Engine {
             history,
             yanked: vm.yanked,
             age_unknown: false,
-            note,
+            notes: note.into_iter().collect(),
         };
         let Some(file) = choose_file(eco, &vm.files) else {
             return Err(EngineError::NotFound(format!(
                 "{name} {version} has no downloadable files"
             )));
         };
-        if file.size.is_some_and(|s| s > self.limits.max_check_bytes) {
-            let s = self.name_only_summary(
-                eco,
-                &name,
-                Some(format!(
-                    "{} is {} MB, above the {} MB check limit; scored on name and metadata only",
+        // Only a wheel may skip the download: it runs nothing at install but a top-level
+        // `.pth` file. Anything else is read like the proxy reads it (up to the download
+        // limit), since its install-time code must not go unread. PyPI reports a file's own
+        // size; npm reports none (its `unpackedSize` is whatever the publisher wrote).
+        if file.filename.ends_with(".whl")
+            && file.size.is_some_and(|s| s > self.limits.max_check_bytes)
+        {
+            let s = self.name_only_summary(eco, &name, None);
+            let mut facts = facts;
+            facts.notes.push(PolicyHit {
+                rule: "not_scanned".into(),
+                severity: Decision::Warn,
+                detail: format!(
+                    "{} is {} MB, above the {} MB check limit, so it was not downloaded or                      read; scored on name and metadata only",
                     file.filename,
                     file.size.unwrap_or(0) >> 20,
                     self.limits.max_check_bytes >> 20
-                )),
-            );
+                ),
+            });
             let v = self.build_verdict(
                 &policy,
                 eco,
@@ -1070,7 +1079,7 @@ impl Engine {
         let limit = self.limits.max_check_bytes;
         if let Some(big) = [&file_from, &file_to]
             .into_iter()
-            .find(|f| f.size.is_some_and(|s| s > limit))
+            .find(|f| f.filename.ends_with(".whl") && f.size.is_some_and(|s| s > limit))
         {
             d.files_note = Some(format!(
                 "{} is above the {} MB check limit",

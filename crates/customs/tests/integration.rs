@@ -3110,3 +3110,73 @@ async fn a_file_added_to_an_old_release_is_not_established() {
     );
     h.stop().await;
 }
+
+fn hit<'a>(v: &'a Value, rule: &str) -> Option<&'a Value> {
+    v["policy_hits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["rule"] == rule)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn check_reads_npm_install_code_whatever_unpacked_size_says() {
+    let h = Harness::start(|_| {}).await;
+    // The publisher claims a terabyte; the packument lists no install script, the tarball
+    // has one (the stand-in scanner reports a postinstall for archives ending in "fresh").
+    let mut f = ExtraFile::new(
+        "bigclaim",
+        "1.0.0",
+        "bigclaim-1.0.0.tgz",
+        b"benign but fresh",
+        "2019-05-01T00:00:00.000Z".into(),
+    );
+    f.doc = json!({"dist": {"unpackedSize": 1_099_511_627_776u64}});
+    h.mock.extra_npm.lock().unwrap().push(f);
+    let (s, v) = h.check("npm", "bigclaim", None).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(h.mock.hits("npm:bigclaim-1.0.0.tgz"), 1);
+    assert!(hit(&v, "not_scanned").is_none(), "{v}");
+    assert!(
+        v["install_surface"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("package.json:scripts.postinstall")),
+        "{v}"
+    );
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn check_reads_an_oversize_sdist_like_the_proxy() {
+    let limits = Limits {
+        max_check_bytes: 4,
+        ..Limits::default()
+    };
+    let h = Harness::start_full(|_| {}, None, limits).await;
+    // An sdist runs code at install, so it is read whatever its size.
+    let (s, v) = h.check("pypi", "goodpkg", Some("1.0.0")).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(h.mock.hits("packages/ab/cd/goodpkg-1.0.0.tar.gz"), 1);
+    assert!(hit(&v, "not_scanned").is_none(), "{v}");
+    assert_eq!(h.scans.load(Ordering::SeqCst), 1);
+    // A wheel above the check limit is not downloaded, and the check says it did not look.
+    h.mock.extra_pypi.lock().unwrap().push(ExtraFile::new(
+        "bigwheel",
+        "1.0.0",
+        "bigwheel-1.0.0-py3-none-any.whl",
+        b"benign big wheel",
+        "2020-01-01T00:00:00.000000Z".into(),
+    ));
+    let (s, v) = h.check("pypi", "bigwheel", None).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(
+        h.mock
+            .hits("packages/ab/cd/bigwheel-1.0.0-py3-none-any.whl"),
+        0
+    );
+    let ns = hit(&v, "not_scanned").unwrap_or_else(|| panic!("{v}"));
+    assert_eq!(ns["severity"], "warn", "{v}");
+    assert_eq!(v["decision"], "warn", "{v}");
+    h.stop().await;
+}
