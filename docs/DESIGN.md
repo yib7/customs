@@ -1422,8 +1422,9 @@ and `resolved_version`).
 Each pin keeps its file and 1-based line. Pins are deduplicated on (ecosystem, normalized
 name, version), keeping the first location. Entries that cannot be checked are listed as
 "not checked" with a reason: unpinned requirements, editable installs, URLs, VCS and local
-paths, and packages resolved from a registry other than PyPI, npm, Yarn's npm mirror or a
-loopback host (a Customs proxy). The project's own workspace packages (`editable`,
+paths, and packages resolved from a registry other than PyPI, npm, Yarn's npm mirror or the
+Customs server's own origin (`--server`, at its port only, under any loopback name for a
+local server; a local Verdaccio on another port is a custom registry). The project's own workspace packages (`editable`,
 `virtual`, `workspace:`, `link:`, `portal:`, npm `link: true`) and berry `patch:` entries
 (the unpatched entry is listed too) are skipped silently.
 

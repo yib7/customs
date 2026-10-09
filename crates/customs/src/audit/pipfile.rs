@@ -5,7 +5,7 @@ use std::path::Path;
 use customs_scan::Ecosystem;
 use serde_json::Value;
 
-use super::{host_of, json_key_lines, key_line, known_registry, Parsed, SkipKind};
+use super::{host_of, json_key_lines, key_line, Parsed, SkipKind};
 use crate::hook::parse::looks_like_url;
 
 pub(super) fn parse(text: &str, file: &Path, out: &mut Parsed) -> Result<(), String> {
@@ -70,7 +70,7 @@ pub(super) fn parse(text: &str, file: &Path, out: &mut Parsed) -> Result<(), Str
                 },
                 None => sources.first().map(|(_, url)| *url),
             };
-            if let Some(url) = url.filter(|u| !known_registry(u)) {
+            if let Some(url) = url.filter(|u| !out.known_registry(u)) {
                 out.skip(
                     file,
                     line,

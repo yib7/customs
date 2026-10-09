@@ -638,7 +638,7 @@ impl McpServer {
             Ok(f) => f,
             Err(e) => return Ok(ToolOutput::error(e)),
         };
-        let (parsed, errors) = audit::collect(&files);
+        let (parsed, errors) = audit::collect(&files, &self.opts.server);
         let mut findings = audit::mismatch_findings(parsed.mismatches);
         let via = if parsed.deps.is_empty() {
             "nothing to check".to_string()

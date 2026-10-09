@@ -108,14 +108,37 @@ pub struct Mismatch {
 }
 
 /// What the parsers produce.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Parsed {
     pub deps: Vec<Dependency>,
     pub skipped: Vec<Skipped>,
     pub mismatches: Vec<Mismatch>,
+    /// The Customs server whose proxy URLs count as the public registry.
+    trusted: Option<TrustedOrigin>,
+}
+
+impl Default for Parsed {
+    /// Trusts the default Customs server.
+    fn default() -> Self {
+        Self::trusting(DEFAULT_SERVER)
+    }
 }
 
 impl Parsed {
+    /// Empty, trusting the Customs server at `server` (`--server`) as a registry.
+    pub fn trusting(server: &str) -> Self {
+        Self {
+            deps: Vec::new(),
+            skipped: Vec::new(),
+            mismatches: Vec::new(),
+            trusted: TrustedOrigin::of(server),
+        }
+    }
+
+    fn known_registry(&self, url: &str) -> bool {
+        known_registry(url, self.trusted.as_ref())
+    }
+
     fn dep(&mut self, eco: Ecosystem, name: &str, version: &str, file: &Path, line: usize) {
         self.deps.push(Dependency {
             ecosystem: eco,
@@ -353,11 +376,16 @@ fn search_dir(dir: &Path, recursive: bool, out: &mut Vec<PathBuf>) -> std::io::R
     Ok(())
 }
 
-/// Parse one lockfile.
+/// Parse one lockfile, trusting the default Customs server as a registry.
 pub fn parse_lockfile(path: &Path) -> Result<Parsed, String> {
+    parse_lockfile_trusting(path, DEFAULT_SERVER)
+}
+
+/// Parse one lockfile; URLs at the Customs server `server` count as the public registry.
+pub fn parse_lockfile_trusting(path: &Path, server: &str) -> Result<Parsed, String> {
     let kind = LockKind::detect(path)
         .ok_or_else(|| format!("{}: unrecognized lockfile name", path.display()))?;
-    let mut out = Parsed::default();
+    let mut out = Parsed::trusting(server);
     if kind == LockKind::Requirements {
         requirements::parse(path, &mut out)?;
         return Ok(out);
@@ -387,11 +415,11 @@ pub fn parse_lockfile(path: &Path) -> Result<Parsed, String> {
 /// Parse every lockfile and merge the pins, with an error for each file that could not be
 /// read. A broken file does not hide the others; the report lists it and the audit counts
 /// as incomplete.
-pub fn collect(files: &[PathBuf]) -> (Parsed, Vec<String>) {
-    let mut all = Parsed::default();
+pub fn collect(files: &[PathBuf], server: &str) -> (Parsed, Vec<String>) {
+    let mut all = Parsed::trusting(server);
     let mut errors = Vec::new();
     for f in files {
-        match parse_lockfile(f) {
+        match parse_lockfile_trusting(f, server) {
             Ok(p) => {
                 all.deps.extend(p.deps);
                 all.skipped.extend(p.skipped);
@@ -608,26 +636,55 @@ fn key_line(lines: &HashMap<Vec<String>, usize>, path: &[&str]) -> usize {
     lines.get(&key).copied().unwrap_or(1)
 }
 
-/// Public registries, and loopback hosts (lockfiles written through `customs serve`).
-/// Packages from any other index are not checked against the public registry.
-fn known_registry(url: &str) -> bool {
-    let Some(host) = url::Url::parse(url)
-        .ok()
-        .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
-    else {
+/// The CLI's default `--server` (`cli.rs`): lockfiles written through a Customs proxy there
+/// record its URLs.
+const DEFAULT_SERVER: &str = "http://127.0.0.1:7878";
+
+/// Where a Customs server listens: lockfiles written through its proxy record URLs there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TrustedOrigin {
+    host: String,
+    port: u16,
+}
+
+impl TrustedOrigin {
+    fn of(url: &str) -> Option<Self> {
+        let u = url::Url::parse(url).ok()?;
+        Some(Self {
+            host: u.host_str()?.to_ascii_lowercase(),
+            port: u.port_or_known_default()?,
+        })
+    }
+}
+
+fn loopback_host(h: &str) -> bool {
+    matches!(h, "localhost" | "127.0.0.1" | "[::1]")
+}
+
+/// Public registries, and the Customs server's own origin (any loopback name for a local
+/// one). Packages from any other index, a local Verdaccio included, are not checked against
+/// the public registry.
+fn known_registry(url: &str, trusted: Option<&TrustedOrigin>) -> bool {
+    let Some(u) = url::Url::parse(url).ok() else {
         return false;
     };
-    matches!(
+    let Some(host) = u.host_str().map(str::to_ascii_lowercase) else {
+        return false;
+    };
+    if matches!(
         host.as_str(),
         "pypi.org"
             | "files.pythonhosted.org"
             | "pypi.python.org"
             | "registry.npmjs.org"
             | "registry.yarnpkg.com"
-            | "localhost"
-            | "127.0.0.1"
-            | "[::1]"
-    )
+    ) {
+        return true;
+    }
+    trusted.is_some_and(|t| {
+        u.port_or_known_default() == Some(t.port)
+            && (host == t.host || (loopback_host(&host) && loopback_host(&t.host)))
+    })
 }
 
 fn host_of(url: &str) -> String {
@@ -730,7 +787,7 @@ fn npm_pin(
             );
             return;
         }
-        if !known_registry(r) {
+        if !out.known_registry(r) {
             out.skip(
                 file,
                 line,
@@ -981,7 +1038,7 @@ pub async fn run(opts: AuditOptions) -> i32 {
             return 2;
         }
     };
-    let (parsed, errors) = collect(&files);
+    let (parsed, errors) = collect(&files, &opts.server);
     for e in &errors {
         eprintln!("customs audit: {e}");
     }
@@ -1430,7 +1487,7 @@ pub(crate) mod tests {
         let twice = find_lockfiles(&[d.to_path_buf(), d.join("requirements.txt")], false).unwrap();
         assert_eq!(twice.len(), 2);
 
-        let (parsed, errors) = collect(&flat);
+        let (parsed, errors) = collect(&flat, DEFAULT_SERVER);
         assert!(errors.is_empty(), "{errors:?}");
         assert_eq!(parsed.deps.len(), 2);
         assert!(parsed.deps[0].file.ends_with("requirements-dev.txt"));
@@ -1498,13 +1555,13 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let f = dir.path().join("package-lock.json");
         std::fs::write(&f, "{ not json").unwrap();
-        let (_, e) = collect(&[f]);
+        let (_, e) = collect(&[f], DEFAULT_SERVER);
         assert!(e[0].contains("package-lock.json"), "{e:?}");
         // TOML errors keep their position.
         let f = dir.path().join(".codex/config.toml");
         std::fs::create_dir_all(f.parent().unwrap()).unwrap();
         std::fs::write(&f, "[mcp_servers.x]\ncommand = \n").unwrap();
-        let (_, e) = collect(&[f]);
+        let (_, e) = collect(&[f], DEFAULT_SERVER);
         assert!(e[0].contains("line 2"), "{e:?}");
     }
 
@@ -1516,7 +1573,7 @@ pub(crate) mod tests {
         std::fs::create_dir_all(d.join(".gemini")).unwrap();
         std::fs::write(d.join(".gemini/settings.json"), "{ \"mcpServers\": ").unwrap();
         let files = find_lockfiles(&[d.to_path_buf()], false).unwrap();
-        let (parsed, errors) = collect(&files);
+        let (parsed, errors) = collect(&files, DEFAULT_SERVER);
         assert_eq!(pins(&parsed), vec![("a".into(), "1.0".into(), 2)]);
         assert_eq!(parsed.skipped.len(), 1);
         assert_eq!(errors.len(), 1, "{errors:?}");
@@ -1641,6 +1698,60 @@ pub(crate) mod tests {
         );
         assert_eq!(p.skipped[0].kind, SkipKind::Source);
         assert_eq!(p.skipped[1].kind, SkipKind::CustomIndex);
+    }
+
+    #[test]
+    fn loopback_registry_only_on_the_customs_port() {
+        let f = Path::new("package-lock.json");
+        let mut p = Parsed::default();
+        // A local Verdaccio is not Customs.
+        npm_pin(
+            &mut p,
+            f,
+            1,
+            "x",
+            "1.0.0",
+            Some("http://localhost:4873/x/-/x-1.0.0.tgz"),
+        );
+        // The default Customs server.
+        npm_pin(
+            &mut p,
+            f,
+            2,
+            "y",
+            "1.0.0",
+            Some("http://127.0.0.1:7878/npm/y/-/y-1.0.0.tgz"),
+        );
+        assert_eq!(pins(&p), vec![("y".into(), "1.0.0".into(), 2)]);
+        assert_eq!(p.skipped.len(), 1, "{:?}", p.skipped);
+        assert_eq!(p.skipped[0].kind, SkipKind::CustomIndex);
+        assert!(p.skipped[0].reason.contains("localhost"));
+
+        // A configured server: any loopback name, its port only.
+        let mut p = Parsed::trusting("http://localhost:9000/");
+        npm_pin(
+            &mut p,
+            f,
+            1,
+            "z",
+            "1.0.0",
+            Some("http://[::1]:9000/npm/z/-/z-1.0.0.tgz"),
+        );
+        npm_pin(
+            &mut p,
+            f,
+            2,
+            "y",
+            "1.0.0",
+            Some("http://127.0.0.1:7878/npm/y/-/y-1.0.0.tgz"),
+        );
+        assert_eq!(pins(&p), vec![("z".into(), "1.0.0".into(), 1)]);
+        assert_eq!(p.skipped.len(), 1, "{:?}", p.skipped);
+        // A remote Customs server is trusted at its own origin.
+        let p = Parsed::trusting("https://customs.corp.example");
+        assert!(p.known_registry("https://customs.corp.example/pypi/simple/"));
+        assert!(!p.known_registry("https://customs.corp.example:8443/pypi/simple/"));
+        assert!(p.known_registry("https://pypi.org/simple"));
     }
 
     #[test]

@@ -8,7 +8,7 @@ use customs_scan::Ecosystem;
 use serde::Deserialize;
 use toml::Spanned;
 
-use super::{host_of, known_registry, LineIndex, Parsed, SkipKind};
+use super::{host_of, LineIndex, Parsed, SkipKind};
 use crate::resolve::compare_versions;
 use crate::util::normalize_name;
 
@@ -75,7 +75,7 @@ pub(super) fn parse(text: &str, file: &Path, out: &mut Parsed) -> Result<(), Str
             );
         } else {
             match source.get("registry").and_then(|r| r.as_str()) {
-                Some(r) if !known_registry(r) => out.skip(
+                Some(r) if !out.known_registry(r) => out.skip(
                     file,
                     line,
                     &spec,
@@ -109,7 +109,7 @@ fn registry_pin(
     urls: &[&str],
 ) {
     let spec = format!("{name}=={version}");
-    if let Some(u) = urls.iter().find(|u| !known_registry(u)) {
+    if let Some(u) = urls.iter().find(|u| !out.known_registry(u)) {
         out.skip(
             file,
             line,

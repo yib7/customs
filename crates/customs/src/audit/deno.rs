@@ -104,7 +104,7 @@ mod tests {
   "npm": {
     "@sindresorhus/is@4.6.0": {
       "integrity": "sha512-t09vSN3MdfsyCHoFcTRCH/iUtG7OJ0CsjzB8cjAmKc/va/kIgeDI/TxsigdncE/4be734m0cvIYwNaV4i2XqAw==",
-      "tarball": "http://127.0.0.1:7979/npm/@sindresorhus/is/-/is-4.6.0.tgz"
+      "tarball": "http://127.0.0.1:7878/npm/@sindresorhus/is/-/is-4.6.0.tgz"
     },
     "ms@2.1.2": {
       "integrity": "sha512-wGMH1g==",

@@ -9,13 +9,16 @@ use std::sync::OnceLock;
 use customs_scan::Ecosystem;
 use regex::Regex;
 
-use super::{host_of, known_registry, Parsed, SkipKind};
+use super::{host_of, Parsed, SkipKind};
 use crate::hook::parse::{looks_like_path, looks_like_url};
 
 const MAX_INCLUDE_DEPTH: usize = 10;
 
 pub(super) fn parse(path: &Path, out: &mut Parsed) -> Result<(), String> {
-    let mut own = Parsed::default();
+    let mut own = Parsed {
+        trusted: out.trusted.clone(),
+        ..Parsed::default()
+    };
     let mut index = None;
     parse_file(path, &mut own, &mut HashSet::new(), 0, &mut index)?;
     // Index options apply to the whole install, wherever they appear: with another index in
@@ -114,12 +117,12 @@ fn parse_file(
                     };
                     out.skip(path, line, t, kind, "editable install");
                 }
-                "-i" | "--index-url" | "--extra-index-url" if !known_registry(value) => {
+                "-i" | "--index-url" | "--extra-index-url" if !out.known_registry(value) => {
                     index.get_or_insert_with(|| {
                         format!("from a custom package index ({})", host_of(value))
                     });
                 }
-                "-f" | "--find-links" if !(looks_like_url(value) && known_registry(value)) => {
+                "-f" | "--find-links" if !(looks_like_url(value) && out.known_registry(value)) => {
                     let shown = if looks_like_url(value) {
                         host_of(value)
                     } else {
