@@ -3096,3 +3096,156 @@ fn doctor_refuses_a_missing_directory() {
     assert!(err.contains(missing.to_str().unwrap()), "{err}");
     assert!(out.is_empty(), "{out}");
 }
+
+/// `[upstream]` lines pointing every registry at `base`.
+fn upstream_toml(base: &str) -> String {
+    format!(
+        "[upstream]\npypi_simple = \"{base}/simple\"\npypi_files = \"{base}/files\"\npypi_json = \"{base}/pypi\"\nnpm = \"{base}/npm\"\n"
+    )
+}
+
+/// The hook, `check` and `scan` run in the agent's project, which may be hostile: its
+/// `customs.toml` and `models/` must not steer the in-process checks.
+#[tokio::test(flavor = "multi_thread")]
+async fn in_process_checks_ignore_a_projects_customs_toml_and_models() {
+    let mock = start_mock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::write(
+        data.join("policy.toml"),
+        format!(
+            "deny = [\"pypi:goodpkg\", \"npm:left-padd\"]\n{}",
+            upstream_toml(&mock.base)
+        ),
+    )
+    .unwrap();
+    // The project allows what the user denies, and plants its own models.
+    let project = dir.path().join("project");
+    let planted = project.join("models");
+    std::fs::create_dir_all(&planted).unwrap();
+    let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../models/dev");
+    for f in std::fs::read_dir(&dev).unwrap() {
+        let f = f.unwrap().path();
+        std::fs::copy(&f, planted.join(f.file_name().unwrap())).unwrap();
+    }
+    let manifest = std::fs::read_to_string(planted.join("manifest.json")).unwrap();
+    std::fs::write(
+        planted.join("manifest.json"),
+        manifest.replace("dev-untrained", "project-planted"),
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("customs.toml"),
+        format!(
+            "mode = \"monitor\"\nallow = [\"pypi:goodpkg\", \"npm:left-padd\"]\n{}",
+            upstream_toml(&mock.base)
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("left-padd-1.0.0.tgz"),
+        npm_tgz(&[(
+            "package/package.json",
+            r#"{"name":"left-padd","version":"1.0.0"}"#,
+        )]),
+    )
+    .unwrap();
+    let server = dead_server();
+    let run = {
+        let (data, project) = (data.clone(), project.clone());
+        move |args: &[&str], keep_models: bool, stdin: &str| {
+            use std::io::Write;
+            use std::process::Stdio;
+            let mut c = customs_cmd(&data, None);
+            if !keep_models {
+                c.env_remove("CUSTOMS_MODELS");
+            }
+            let mut child = c
+                .args(args)
+                .current_dir(&project)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(stdin.as_bytes())
+                .unwrap();
+            let o = child.wait_with_output().unwrap();
+            (
+                String::from_utf8_lossy(&o.stdout).into_owned(),
+                String::from_utf8_lossy(&o.stderr).into_owned(),
+                o.status.code().unwrap_or(-1),
+            )
+        }
+    };
+    let hook_input = json!({
+        "session_id": "t",
+        "cwd": project,
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"command": "pip install goodpkg==1.0.0"},
+    })
+    .to_string();
+    let srv = server.clone();
+    let (checked, scanned, hooked, malformed) = tokio::task::spawn_blocking(move || {
+        let checked = run(
+            &[
+                "check",
+                "pypi",
+                "goodpkg==1.0.0",
+                "--json",
+                "--server",
+                &srv,
+            ],
+            false,
+            "",
+        );
+        let scanned = run(
+            &[
+                "scan",
+                "left-padd-1.0.0.tgz",
+                "--name",
+                "left-padd",
+                "--json",
+            ],
+            true,
+            "",
+        );
+        let hooked = run(
+            &["hook", "claude-code", "--server", &srv],
+            false,
+            &hook_input,
+        );
+        // A malformed project file must not make the hook fail open either.
+        std::fs::write(project.join("customs.toml"), "mode = \"off\"\n[[[").unwrap();
+        let malformed = run(
+            &["hook", "claude-code", "--server", &srv],
+            false,
+            &hook_input,
+        );
+        (checked, scanned, hooked, malformed)
+    })
+    .await
+    .unwrap();
+
+    let (out, err, code) = &checked;
+    assert_eq!(*code, 3, "{out}{err}");
+    let v: Value = serde_json::from_str(out).unwrap();
+    assert_eq!(v["decision"], "block", "{v}");
+    assert_eq!(v["mode"], "enforce", "{v}");
+    assert_ne!(v["model_version"], "project-planted", "{v}");
+    let (out, err, code) = &scanned;
+    assert_eq!(*code, 3, "{out}{err}");
+    let v: Value = serde_json::from_str(out).unwrap();
+    assert!(rules_of(&v).contains(&"deny".to_string()), "{v}");
+    for (out, err, code) in [&hooked, &malformed] {
+        assert_eq!(*code, 0, "{err}");
+        let d: Value = serde_json::from_str(out.trim()).unwrap_or_else(|_| panic!("{out:?} {err}"));
+        assert_eq!(d["hookSpecificOutput"]["permissionDecision"], "deny", "{d}");
+    }
+}

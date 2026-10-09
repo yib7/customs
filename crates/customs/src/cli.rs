@@ -10,7 +10,7 @@ use customs_model::Decision;
 use customs_scan::Ecosystem;
 
 use crate::audit::{AuditOptions, FailOn, Format};
-use crate::client::{Checker, LocalOptions};
+use crate::client::{default_client_data_dir, Checker, LocalOptions};
 use crate::config::resolve_policy;
 use crate::engine::{default_scanner, load_models, Engine, EngineConfig, Limits};
 use crate::hook::{run_agent, run_claude_code, Agent, HookOptions};
@@ -75,7 +75,8 @@ pub struct ServeArgs {
     /// Dashboard directory. Default: ./web/dist, then paths relative to the executable.
     #[arg(long, env = "CUSTOMS_UI_DIR")]
     pub ui_dir: Option<PathBuf>,
-    /// Model directory (falls back to its dev/ placeholders).
+    /// Model directory (falls back to its dev/ placeholders). Default: ./models, then paths
+    /// relative to the executable.
     #[arg(long, env = "CUSTOMS_MODELS")]
     pub models: Option<PathBuf>,
     /// Artifact cache size cap in MiB; least recently used archives are removed past it.
@@ -128,10 +129,12 @@ pub enum NotifyOnArg {
 
 #[derive(Debug, Args, Clone)]
 pub struct LocalArgs {
-    /// Policy file for in-process checks.
+    /// Policy file for in-process checks (default: <data-dir>/policy.toml; a project's
+    /// customs.toml is never read).
     #[arg(long)]
     pub config: Option<PathBuf>,
-    /// Model directory for in-process checks.
+    /// Model directory for in-process checks (default: paths relative to the executable; a
+    /// project's models/ is never read).
     #[arg(long, env = "CUSTOMS_MODELS")]
     pub models: Option<PathBuf>,
     /// Cache and database directory for in-process checks (default: ~/.cache/customs).
@@ -410,14 +413,16 @@ async fn serve(a: ServeArgs) -> anyhow::Result<()> {
     // Settings that need no engine are checked first, so a typo fails fast.
     let ui = find_ui_dir(a.ui_dir.as_deref())?;
     let admin_token = admin_token(a.admin_token, a.admin_token_file)?;
-    let (policy, source) =
-        resolve_policy(a.config.as_deref(), &a.data_dir).map_err(|e| anyhow::anyhow!("{e}"))?;
+    // The operator starts the server, so its working directory may hold the configuration.
+    let here = Some(Path::new("."));
+    let (policy, source) = resolve_policy(a.config.as_deref(), &a.data_dir, here)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     if source.loaded {
         tracing::info!(path = %source.path.display(), mode = policy.mode.as_str(), "loaded policy");
     } else {
         tracing::info!(save_to = %source.path.display(), "no policy file; using defaults");
     }
-    let models = load_models(a.models.as_deref())?;
+    let models = load_models(a.models.as_deref(), here)?;
     let engine = Engine::new(EngineConfig {
         data_dir: a.data_dir.clone(),
         models,
@@ -607,6 +612,7 @@ fn scan(a: ScanArgs) -> anyhow::Result<i32> {
         a.name.as_deref(),
         a.config.as_deref(),
         a.models.as_deref(),
+        None,
     )?;
     if a.json {
         println!("{}", serde_json::to_string_pretty(&v)?);
@@ -617,13 +623,16 @@ fn scan(a: ScanArgs) -> anyhow::Result<i32> {
 }
 
 /// Scan a local archive offline (`customs scan`, the MCP `scan_archive` tool). The
-/// ecosystem is guessed from the file name when not given.
+/// ecosystem is guessed from the file name when not given. The policy is `config`, else
+/// `<data_dir>/policy.toml` (default: the client data directory), as for in-process checks:
+/// never the working directory's `customs.toml` or `models/`.
 pub fn scan_file(
     archive: &Path,
     eco: Option<Ecosystem>,
     name: Option<&str>,
     config: Option<&Path>,
     models: Option<&Path>,
+    data_dir: Option<&Path>,
 ) -> anyhow::Result<Verdict> {
     static SCANS: AtomicU64 = AtomicU64::new(0);
     let bytes = std::fs::read(archive)
@@ -652,10 +661,12 @@ pub fn scan_file(
         std::process::id(),
         SCANS.fetch_add(1, Ordering::Relaxed)
     )));
-    let (policy, source) = resolve_policy(config, &tmp.0).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let policy_dir = data_dir.map_or_else(default_client_data_dir, Path::to_path_buf);
+    let (policy, source) =
+        resolve_policy(config, &policy_dir, None).map_err(|e| anyhow::anyhow!("{e}"))?;
     let engine = Engine::new(EngineConfig {
         data_dir: tmp.0.clone(),
-        models: load_models(models)?,
+        models: load_models(models, None)?,
         policy,
         policy_path: source.path,
         scanner: default_scanner(),

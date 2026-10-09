@@ -581,12 +581,18 @@ pub struct PolicySource {
     pub loaded: bool,
 }
 
-/// Resolve the policy file: an explicit `--config` must exist; otherwise `./customs.toml`,
-/// then `<data_dir>/policy.toml`, and if neither exists the defaults are used and later
-/// edits are saved to `<data_dir>/policy.toml`.
+/// Resolve the policy file: an explicit `--config` must exist; otherwise
+/// `<project_dir>/customs.toml` (only when a project directory is given), then
+/// `<data_dir>/policy.toml`, and if neither exists the defaults are used and later edits
+/// are saved to `<data_dir>/policy.toml`.
+///
+/// `serve` passes its working directory, which the operator chose. Client-side checks (the
+/// hook, `check`, `diff`, `audit`, `mcp`, `scan`) pass `None`: they run in the agent's
+/// project, which must not choose the policy that judges it.
 pub fn resolve_policy(
     explicit: Option<&Path>,
     data_dir: &Path,
+    project_dir: Option<&Path>,
 ) -> Result<(Policy, PolicySource), ConfigError> {
     if let Some(p) = explicit {
         let policy = Policy::load(p)?;
@@ -598,7 +604,11 @@ pub fn resolve_policy(
             },
         ));
     }
-    for candidate in [PathBuf::from("customs.toml"), data_dir.join("policy.toml")] {
+    let candidates = project_dir
+        .map(|d| d.join("customs.toml"))
+        .into_iter()
+        .chain([data_dir.join("policy.toml")]);
+    for candidate in candidates {
         if candidate.exists() {
             let policy = Policy::load(&candidate)?;
             return Ok((
@@ -762,6 +772,30 @@ npm = "https://registry.npmjs.org"
     fn example_policy_is_the_default() {
         let p = Policy::from_toml(include_str!("../../../deploy/customs.toml")).unwrap();
         assert_eq!(p, Policy::default());
+    }
+
+    #[test]
+    fn client_resolution_skips_project_dir() {
+        let project = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        std::fs::write(project.path().join("customs.toml"), "mode = \"monitor\"").unwrap();
+        // A client (no project dir) gets the defaults, to be saved in the data dir.
+        let (p, src) = resolve_policy(None, data.path(), None).unwrap();
+        assert_eq!(p, Policy::default());
+        assert_eq!(src.path, data.path().join("policy.toml"));
+        assert!(!src.loaded);
+        // `serve` reads the project file first.
+        let (p, src) = resolve_policy(None, data.path(), Some(project.path())).unwrap();
+        assert_eq!(p.mode, Mode::Monitor);
+        assert_eq!(src.path, project.path().join("customs.toml"));
+        // The client reads its own data dir's policy.
+        std::fs::write(data.path().join("policy.toml"), "min_age_days = 9").unwrap();
+        let (p, src) = resolve_policy(None, data.path(), None).unwrap();
+        assert_eq!((p.mode, p.min_age_days), (Mode::Enforce, 9));
+        assert!(src.loaded);
+        // A malformed project file cannot break a client either.
+        std::fs::write(project.path().join("customs.toml"), "[[[").unwrap();
+        assert!(resolve_policy(None, data.path(), None).is_ok());
     }
 
     #[test]

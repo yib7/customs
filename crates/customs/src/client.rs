@@ -43,11 +43,13 @@ pub fn local_engine(opts: &LocalOptions) -> anyhow::Result<Arc<Engine>> {
         .data_dir
         .clone()
         .unwrap_or_else(default_client_data_dir);
-    let (policy, source) =
-        resolve_policy(opts.config.as_deref(), &data_dir).map_err(|e| anyhow::anyhow!("{e}"))?;
+    // No project directory: the hook, CLI and MCP server run in the agent's project, whose
+    // `customs.toml` and `models/` must not choose how it is judged.
+    let (policy, source) = resolve_policy(opts.config.as_deref(), &data_dir, None)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     Engine::new(EngineConfig {
         data_dir,
-        models: load_models(opts.models.as_deref())?,
+        models: load_models(opts.models.as_deref(), None)?,
         policy,
         policy_path: source.path,
         scanner: default_scanner(),

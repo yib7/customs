@@ -948,7 +948,12 @@ beats allow; allow overrides the model and the other rules. `block_nonexistent =
 turns nonexistent names into warnings. Unknown keys and bad values are rejected with the
 key that holds them. Without `--config`, the server reads `./customs.toml`, then
 `<data-dir>/policy.toml`, and `PUT /api/policy` writes to the file it read (or
-`<data-dir>/policy.toml`).
+`<data-dir>/policy.toml`). Client mode (the hooks, `check`, `diff`, `audit`, `mcp`, `scan`)
+never reads the working directory, which is the agent's project and may be hostile: its
+policy is `--config`, else `<data-dir>/policy.toml` of the client data directory, else the
+defaults, and its models are `--models`/`CUSTOMS_MODELS`, else the paths relative to the
+binary (`./models` counts for `serve` only). An installed binary finds no models next to
+it unless they were installed to `<prefix>/share/customs/models`; set `CUSTOMS_MODELS`.
 
 **Established releases.** The classifier has false positives on popular packages that look
 like malware for ordinary reasons: the `requests` sdist has test fixtures full of raw IP

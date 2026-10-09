@@ -1294,39 +1294,51 @@ pub fn choose_file(eco: Ecosystem, files: &[FileMeta]) -> Option<&FileMeta> {
     }
 }
 
-/// Find a model directory: an explicit path (or its `dev/` subdirectory), then
-/// `CUSTOMS_MODELS`, `./models`, and paths relative to the executable. Real models in a
-/// directory win over its `dev/` placeholders.
-pub fn find_models_dir(explicit: Option<&Path>) -> Option<PathBuf> {
-    let mut roots: Vec<PathBuf> = Vec::new();
+/// The directories [`find_models_dir`] tries, in order: an explicit path, else
+/// `CUSTOMS_MODELS`, `<project_dir>/models` (only for `serve`; see
+/// [`crate::config::resolve_policy`]), and paths relative to the executable.
+fn model_roots(
+    explicit: Option<&Path>,
+    project_dir: Option<&Path>,
+    env_models: Option<PathBuf>,
+    exe: Option<&Path>,
+) -> Vec<PathBuf> {
     if let Some(p) = explicit {
-        roots.push(p.to_path_buf());
-    } else {
-        if let Ok(p) = std::env::var("CUSTOMS_MODELS") {
-            roots.push(PathBuf::from(p));
-        }
-        roots.push(PathBuf::from("models"));
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(dir) = exe.parent() {
-                // target/{debug,release}/customs in a checkout, or <prefix>/bin/customs.
-                roots.push(dir.join("../../models"));
-                roots.push(dir.join("../share/customs/models"));
-            }
-        }
+        return vec![p.to_path_buf()];
     }
-    for root in roots {
-        for dir in [root.clone(), root.join("dev")] {
-            if dir.join("manifest.json").is_file() {
-                return Some(dir);
-            }
-        }
+    let mut roots: Vec<PathBuf> = env_models.into_iter().collect();
+    roots.extend(project_dir.map(|d| d.join("models")));
+    if let Some(dir) = exe.and_then(Path::parent) {
+        // target/{debug,release}/customs in a checkout, or <prefix>/bin/customs.
+        roots.push(dir.join("../../models"));
+        roots.push(dir.join("../share/customs/models"));
     }
-    None
+    roots
+}
+
+/// Find a model directory among [`model_roots`] (each, or its `dev/` subdirectory). Real
+/// models in a directory win over its `dev/` placeholders.
+pub fn find_models_dir(explicit: Option<&Path>, project_dir: Option<&Path>) -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok();
+    let env_models = std::env::var_os("CUSTOMS_MODELS").map(PathBuf::from);
+    first_models_dir(&model_roots(
+        explicit,
+        project_dir,
+        env_models,
+        exe.as_deref(),
+    ))
+}
+
+fn first_models_dir(roots: &[PathBuf]) -> Option<PathBuf> {
+    roots
+        .iter()
+        .flat_map(|root| [root.clone(), root.join("dev")])
+        .find(|dir| dir.join("manifest.json").is_file())
 }
 
 /// Load models from [`find_models_dir`]; with nothing found, run policy-only.
-pub fn load_models(explicit: Option<&Path>) -> anyhow::Result<Models> {
-    match find_models_dir(explicit) {
+pub fn load_models(explicit: Option<&Path>, project_dir: Option<&Path>) -> anyhow::Result<Models> {
+    match find_models_dir(explicit, project_dir) {
         Some(dir) => {
             let m = Models::load(&dir)
                 .map_err(|e| anyhow::anyhow!("loading models from {}: {e}", dir.display()))?;
@@ -1350,6 +1362,32 @@ pub fn load_models(explicit: Option<&Path>) -> anyhow::Result<Models> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn find_models_dir_without_project_dir_ignores_models() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project.path().join("models")).unwrap();
+        std::fs::write(project.path().join("models/manifest.json"), "{}").unwrap();
+        let exe = Path::new("/opt/customs/bin/customs");
+        let roots = model_roots(None, None, None, Some(exe));
+        assert!(
+            roots.iter().all(|r| !r.starts_with(project.path())),
+            "{roots:?}"
+        );
+        assert_eq!(first_models_dir(&roots), None);
+        // `serve` looks in its working directory, after CUSTOMS_MODELS.
+        let roots = model_roots(None, Some(project.path()), None, Some(exe));
+        assert_eq!(
+            first_models_dir(&roots),
+            Some(project.path().join("models"))
+        );
+        let env = PathBuf::from("/env/models");
+        let roots = model_roots(None, Some(project.path()), Some(env.clone()), None);
+        assert_eq!(roots[0], env);
+        // An explicit directory is the only one tried.
+        let roots = model_roots(Some(Path::new("/x")), Some(project.path()), Some(env), None);
+        assert_eq!(roots, vec![PathBuf::from("/x")]);
+    }
 
     fn f(name: &str, kind: &str, size: u64) -> FileMeta {
         FileMeta {
