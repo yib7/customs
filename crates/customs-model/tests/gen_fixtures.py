@@ -155,10 +155,18 @@ NUMERIC_FEATURES = ["len", "n_digits", "n_hyphens", "n_underscores", "n_dots", "
 MAX_DISTANCE = 4
 
 
+# Unicode White_Space, what Rust's str::trim strips (Python's str.strip also strips \x1c-\x1f).
+RUST_WHITESPACE = (
+    "\t\n\x0b\x0c\r \x85\xa0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008"
+    "\u2009\u200a\u2028\u2029\u202f\u205f\u3000"
+)
+
+
 def normalize(eco, name):
-    name = name.strip()
+    # As in name.rs: PyPI lowercases per character (no final-sigma rule), npm per string.
+    name = name.strip(RUST_WHITESPACE)
     if eco == "pypi":
-        return re.sub(r"[-_.]+", "-", name.lower())
+        return "".join(c.lower() for c in re.sub(r"[-_.]+", "-", name))
     return name.lower()
 
 
