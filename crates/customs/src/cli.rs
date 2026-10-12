@@ -141,7 +141,8 @@ pub struct LocalArgs {
     /// project's models/ is never read).
     #[arg(long, env = "CUSTOMS_MODELS")]
     pub models: Option<PathBuf>,
-    /// Cache and database directory for in-process checks (default: ~/.cache/customs).
+    /// Cache and database directory for in-process checks (default: ~/.cache/customs, or
+    /// %LOCALAPPDATA%\customs on Windows without HOME).
     #[arg(long)]
     pub data_dir: Option<PathBuf>,
 }

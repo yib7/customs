@@ -26,14 +26,29 @@ pub struct LocalOptions {
 /// Default data directory for client-side (hook, CLI) in-process checks: a user cache
 /// directory, so running the hook inside a project does not litter it.
 pub fn default_client_data_dir() -> PathBuf {
-    if let Ok(d) = std::env::var("CUSTOMS_DATA_DIR") {
-        return PathBuf::from(d);
+    client_data_dir_from(|k| std::env::var(k).ok())
+}
+
+/// [`default_client_data_dir`] with the environment read through `env`: `CUSTOMS_DATA_DIR`,
+/// else `$XDG_CACHE_HOME/customs`, `~/.cache/customs`, and on native Windows (no `HOME`)
+/// `%LOCALAPPDATA%\customs` or `%USERPROFILE%\.cache\customs`. The temp directory, which
+/// the OS may empty, is the last resort.
+fn client_data_dir_from(env: impl Fn(&str) -> Option<String>) -> PathBuf {
+    let var = |k: &str| env(k).filter(|v| !v.is_empty()).map(PathBuf::from);
+    if let Some(d) = var("CUSTOMS_DATA_DIR") {
+        return d;
     }
-    if let Ok(d) = std::env::var("XDG_CACHE_HOME") {
-        return PathBuf::from(d).join("customs");
+    if let Some(d) = var("XDG_CACHE_HOME") {
+        return d.join("customs");
     }
-    if let Ok(h) = std::env::var("HOME") {
-        return PathBuf::from(h).join(".cache").join("customs");
+    if let Some(h) = var("HOME") {
+        return h.join(".cache").join("customs");
+    }
+    if let Some(d) = var("LOCALAPPDATA") {
+        return d.join("customs");
+    }
+    if let Some(h) = var("USERPROFILE") {
+        return h.join(".cache").join("customs");
     }
     std::env::temp_dir().join("customs")
 }
@@ -293,6 +308,38 @@ impl Checker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn client_data_dir_prefers_a_lasting_user_directory() {
+        let dir = |pairs: &'static [(&'static str, &'static str)]| {
+            client_data_dir_from(|k| {
+                pairs
+                    .iter()
+                    .find(|(n, _)| *n == k)
+                    .map(|(_, v)| v.to_string())
+            })
+        };
+        assert_eq!(
+            dir(&[("CUSTOMS_DATA_DIR", "/d"), ("HOME", "/h")]),
+            PathBuf::from("/d")
+        );
+        assert_eq!(
+            dir(&[("XDG_CACHE_HOME", "/x"), ("HOME", "/h")]),
+            PathBuf::from("/x/customs")
+        );
+        assert_eq!(dir(&[("HOME", "/h")]), PathBuf::from("/h/.cache/customs"));
+        // Native Windows has no HOME: not %TEMP%, which Storage Sense empties.
+        let win = &[
+            ("LOCALAPPDATA", "C:/Users/u/AppData/Local"),
+            ("USERPROFILE", "C:/Users/u"),
+        ];
+        assert_eq!(dir(win), PathBuf::from("C:/Users/u/AppData/Local/customs"));
+        assert_eq!(
+            dir(&[("USERPROFILE", "C:/Users/u")]),
+            PathBuf::from("C:/Users/u/.cache/customs")
+        );
+        assert_eq!(dir(&[("HOME", "")]), std::env::temp_dir().join("customs"));
+    }
 
     #[test]
     fn routing_follows_customs_env() {
