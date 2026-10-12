@@ -658,7 +658,9 @@ instead (`weight_set` `"partial:<missing>"`); the equal-weight stacker used when
 `ensemble.json` is shipped does this. The shipped ensemble has fallbacks for a missing CNN,
 a missing name, or both, so a package that was not scanned (nonexistent, above the size
 limits, or rejected by the scanner) has no model risk and is judged by the policy rules. `risk = calibrate(sigmoid(z))`;
-`risk >= block` blocks, `risk >= warn` warns. Verdict `scores` are per-component
+`risk >= block` blocks, `risk >= warn` warns; a non-finite `z` or risk fails closed
+(risk 1, `weight_set` `"non_finite:<set>"`), and name n-gram weights must be finite to load.
+Verdict `scores` are per-component
 probabilities: the gbdt calibrated probability, sigmoid of the CNN and name logits.
 
 `metrics.json`: the evaluation summary served by `/api/model` (section 7).

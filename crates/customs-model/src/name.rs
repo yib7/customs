@@ -543,6 +543,18 @@ enum F32Vec {
 
 impl F32Vec {
     fn decode(&self, what: &str) -> Result<Vec<f64>, ModelError> {
+        let v = self.decode_raw(what)?;
+        // A NaN weight makes the logit and the risk NaN, which no threshold catches.
+        if let Some(i) = v.iter().position(|x| !x.is_finite()) {
+            return Err(ModelError::invalid(
+                WHAT,
+                format!("{what}[{i}] is not finite"),
+            ));
+        }
+        Ok(v)
+    }
+
+    fn decode_raw(&self, what: &str) -> Result<Vec<f64>, ModelError> {
         match self {
             F32Vec::List(v) => Ok(v.clone()),
             F32Vec::Str(data) | F32Vec::B64 { data } => {
@@ -975,6 +987,26 @@ mod tests {
                 .map(|(d, r)| (d, Some(names[r].as_str())))
                 .unwrap_or((5, None));
             assert_eq!(got, expect, "{q}");
+        }
+    }
+
+    #[test]
+    fn rejects_non_finite_ngram_weights() {
+        // A NaN weight would make the logit, and then the risk, NaN, which reads as Allow.
+        let model = |weights: [f32; 2]| {
+            let bytes: Vec<u8> = weights.iter().flat_map(|w| w.to_le_bytes()).collect();
+            let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+            format!(
+                r#"{{"numeric_features": [], "max_distance": 2, "ngram_min": 1, "ngram_max": 2,
+                    "n_buckets": 2, "ecosystems": {{"pypi": {{"popular": "p.txt", "mean": [],
+                    "std": [], "numeric_weights": [], "ngram_weights": "{b64}", "bias": 0.0}}}}}}"#
+            )
+        };
+        let load = |w| NameModel::from_json(&model(w), |_| Ok("requests\n".to_string()));
+        assert!(load([0.5, -0.25]).is_ok());
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let err = load([0.5, bad]).unwrap_err().to_string();
+            assert!(err.contains("ngram_weights"), "{err}");
         }
     }
 }

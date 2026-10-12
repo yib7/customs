@@ -118,7 +118,8 @@ pub struct EnsembleOutput {
     pub risk: f64,
     /// Which weights were used: `"primary"`, `"missing:<components>"` for a fallback entry,
     /// or `"partial:<components>"` when no fallback matched and the file opted in to
-    /// applying the primary weights to the components that ran.
+    /// applying the primary weights to the components that ran. Prefixed `"non_finite:"`
+    /// when `z` or the risk was not finite; the risk is then 1.
     pub weight_set: String,
 }
 
@@ -291,6 +292,16 @@ impl Ensemble {
         }
         let raw = sigmoid(z);
         let risk = ws.calibration.map(|c| c.apply(raw)).unwrap_or(raw);
+        if !(z.is_finite() && risk.is_finite()) {
+            // A broken component must not read as "no risk": a NaN would decide Allow and
+            // be stored as `null`. Fail closed.
+            return Some(EnsembleOutput {
+                z,
+                raw,
+                risk: 1.0,
+                weight_set: format!("non_finite:{}", ws.label),
+            });
+        }
         Some(EnsembleOutput {
             z,
             raw,
@@ -300,9 +311,10 @@ impl Ensemble {
     }
 }
 
-/// Map a risk to a decision with inclusive thresholds (`risk >= block` blocks).
+/// Map a risk to a decision with inclusive thresholds (`risk >= block` blocks). A NaN
+/// risk blocks: it can only come from a broken model.
 pub fn decide(risk: f64, warn: f64, block: f64) -> Decision {
-    if risk >= block {
+    if risk.is_nan() || risk >= block {
         Decision::Block
     } else if risk >= warn {
         Decision::Warn
@@ -407,6 +419,36 @@ mod tests {
         assert_eq!(decide(0.9, 0.5, 0.9), Decision::Block);
         assert_eq!(decide(0.6, 0.5, 0.9), Decision::Warn);
         assert_eq!(decide(0.1, 0.5, 0.9), Decision::Allow);
+    }
+
+    #[test]
+    fn decide_nan_blocks() {
+        assert_eq!(decide(f64::NAN, 0.5, 0.9), Decision::Block);
+    }
+
+    #[test]
+    fn non_finite_logit_fails_closed() {
+        // No clip, so a NaN or infinite logit reaches z unbounded.
+        let e = ens();
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let l = Logits {
+                code_gbdt: Some(1.0),
+                code_nn: None,
+                name: Some(bad),
+            };
+            let o = e.combine(&l).unwrap();
+            assert_eq!(o.risk, 1.0, "{bad}");
+            assert_eq!(o.weight_set, "non_finite:missing:code_nn");
+            assert_eq!(decide(o.risk, 0.5, 0.9), Decision::Block);
+        }
+        // Infinity times a zero weight is NaN too.
+        let mut u = Ensemble::unweighted();
+        u.weights.insert("name".into(), 0.0);
+        let l = Logits {
+            name: Some(f64::INFINITY),
+            ..Default::default()
+        };
+        assert_eq!(u.combine(&l).unwrap().risk, 1.0);
     }
 
     #[test]
