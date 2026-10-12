@@ -284,17 +284,20 @@ impl Models {
                 });
             }
         }
+        let mut lookalike = None;
         if let Some(ns) = &name {
             let w = self.ensemble.weight_for(&logits, "name") * self.ensemble.clip_scale(ns.logit);
-            // Prefer the human explanation (edit distance to a popular name, typo, scope)
-            // when the name model leans malicious; otherwise report its largest term.
+            // The human explanation (edit distance to a popular name, typo, scope) is always
+            // shown with its true stacked contribution, which may be zero or negative: it is
+            // what names the package a typosquat imitates, whatever weight the stacker gives
+            // the name model (the shipped one gives it about none). Otherwise report the
+            // name model's largest term when it raised the risk.
             let explained = ns
                 .explanation
                 .as_ref()
-                .zip(ns.features.explanation_feature())
-                .filter(|_| w * ns.logit > 0.0);
+                .zip(ns.features.explanation_feature());
             if let Some((text, (feat, value))) = explained {
-                reasons.push(Reason {
+                lookalike = Some(Reason {
                     feature: format!("name_{feat}"),
                     value: Some(value),
                     contribution: w * ns.logit,
@@ -316,12 +319,18 @@ impl Models {
                 }
             }
         }
-        reasons.sort_by(|a, b| {
+        let by_contribution = |a: &Reason, b: &Reason| {
             b.contribution
                 .partial_cmp(&a.contribution)
                 .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        reasons.truncate(6);
+        };
+        reasons.sort_by(by_contribution);
+        // Six reasons at most, and the lookalike explanation always keeps its place.
+        reasons.truncate(if lookalike.is_some() { 5 } else { 6 });
+        if let Some(r) = lookalike {
+            let at = reasons.partition_point(|x| by_contribution(x, &r).is_le());
+            reasons.insert(at, r);
+        }
 
         Assessment {
             risk,

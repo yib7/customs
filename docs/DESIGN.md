@@ -700,7 +700,9 @@ rules of section 8 (`provenance_dropped`, `install_script_added`, `publisher_cha
 block by default), `not_scanned`
 (archive above the scan size limit).
 `reasons` mix model features (positive contributions to the stacked logit, largest first)
-and name signals (`name_dist1`, `name_contains_popular_token`, ...). In `monitor` mode the
+and name signals (`name_dist1`, `name_contains_popular_token`, ...). A name signal that
+explains a lookalike ("1 edit from popular package 'requests'") is always listed, with its
+true stacked contribution, which can be zero or negative. In `monitor` mode the
 proxy records the verdict and serves the artifact anyway (`mode` says which applied).
 
 ## 7. HTTP interface of `customs serve`

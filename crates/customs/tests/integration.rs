@@ -784,6 +784,8 @@ async fn raw_reason_phrase_names_the_rule() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn typosquat_name_is_warned_but_served() {
+    // The warn comes from the dev models' name weight (1.0). The shipped ensemble gives the
+    // name model about no weight, so with it the name alone does not warn.
     let h = Harness::start(|_| {}).await;
     let r = h.get(&pypi_file_path("reqeusts", "2.0.0")).await;
     assert_eq!(r.status(), 200);

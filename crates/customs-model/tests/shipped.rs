@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use customs_model::Models;
+use customs_model::{Decision, Models, ScoreInput};
 use customs_scan::Ecosystem;
 use serde_json::Value;
 
@@ -111,4 +111,30 @@ fn popular_rank_reads_the_shipped_lists() {
         Models::empty().popular_rank(Ecosystem::Pypi, "requests"),
         None
     );
+}
+
+#[test]
+fn a_name_alone_gets_no_model_risk_but_keeps_the_nearest_popular_name() {
+    let Some(models) = shipped() else {
+        return;
+    };
+    // The shipped ensemble fits no weights for a name without code, so a package that was
+    // not scanned (nonexistent, or above the size limits) has no model risk...
+    let a = models.assess(&ScoreInput {
+        ecosystem: Ecosystem::Pypi,
+        name: Some("reqeusts"),
+        features: None,
+        tokens: None,
+    });
+    assert!(a.name.is_some());
+    assert_eq!(a.risk, None);
+    assert_eq!(a.decision, Decision::Allow);
+    // ...but the verdict still names the package it imitates.
+    let r = a
+        .reasons
+        .iter()
+        .find(|r| r.feature == "name_dist1")
+        .expect("nearest popular name reason");
+    assert!(r.label.contains("'requests'"), "{}", r.label);
+    assert!(r.contribution >= 0.0);
 }

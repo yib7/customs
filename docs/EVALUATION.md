@@ -150,7 +150,7 @@ Logistic regression on name structure, typosquat distance to the 5,000 most popu
 | pypi | 14,463 | 0.946 | 0.958 |
 | npm | 192,090 | 0.980 | 0.983 |
 
-The name model's job is the pre-download check (typosquats and names an agent hallucinated), before any archive exists to scan. Once the archive is scanned it adds nothing: its stacking weight is near zero. An earlier run gave it a clearly positive weight; that turned out to be a leak (the source dataset spells scoped npm names `@scope@name`, a form no benign name has), found by the end-to-end replay and fixed.
+The name model was meant for the pre-download check (typosquats and names an agent hallucinated), before any archive exists to scan, but the shipped ensemble does not use it there: its stacking weight is about zero (slightly negative), no weight set was fitted for a name scored alone, so a package that was not scanned gets no model risk. Typosquats and hallucinated names are caught by the policy rules (`block_nonexistent`, `min_age_days`, the deny list), and the verdict names the popular package a lookalike imitates. Once the archive is scanned the name model adds nothing either. An earlier run gave it a clearly positive weight; that turned out to be a leak (the source dataset spells scoped npm names `@scope@name`, a form no benign name has), found by the end-to-end replay and fixed.
 
 ## End to end through the Rust firewall
 

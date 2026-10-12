@@ -16,7 +16,9 @@ const SUMMARY: Record<Verdict['decision'], string> = {
 
 function HowToProceed({ v, level }: { v: Verdict; level: 2 | 3 }) {
   const reg = registryUrl(v.ecosystem, v.name);
-  const nameReason = v.reasons.find((r) => r.feature.startsWith('name_') && r.contribution > 0);
+  // A name reason is a lookalike explanation; its model contribution may be zero or
+  // negative (the shipped ensemble gives the name model about no weight).
+  const nameReason = v.reasons.find((r) => r.feature.startsWith('name_'));
   return (
     <Card level={level} id="next-steps" title="How to proceed">
       <div className="flex flex-col gap-4 text-sm text-ink-2">

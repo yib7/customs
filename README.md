@@ -60,7 +60,7 @@ flowchart LR
       direction TB
       R[registry proxy<br/>PyPI simple + npm] --> POL[policy engine<br/>age, nonexistent names,<br/>allow / deny]
       POL --> S[scanner<br/>safe unpack, 77 static features,<br/>install-time token stream]
-      S --> M[models<br/>gradient-boosted trees, code CNN,<br/>name model, stacked + calibrated]
+      S --> M[models<br/>gradient-boosted trees + code CNN,<br/>stacked + calibrated]
     end
     P -->|allowed archives| A
     P <-->|fetch| U[(pypi.org<br/>registry.npmjs.org)]
@@ -74,10 +74,13 @@ flowchart LR
   emits 77 features plus a normalized token stream. Training and serving call this same
   code, so there is no train/serve skew.
 * **Models** (`python/customs_ml`, inference in `crates/customs-model`): a LightGBM model over
-  the features, a 1D CNN (PyTorch) over install-time tokens, and a package-name model for
-  typosquats. A stacked, calibrated ensemble gives one risk score. All of it is exported
-  to plain JSON and evaluated in Rust (no Python or native ML runtime at serve time), with
-  parity tests pinning Rust to the Python reference.
+  the features, a 1D CNN (PyTorch) over install-time tokens, and a package-name model.
+  A stacked, calibrated ensemble gives one risk score. In the shipped models the name
+  model carries about zero weight and an unscanned package gets no model risk, so
+  typosquats and hallucinated names are caught by the policy rules (nonexistent names,
+  package age, deny list), with the nearest popular name shown in the verdict. All of it is
+  exported to plain JSON and evaluated in Rust (no Python or native ML runtime at serve
+  time), with parity tests pinning Rust to the Python reference.
 * **Firewall** (`crates/customs`): an async (tokio + axum) PyPI and npm registry proxy with a
   single-flight scan cache, a TOML policy engine, a REST + Server-Sent Events API,
   Prometheus metrics, and hooks for Claude Code, Cursor, Gemini CLI and Codex.

@@ -271,15 +271,46 @@ fn bundle_assess_parity() {
             a.ensemble.as_ref().map(|e| e.weight_set.as_str()),
             c["weight_set"].as_str()
         );
-        // Reasons are sorted, labelled, and positive.
+        // Reasons are sorted and labelled. Code reasons are positive; the name model's
+        // explanation is shown with whatever it contributed, which may be nothing.
         for w in a.reasons.windows(2) {
             assert!(w[0].contribution >= w[1].contribution);
         }
-        assert!(a
-            .reasons
-            .iter()
-            .all(|r| r.contribution > 0.0 && !r.label.is_empty()));
+        assert!(a.reasons.iter().all(|r| !r.label.is_empty()
+            && (r.feature.starts_with("name_") || r.contribution > 0.0)));
     }
+}
+
+#[test]
+fn nearest_popular_reason_survives_a_negative_name_weight() {
+    // Training can drive the name weight below zero (the shipped ensemble's is about
+    // -0.04). The stacker then lowers the risk of a lookalike name, but the verdict must
+    // still say which popular package it imitates.
+    let mut models = Models::load(fixtures().join("models")).unwrap();
+    let e = &mut models.ensemble;
+    for ws in std::iter::once(&mut e.weights).chain(e.fallbacks.iter_mut().map(|f| &mut f.weights))
+    {
+        if let Some(w) = ws.get_mut("name") {
+            *w = -0.04;
+        }
+    }
+    let cases = load("expected_assess.json");
+    let feats = features(&cases["cases"][0]["features"]);
+    let a = models.assess(&ScoreInput {
+        ecosystem: Ecosystem::Pypi,
+        name: Some("reqeusts"),
+        features: Some(&feats),
+        tokens: None,
+    });
+    assert_eq!(a.ensemble.as_ref().unwrap().weight_set, "missing:code_nn");
+    let r = a
+        .reasons
+        .iter()
+        .find(|r| r.feature == "name_dist1")
+        .expect("nearest popular name reason");
+    assert!(r.label.contains("'requests'"), "{}", r.label);
+    let w = -0.04 * models.ensemble.clip_scale(a.logits.name.unwrap());
+    assert!((r.contribution - w * a.logits.name.unwrap()).abs() < 1e-12);
 }
 
 #[test]
