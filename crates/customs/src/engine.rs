@@ -194,6 +194,8 @@ struct ScanSummary {
 }
 
 type Flight = Arc<OnceCell<Result<Outcome, EngineError>>>;
+/// A flight with the event kind and client of the caller that started it.
+type Leader = (Flight, EventKind, Option<String>);
 
 pub struct Engine {
     policy: RwLock<Arc<Policy>>,
@@ -211,7 +213,7 @@ pub struct Engine {
     policy_write: Mutex<()>,
     /// In-progress evaluations by artifact URL, with the event kind and client that started
     /// each one.
-    inflight: Mutex<HashMap<String, (Flight, EventKind, Option<String>)>>,
+    inflight: Mutex<HashMap<String, Leader>>,
     tmp_counter: AtomicU64,
     /// Bytes downloaded since the cache size was last checked.
     cache_growth: AtomicU64,

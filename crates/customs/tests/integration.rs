@@ -3238,22 +3238,23 @@ async fn check_reads_an_oversize_sdist_like_the_proxy() {
 async fn check_dates_the_file_it_scans() {
     let h = Harness::start(|_| {}).await;
     // An old release of a popular name gets an sdist today.
-    let mut x = h.mock.extra_pypi.lock().unwrap();
-    x.push(ExtraFile::new(
-        "six",
-        "1.15.0",
-        "six-1.15.0-py3-none-any.whl",
-        b"benign six wheel",
-        "2020-05-01T00:00:00.000000Z".into(),
-    ));
-    x.push(ExtraFile::new(
-        "six",
-        "1.15.0",
-        "six-1.15.0.tar.gz",
-        b"benign six sdist",
-        now_rfc3339(),
-    ));
-    drop(x);
+    {
+        let mut x = h.mock.extra_pypi.lock().unwrap();
+        x.push(ExtraFile::new(
+            "six",
+            "1.15.0",
+            "six-1.15.0-py3-none-any.whl",
+            b"benign six wheel",
+            "2020-05-01T00:00:00.000000Z".into(),
+        ));
+        x.push(ExtraFile::new(
+            "six",
+            "1.15.0",
+            "six-1.15.0.tar.gz",
+            b"benign six sdist",
+            now_rfc3339(),
+        ));
+    }
     let (s, v) = h.check("pypi", "six", Some("1.15.0")).await;
     assert_eq!(s, 200, "{v}");
     assert_eq!(v["artifact"], "six-1.15.0.tar.gz", "{v}");
@@ -3266,22 +3267,23 @@ async fn check_dates_the_file_it_scans() {
 async fn check_also_reads_the_pure_python_wheel() {
     let h = Harness::start(|_| {}).await;
     // pip installs the wheel; the payload is only there.
-    let mut x = h.mock.extra_pypi.lock().unwrap();
-    x.push(ExtraFile::new(
-        "wheelonly",
-        "1.0.0",
-        "wheelonly-1.0.0.tar.gz",
-        b"benign sdist",
-        "2020-05-01T00:00:00.000000Z".into(),
-    ));
-    x.push(ExtraFile::new(
-        "wheelonly",
-        "1.0.0",
-        "wheelonly-1.0.0-py3-none-any.whl",
-        b"EVIL wheel payload",
-        "2020-05-01T00:00:00.000000Z".into(),
-    ));
-    drop(x);
+    {
+        let mut x = h.mock.extra_pypi.lock().unwrap();
+        x.push(ExtraFile::new(
+            "wheelonly",
+            "1.0.0",
+            "wheelonly-1.0.0.tar.gz",
+            b"benign sdist",
+            "2020-05-01T00:00:00.000000Z".into(),
+        ));
+        x.push(ExtraFile::new(
+            "wheelonly",
+            "1.0.0",
+            "wheelonly-1.0.0-py3-none-any.whl",
+            b"EVIL wheel payload",
+            "2020-05-01T00:00:00.000000Z".into(),
+        ));
+    }
     let (s, v) = h.check("pypi", "wheelonly", None).await;
     assert_eq!(s, 200, "{v}");
     assert_eq!(v["decision"], "block", "{v}");
