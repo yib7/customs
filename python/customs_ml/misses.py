@@ -69,10 +69,10 @@ MAX_MEMBER = 96 << 20
 
 def _members(path: str):
     if path.endswith((".zip", ".whl")):
-        z = zipfile.ZipFile(path)
-        for i in z.infolist():
-            if not i.is_dir() and i.file_size <= MAX_MEMBER:
-                yield z.read(i)
+        with zipfile.ZipFile(path) as z:
+            for i in z.infolist():
+                if not i.is_dir() and i.file_size <= MAX_MEMBER:
+                    yield z.read(i)
         return
     with tarfile.open(path) as t:
         for m in t.getmembers():

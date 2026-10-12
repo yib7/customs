@@ -172,7 +172,7 @@ def read_tar_tree(data: bytes) -> dict[str, bytes]:
     total = 0
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:*") as tf:
         for n, m in enumerate(tf):
-            if n > MAX_ENTRIES:
+            if n >= MAX_ENTRIES:
                 raise ValueError("too many entries")
             if not m.isreg():
                 continue
