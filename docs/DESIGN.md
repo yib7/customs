@@ -894,13 +894,16 @@ served)" in monitor mode, and ends with the verdict page under `--public-url` (d
 bind address when it is a specific IP). The same ecosystem, name, version and decision is
 sent once per hour, so an agent retrying a blocked install does not flood the channel, and a
 token bucket (20 messages, refilled at 20 per minute) caps bursts; the next message sent
-counts the ones held back. Delivery has a 10 s timeout and up to two retries (after 1 s and
-4 s) on network errors, 429 and 5xx; other 4xx answers are not retried. The webhook URL's
-path is its credential, so logs name only its host. Outcomes are counted in
-`customs_notifications_total{outcome="sent|failed|repeat|rate_limited|dropped"}`.
+counts the ones held back or not delivered. Delivery has a 10 s timeout and up to two
+retries (after 1 s and 4 s) on network errors, 429 and 5xx; other 4xx answers are not
+retried. The webhook URL's path is its credential, so logs name only its host. Outcomes are
+counted in
+`customs_notifications_total{outcome="sent|failed|repeat|rate_limited|dropped|no_verdict"}`
+(`no_verdict`: the verdict could not be read back from the store).
 
 Each policy change accepted through `PUT /api/policy` is announced too, whatever
-`--notify-on` says and outside the rate limit, since switching to monitor mode or
+`--notify-on` says, outside the rate limit and without waiting for a verdict message's
+retries, since switching to monitor mode or
 allow-listing a package turns protection off for everyone using the server. The text is
 "Customs policy changed" with the address, client and whether the admin token was used,
 then one line per field (`mode: enforce -> monitor`, `allow: added npm:left-pad`), and the

@@ -3470,3 +3470,97 @@ async fn an_allowed_host_name_may_change_the_policy() {
     assert_eq!(r.status(), 200);
     h.stop().await;
 }
+
+/// A stalled or failed verdict delivery does not hold up policy-change alerts, and a
+/// message that could not be delivered is counted in the next one.
+#[tokio::test(flavor = "multi_thread")]
+async fn webhook_failures_are_counted_and_do_not_delay_policy_alerts() {
+    use customs::notify::{Format, NotifyConfig};
+    use std::sync::atomic::AtomicBool;
+    let received: Arc<Mutex<Vec<Value>>> = Arc::default();
+    let first_done = Arc::new(AtomicBool::new(false));
+    let policy_during_first = Arc::new(AtomicBool::new(false));
+    let (sink, done, during) = (
+        received.clone(),
+        first_done.clone(),
+        policy_during_first.clone(),
+    );
+    let hook = Router::new().route(
+        "/hook",
+        axum::routing::post(move |Json(v): Json<Value>| {
+            let (sink, done, during) = (sink.clone(), done.clone(), during.clone());
+            async move {
+                let first = {
+                    let mut got = sink.lock().unwrap();
+                    got.push(v.clone());
+                    v.get("event").is_some()
+                        && got.iter().filter(|m| m.get("event").is_some()).count() == 1
+                };
+                if v.get("policy_change").is_some() && !done.load(Ordering::SeqCst) {
+                    during.store(true, Ordering::SeqCst);
+                }
+                if first {
+                    // A slow receiver that then refuses (4xx: not retried).
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                    done.store(true, Ordering::SeqCst);
+                    return StatusCode::GONE;
+                }
+                StatusCode::OK
+            }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let hook_url = format!("http://{}/hook", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, hook).await.unwrap() });
+
+    let h = Harness::start(|p| p.deny = vec!["pypi:goodpkg".into()]).await;
+    customs::notify::spawn(
+        h.engine.clone(),
+        NotifyConfig {
+            url: hook_url,
+            format: Format::Json,
+            min_decision: customs_model::Decision::Block,
+            public_url: None,
+        },
+    );
+    let wait_for = |n: usize| {
+        let received = received.clone();
+        async move {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while received.lock().unwrap().len() < n && std::time::Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            received.lock().unwrap().clone()
+        }
+    };
+    let r = h.get(&pypi_file_path("goodpkg", "1.0.0")).await;
+    assert_eq!(r.status(), 403);
+    wait_for(1).await;
+    // While that delivery hangs, a policy change is announced.
+    let mut p: Value = h.get("/api/policy").await.json().await.unwrap();
+    p["min_age_days"] = json!(1);
+    let r = h
+        .http
+        .put(format!("{}/api/policy", h.base))
+        .json(&p)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let got = wait_for(2).await;
+    assert!(got[1].get("policy_change").is_some(), "{got:?}");
+    assert!(policy_during_first.load(Ordering::SeqCst));
+    // The undelivered block is counted in the next message.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !first_done.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let r = h.get(&pypi_file_path("goodpkg", "1.1.0")).await;
+    assert_eq!(r.status(), 403);
+    let got = wait_for(3).await;
+    let text = got[2]["text"].as_str().unwrap_or_default();
+    assert!(text.contains("goodpkg 1.1.0"), "{got:?}");
+    assert!(text.contains("1 earlier notification not sent"), "{text}");
+    h.stop().await;
+}
