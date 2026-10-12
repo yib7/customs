@@ -25,8 +25,8 @@ dashboard on one port.
 
 <table>
 <tr>
-<td width="50%"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/overview-dark.png"><img alt="Overview page: today's installs and checks, the block rate, decisions by ecosystem, and the live feed with a blocked package at the top" src="docs/media/overview-light.png"></picture></td>
-<td width="50%"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/verdict-dark.png"><img alt="Verdict page for a blocked malware package: the risk gauge past the block threshold, the rules and model features behind the score, and the install-time code that triggered them" src="docs/media/verdict-light.png"></picture></td>
+<td width="50%"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/overview-dark.png"><img alt="Overview page: installs scanned, blocks and possible slopsquats, blocked installs per day, decisions by ecosystem, and the live feed with pip and npm installs, a blocked npm package and two lookups of the made-up name reqeusts" src="docs/media/overview-light.png"></picture></td>
+<td width="50%"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/verdict-dark.png"><img alt="Verdict page for colors-helper-utils, an npm package that steals credentials at install time, blocked at a risk above 99.9%: the three model scores, the features behind the score, and the lines of setup.js that triggered them" src="docs/media/verdict-light.png"></picture></td>
 </tr>
 <tr>
 <td width="50%"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/check-dark.png"><img alt="Check page: the misspelled name reqeusts is blocked because it does not exist on PyPI" src="docs/media/check-light.png"></picture></td>
@@ -234,9 +234,9 @@ that terminates TLS.
 
 ## Demo
 
-![Walkthrough: pip installs requests through the proxy, customs check blocks the made-up name reqeusts, the dashboard opens a blocked malware verdict with its reasons and code, and the Claude Code hook denies an agent's pip install reqeusts](docs/media/demo.gif)
+![Walkthrough: customs serve starts the firewall; pip installs requests through the proxy; customs check blocks the made-up name reqeusts; npm is refused the credential-stealing package colors-helper-utils; the dashboard opens that verdict with its reasons and code, then the Model page; the Claude Code hook denies an agent's pip install reqeusts](docs/media/demo.gif)
 
-Recorded against a live `customs serve`.
+Recorded against a live `customs serve`. The terminals are real shell sessions with their real output and timing, recorded and rendered frame by frame. `colors-helper-utils` is the inert test package from `python/scripts/demo.sh`, served by a local stand-in for the npm registry; it was never published and its code never ran.
 
 ## How the evaluation avoids fooling itself
 

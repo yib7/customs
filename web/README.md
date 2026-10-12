@@ -32,7 +32,7 @@ npm run typecheck
 
 Playwright uses its own Chromium (`npx playwright install chromium`). Set `CUSTOMS_CHROMIUM_PATH` to use another Chromium binary. Running `npm run e2e` also refreshes the screenshots in `screenshots/` (every page, light and dark, at 1440px and 390px wide).
 
-Two scripts work against a running `customs serve` instead of the mock: `node scripts/live-screenshots.mjs [baseUrl] [outDir]` takes the screenshots in the top-level README (`docs/media/`, light and dark, real verdicts from the trained models), and `node scripts/demo-gif.mjs [baseUrl] [out.webm]` records the demo.
+Two scripts work against a running `customs serve` instead of the mock: `node scripts/live-screenshots.mjs [baseUrl] [outDir]` takes the screenshots in the top-level README (`docs/media/`, light and dark, real verdicts from the trained models), and `node scripts/demo-gif.mjs [baseUrl] [outDir]` records the dashboard part of the README demo GIF as timed PNG frames (the header of the script has the ffmpeg command that joins and encodes them).
 
 ## Mock API
 

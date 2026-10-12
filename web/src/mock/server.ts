@@ -111,7 +111,7 @@ export class MockServer {
       {
         id: 1,
         ts: new Date(now - 6 * day).toISOString(),
-        remote: '10.0.4.12',
+        remote: '192.0.2.12',
         client: 'Mozilla/5.0',
         auth: 'token',
         changes: [{ field: 'deny', before: [], after: ['npm:event-stream@3.3.6'] }],
@@ -119,7 +119,7 @@ export class MockServer {
       {
         id: 2,
         ts: new Date(now - 2 * day).toISOString(),
-        remote: '10.0.4.12',
+        remote: '192.0.2.12',
         client: 'Mozilla/5.0',
         auth: 'token',
         changes: [
