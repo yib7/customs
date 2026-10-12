@@ -197,9 +197,8 @@ impl Models {
                 .then(|| "metrics.json".to_string())
         });
         let (metrics, metrics_error) = match metrics_file.map(|f| {
-            read("metrics", &f).and_then(|t| {
-                serde_json::from_str(&t).map_err(|e| ModelError::parse("metrics", e))
-            })
+            read("metrics", &f)
+                .and_then(|t| serde_json::from_str(&t).map_err(|e| ModelError::parse("metrics", e)))
         }) {
             Some(Ok(m)) => (Some(m), None),
             Some(Err(e)) => (None, Some(e.to_string())),

@@ -276,8 +276,9 @@ fn bundle_assess_parity() {
         for w in a.reasons.windows(2) {
             assert!(w[0].contribution >= w[1].contribution);
         }
-        assert!(a.reasons.iter().all(|r| !r.label.is_empty()
-            && (r.feature.starts_with("name_") || r.contribution > 0.0)));
+        assert!(a.reasons.iter().all(
+            |r| !r.label.is_empty() && (r.feature.starts_with("name_") || r.contribution > 0.0)
+        ));
     }
 }
 
@@ -385,7 +386,11 @@ fn rejects_gbdt_feature_the_scanner_does_not_produce() {
     let dir = fixture_copy("gbdt-feature");
     let path = dir.join("code_gbdt.json");
     let text = std::fs::read_to_string(&path).unwrap();
-    std::fs::write(&path, text.replacen("\"inst_network\"", "\"inst_netwrk\"", 1)).unwrap();
+    std::fs::write(
+        &path,
+        text.replacen("\"inst_network\"", "\"inst_netwrk\"", 1),
+    )
+    .unwrap();
     let err = Models::load(&dir).unwrap_err().to_string();
     assert!(err.contains("inst_netwrk"), "{err}");
     std::fs::remove_dir_all(&dir).unwrap();
