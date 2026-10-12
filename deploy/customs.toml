@@ -24,6 +24,7 @@ unread_code = "block"
 scan_error = "block"
 startup_hook = "block"
 agent_bypass = "block"
+hidden_code = "block"
 allow = []
 deny = []
 # A release of one of the `top` most popular packages of its registry, published at least

@@ -99,8 +99,14 @@ fn rule(id: &str) -> Rule {
         ),
         "customs/startup-hook" => (
             "StartupHook",
-            "Package installs a .pth file that runs code at every Python start",
-            "A .pth file in the package launches a process, opens a connection, downloads, or reads secrets. Python executes its import lines whenever any interpreter starts, so the code keeps running long after the install.",
+            "Package installs a file that runs code at every Python start",
+            "A .pth file, sitecustomize.py or usercustomize.py in the package launches a process, opens a connection, downloads, or reads secrets. Python executes it whenever any interpreter starts, so the code keeps running long after the install.",
+            "error",
+        ),
+        "customs/hidden-code" => (
+            "HiddenInstallCode",
+            "Install-time code is hidden from the scanner's model inputs",
+            "Code that runs at install, import or interpreter start reads one way to Python or Node and another to the scanner's feature lexers: it follows a bare carriage return or a Unicode line separator, a backslash-CRLF continuation, sits inside a Python f-string field, is imported past a byte-order mark, or installs as a top-level package from a wheel's .data directory. That code launches a process, connects, downloads, runs dynamic code or reads secrets.",
             "error",
         ),
         "customs/agent-bypass" => (
@@ -183,6 +189,7 @@ fn primary_rule(v: &Verdict) -> String {
     let order = [
         "agent_bypass",
         "startup_hook",
+        "hidden_code",
         "unread_code",
         "block_install_scripts_from_new",
         "min_age_days",

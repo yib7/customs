@@ -184,6 +184,10 @@ struct ScanSummary {
     /// AI coding CLI flags that turn off permission checks, in install-time code.
     #[serde(default)]
     agent_bypass: Vec<String>,
+    /// Install-time code the interpreter runs but the scanner's feature pass did not
+    /// see (code after a bare carriage return, inside f-string fields, ...).
+    #[serde(default)]
+    hidden_code: Vec<String>,
 }
 
 type Flight = Arc<OnceCell<Result<Outcome, EngineError>>>;
@@ -646,6 +650,7 @@ impl Engine {
             unread_code: Vec::new(),
             startup_hooks: Vec::new(),
             agent_bypass: Vec::new(),
+            hidden_code: Vec::new(),
         }
     }
 
@@ -1160,9 +1165,9 @@ fn scan_hits(policy: &Policy, s: &ScanSummary) -> Vec<PolicyHit> {
             rule: "unread_code".into(),
             severity,
             detail: format!(
-                "{first}{more} could not be read by the scanner (too large, encrypted or \
-                 compressed with an unsupported method), so its code was never inspected; \
-                 installing would run it"
+                "{first}{more} could not be read by the scanner (too large, encrypted, \
+                 compressed with an unsupported method, or extracted differently by the \
+                 installer), so its code was never inspected; installing would run it"
             ),
         });
     }
@@ -1176,8 +1181,8 @@ fn scan_hits(policy: &Policy, s: &ScanSummary) -> Vec<PolicyHit> {
             rule: "startup_hook".into(),
             severity,
             detail: format!(
-                "{first}{more}: a .pth file runs this at every Python start, not only at \
-                 install"
+                "{first}{more}: Python runs this file at every interpreter start, not only \
+                 at install"
             ),
         });
     }
@@ -1193,6 +1198,20 @@ fn scan_hits(policy: &Policy, s: &ScanSummary) -> Vec<PolicyHit> {
             detail: format!(
                 "{first}{more}: install-time code runs an AI coding agent with its permission \
                  checks off"
+            ),
+        });
+    }
+    if let (Some(severity), Some(first)) = (policy.hidden_code.decision(), s.hidden_code.first()) {
+        let more = match s.hidden_code.len() {
+            1 => String::new(),
+            n => format!(" (and {} more)", n - 1),
+        };
+        hits.push(PolicyHit {
+            rule: "hidden_code".into(),
+            severity,
+            detail: format!(
+                "{first}{more}: install-time code the interpreter runs but the scanner's \
+                 model inputs leave out"
             ),
         });
     }
@@ -1233,6 +1252,7 @@ fn scan_and_score(
                 unread_code: report.unread_code,
                 startup_hooks: report.startup_hooks,
                 agent_bypass: report.agent_bypass,
+                hidden_code: report.hidden_code,
             }
         }
         Err(e) => {
@@ -1256,6 +1276,7 @@ fn scan_and_score(
                 unread_code: Vec::new(),
                 startup_hooks: Vec::new(),
                 agent_bypass: Vec::new(),
+                hidden_code: Vec::new(),
             }
         }
     }
@@ -1396,6 +1417,7 @@ mod tests {
             unread_code: unread.iter().map(|s| s.to_string()).collect(),
             startup_hooks: vec![],
             agent_bypass: vec![],
+            hidden_code: vec![],
         };
         let mut policy = Policy::default();
         assert!(scan_hits(&policy, &summary(&[])).is_empty());
@@ -1449,6 +1471,7 @@ mod tests {
             unread_code: vec![],
             startup_hooks: vec![],
             agent_bypass: vec![],
+            hidden_code: vec![],
         };
         let mut policy = Policy::default();
         assert!(scan_hits(&policy, &s).is_empty());
@@ -1485,6 +1508,7 @@ mod tests {
             unread_code: vec![],
             startup_hooks: vec![],
             agent_bypass: vec![],
+            hidden_code: vec![],
         };
         let mut policy = Policy::default();
         assert!(scan_hits(&policy, &s).is_empty());
@@ -1514,6 +1538,36 @@ mod tests {
     }
 
     #[test]
+    fn hidden_code_is_a_policy_hit() {
+        let mut s: ScanSummary = serde_json::from_value(serde_json::json!({
+            "risk": 0.1, "scores": Scores::default(), "reasons": [], "evidence": [],
+            "install_surface": [], "scan_errors": [], "install_scripts": [],
+            "scanned_ms": 1, "scanned": true,
+        }))
+        .unwrap();
+        let mut policy = Policy::default();
+        assert!(scan_hits(&policy, &s).is_empty());
+        s.hidden_code = vec![
+            "setup.py:3: proc_exec, ip_url (code after a bare carriage return)".into(),
+            "helper.py:4: proc_exec (imported by setup.py after a byte-order mark)".into(),
+        ];
+        let hits = scan_hits(&policy, &s);
+        assert_eq!(
+            (hits[0].rule.as_str(), hits[0].severity),
+            ("hidden_code", Decision::Block)
+        );
+        assert_eq!(
+            hits[0].detail,
+            "setup.py:3: proc_exec, ip_url (code after a bare carriage return) (and 1 more): \
+             install-time code the interpreter runs but the scanner's model inputs leave out"
+        );
+        policy.hidden_code = RuleSeverity::Warn;
+        assert_eq!(scan_hits(&policy, &s)[0].severity, Decision::Warn);
+        policy.hidden_code = RuleSeverity::Off;
+        assert!(scan_hits(&policy, &s).is_empty());
+    }
+
+    #[test]
     fn install_scripts_from_surface() {
         let r = ScanReport {
             schema_version: 1,
@@ -1530,6 +1584,7 @@ mod tests {
             unread_code: vec![],
             startup_hooks: vec![],
             agent_bypass: vec![],
+            hidden_code: vec![],
         };
         assert_eq!(install_scripts_from_report(&r), vec!["postinstall"]);
     }

