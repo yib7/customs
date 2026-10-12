@@ -4,7 +4,7 @@ export type ThemePref = 'system' | 'light' | 'dark';
 
 const KEY = 'customs-theme';
 
-export function readThemePref(): ThemePref {
+function readThemePref(): ThemePref {
   try {
     const v = window.localStorage.getItem(KEY);
     return v === 'light' || v === 'dark' ? v : 'system';
@@ -13,7 +13,7 @@ export function readThemePref(): ThemePref {
   }
 }
 
-export function writeThemePref(pref: ThemePref): void {
+function writeThemePref(pref: ThemePref): void {
   try {
     if (pref === 'system') window.localStorage.removeItem(KEY);
     else window.localStorage.setItem(KEY, pref);
@@ -22,7 +22,7 @@ export function writeThemePref(pref: ThemePref): void {
   }
 }
 
-export function applyThemePref(pref: ThemePref): void {
+function applyThemePref(pref: ThemePref): void {
   const root = document.documentElement;
   if (pref === 'system') root.removeAttribute('data-theme');
   else root.setAttribute('data-theme', pref);

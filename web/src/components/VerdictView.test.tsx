@@ -2,16 +2,17 @@ import { render, screen, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import { describe, expect, it } from 'vitest';
 import { parseVerdict } from '../api/parse';
+import type { EventKind } from '../api/types';
 import { BLOCKED_SCOPE_SQUAT, BLOCKED_TYPOSQUAT } from '../mock/fixtures';
 import { VerdictView } from './VerdictView';
 
 const RLO = String.fromCharCode(0x202e);
 
-function renderVerdict(raw: unknown) {
+function renderVerdict(raw: unknown, kind: EventKind | null = null) {
   const v = parseVerdict(raw);
   return render(
     <MemoryRouter>
-      <VerdictView verdict={v} thresholds={{ warn: 0.35, block: 0.8 }} />
+      <VerdictView verdict={v} thresholds={{ warn: 0.35, block: 0.8 }} kind={kind} />
     </MemoryRouter>,
   );
 }
@@ -66,5 +67,34 @@ describe('VerdictView', () => {
   it('does not link to the registry for invalid names', () => {
     renderVerdict({ ...BLOCKED_TYPOSQUAT, name: 'javascript:alert(1)' });
     expect(screen.queryByRole('link', { name: /View on PyPI/ })).toBeNull();
+  });
+
+  it('says what happened to a blocked package in each mode and context', () => {
+    const { unmount } = renderVerdict({ ...BLOCKED_TYPOSQUAT, mode: 'enforce' }, 'install');
+    expect(screen.getByText('Customs blocked this package. It was not installed.')).toBeInTheDocument();
+    unmount();
+    const monitor = renderVerdict({ ...BLOCKED_TYPOSQUAT, mode: 'monitor' }, 'install');
+    expect(screen.getByText('Would have been blocked (monitor mode). It was installed.')).toBeInTheDocument();
+    monitor.unmount();
+    renderVerdict({ ...BLOCKED_TYPOSQUAT, mode: 'enforce' }, 'check');
+    expect(screen.getByText('Customs would block this package.')).toBeInTheDocument();
+  });
+
+  it('explains how the rules combine with the model, including the lists that override it', () => {
+    const allowHit = { rule: 'allow', severity: 'allow', detail: 'on the allow list (pypi:reqeusts)' };
+    const allowed = renderVerdict({ ...BLOCKED_TYPOSQUAT, decision: 'allow', model_decision: 'block', policy_hits: [allowHit] });
+    expect(screen.getByText(/The allow list allows this package outright/)).toBeInTheDocument();
+    expect(screen.queryByText(/most severe/)).toBeNull();
+    allowed.unmount();
+    const denyHit = { rule: 'deny', severity: 'block', detail: 'on the deny list' };
+    const denied = renderVerdict({ ...BLOCKED_TYPOSQUAT, decision: 'block', model_decision: 'allow', policy_hits: [denyHit] });
+    expect(screen.getByText(/The deny list blocks this package outright/)).toBeInTheDocument();
+    denied.unmount();
+    const estHit = { rule: 'established', severity: 'allow', detail: 'popular and 400 days old' };
+    const est = renderVerdict({ ...BLOCKED_TYPOSQUAT, decision: 'allow', model_decision: 'warn', policy_hits: [estHit] });
+    expect(screen.getByText(/sets the model decision aside/)).toBeInTheDocument();
+    est.unmount();
+    renderVerdict(BLOCKED_TYPOSQUAT);
+    expect(screen.getByText(/The final decision \(block\) is the most severe of the model decision and every rule above/)).toBeInTheDocument();
   });
 });

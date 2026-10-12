@@ -1,14 +1,7 @@
 import { act, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { afterEach, describe, expect, it } from 'vitest';
-import { cleanup } from '@testing-library/react';
-import { INITIAL_POLICY } from '../mock/fixtures';
+import { describe, expect, it, vi } from 'vitest';
 import { renderApp } from '../test/render';
-
-afterEach(() => {
-  cleanup();
-  if (window.__customsMock) window.__customsMock.server.policy = structuredClone(INITIAL_POLICY);
-});
 
 describe('Policy page', () => {
   it('validates thresholds on the client before saving', async () => {
@@ -52,11 +45,10 @@ describe('Policy page', () => {
   });
 
   it('asks for the admin token when the server requires one', async () => {
-    const mock = window.__customsMock!.server;
+    const mock = renderApp('/policy').server;
     mock.adminToken = 'team-token-0123456789';
     try {
       const user = userEvent.setup();
-      renderApp('/policy');
       const age = await screen.findByRole('textbox', { name: 'Minimum age (days)' });
       await user.clear(age);
       await user.type(age, '5');
@@ -85,9 +77,15 @@ describe('Policy page', () => {
       expect(log.querySelector('li')).toHaveTextContent('with the admin token');
       expect(mock.policyChanges.filter((c) => c.changes.some((f) => f.field === 'min_age_days' && f.after === 5))).toHaveLength(1);
     } finally {
-      mock.adminToken = null;
       sessionStorage.clear();
     }
+  });
+
+  it("labels the model default with the model's own threshold, not the override", async () => {
+    const mock = renderApp('/policy');
+    mock.server.policy.block_threshold = 0.9;
+    const block = await screen.findByRole('group', { name: 'Block threshold' });
+    await waitFor(() => expect(within(block).getByText('Model default (0.80)')).toBeInTheDocument());
   });
 
   it('edits the release history rules', async () => {
@@ -147,6 +145,8 @@ describe('Check page', () => {
     await user.click(screen.getByRole('button', { name: 'Check' }));
     expect(await screen.findByTestId('verdict')).toBeInTheDocument();
     expect(screen.getByRole('heading', { level: 2, name: /reqeusts/ })).toBeInTheDocument();
+    // A check installs nothing.
+    expect(screen.getByText('Customs would block this package.')).toBeInTheDocument();
   });
 
   it('explains nonexistent packages', async () => {
@@ -155,6 +155,31 @@ describe('Check page', () => {
     await user.type(screen.getByRole('textbox', { name: 'Package name' }), 'huggingface-cli');
     await user.click(screen.getByRole('button', { name: 'Check' }));
     expect(await screen.findByTestId('nonexistent-result')).toHaveTextContent(/does not exist on PyPI/);
+  });
+
+  it('shows other 404s as errors, not as a nonexistent package', async () => {
+    const user = userEvent.setup();
+    const mock = renderApp('/check');
+    // EngineError::NotFound for a missing file or version, not a missing package.
+    vi.spyOn(mock.server, 'handle').mockReturnValue({ status: 404, body: { error: 'not found upstream' } });
+    await user.type(screen.getByRole('textbox', { name: 'Package name' }), 'requests');
+    await user.click(screen.getByRole('button', { name: 'Check' }));
+    expect(await screen.findByText('The check failed')).toBeInTheDocument();
+    expect(screen.getByText('not found upstream')).toBeInTheDocument();
+    expect(screen.queryByTestId('nonexistent-result')).toBeNull();
+  });
+
+  it('accepts version ranges and tags the check as coming from the dashboard', async () => {
+    const user = userEvent.setup();
+    const mock = renderApp('/check');
+    const handle = vi.spyOn(mock.server, 'handle');
+    await user.type(screen.getByRole('textbox', { name: 'Package name' }), 'requests');
+    await user.type(screen.getByRole('textbox', { name: /Version/ }), '>=1,<2');
+    await user.click(screen.getByRole('button', { name: 'Check' }));
+    expect(await screen.findByTestId('verdict')).toBeInTheDocument();
+    expect(screen.queryByText(/Not a valid version/)).toBeNull();
+    const call = handle.mock.calls.find(([method, url]) => method === 'POST' && url.pathname === '/api/check');
+    expect(call?.[2]).toMatchObject({ ecosystem: 'pypi', name: 'requests', version: '>=1,<2', client: 'dashboard' });
   });
 
   it('validates the package name before sending', async () => {
@@ -166,10 +191,70 @@ describe('Check page', () => {
   });
 });
 
+describe('Activity page', () => {
+  it('shows the search from the URL when navigation changes it', async () => {
+    const user = userEvent.setup();
+    renderApp('/activity?q=reqeusts');
+    const box = await screen.findByRole('searchbox', { name: 'Package name' });
+    expect(box).toHaveValue('reqeusts');
+    await user.click(screen.getAllByRole('link', { name: 'Activity' })[0] as HTMLElement);
+    await waitFor(() => expect(box).toHaveValue(''));
+    // The stale text must not be written back into the URL by the search debounce.
+    await new Promise((r) => setTimeout(r, 400));
+    expect(box).toHaveValue('');
+  });
+
+  it('keeps the page cursors across leaving and coming back', async () => {
+    const user = userEvent.setup();
+    const mock = renderApp('/activity');
+    const handle = vi.spyOn(mock.server, 'handle');
+    const cursors = () =>
+      handle.mock.calls
+        // The Activity page asks for 25 at a time; the live feed's own requests ask for 50.
+        .filter(([, url]) => url.pathname === '/api/events' && url.searchParams.get('limit') === '25')
+        .map(([, url]) => url.searchParams.get('before'));
+    const older = await screen.findByRole('button', { name: /Older/ });
+    await waitFor(() => expect(older).toBeEnabled());
+    await user.click(older);
+    await waitFor(() => expect(older).toBeEnabled());
+    await user.click(older);
+    await waitFor(() => expect(older).toBeEnabled());
+    const [first, second] = cursors().filter((c) => c !== null);
+    expect(first).toBeTruthy();
+    expect(second).toBeTruthy();
+    // Open a verdict from the third page and come back with the verdict page's Back button.
+    const row = screen.getAllByRole('link').find((a) => a.getAttribute('href')?.startsWith('/verdicts/'));
+    await user.click(row as HTMLElement);
+    await user.click(await screen.findByRole('button', { name: 'Back' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: /Newer/ })).toBeEnabled());
+    expect(cursors().at(-1)).toBe(second);
+    await user.click(screen.getByRole('button', { name: /Newer/ }));
+    await waitFor(() => expect(cursors().at(-1)).toBe(first));
+  });
+});
+
 describe('Verdict page', () => {
+  it('treats a non-numeric id as a missing verdict without asking the server', async () => {
+    const mock = renderApp('/verdicts/abc');
+    const handle = vi.spyOn(mock.server, 'handle');
+    expect(await screen.findByText('Verdict not found')).toBeInTheDocument();
+    expect(screen.queryByText('Could not load this verdict')).toBeNull();
+    expect(handle.mock.calls.some(([, url]) => url.pathname.startsWith('/api/verdicts/'))).toBe(false);
+  });
+
+  it('goes to Activity on Back when the verdict was opened directly', async () => {
+    // Other pages in this tab's history (outside the app) must not count as "back".
+    window.history.pushState({}, '', '/elsewhere');
+    const user = userEvent.setup();
+    renderApp('/verdicts/41');
+    await screen.findByTestId('verdict');
+    await user.click(screen.getByRole('button', { name: 'Back' }));
+    expect(await screen.findByRole('heading', { level: 1, name: 'Activity' })).toBeInTheDocument();
+  });
+
   it('compares the release with the one before it on request', async () => {
     const user = userEvent.setup();
-    renderApp('/verdicts/v_2b8e5f17');
+    renderApp('/verdicts/43');
     const card = await screen.findByRole('region', { name: 'Changes since an earlier release' });
     expect(within(card).queryByTestId('release-diff')).toBeNull();
     await user.click(within(card).getByRole('button', { name: 'Compare' }));
@@ -187,6 +272,15 @@ describe('Verdict page', () => {
   });
 });
 
+describe('Model page', () => {
+  it("shows the model's own thresholds when the policy overrides them", async () => {
+    const mock = renderApp('/model');
+    mock.server.policy.block_threshold = 0.9;
+    expect(await screen.findByTestId('model-version')).toBeInTheDocument();
+    expect(screen.getByTestId('model-block-threshold')).toHaveTextContent('0.80');
+  });
+});
+
 describe('Overview page', () => {
   it('renders tiles and adds live events to the feed', async () => {
     const mock = renderApp('/');
@@ -201,4 +295,19 @@ describe('Overview page', () => {
     await waitFor(() => expect(within(screen.getByTestId('live-feed')).getAllByTestId('feed-row')[0]).toHaveAttribute('data-event-id', id));
     expect(id).not.toBe(before);
   });
+
+  it('recovers the feed when the server comes up after the dashboard', async () => {
+    const mock = renderApp('/');
+    mock.server.events = [];
+    const handle = mock.server.handle.bind(mock.server);
+    let down = true;
+    vi.spyOn(mock.server, 'handle').mockImplementation((method, url, body, headers) =>
+      down && url.pathname === '/api/events' ? { status: 503, body: '' } : handle(method, url, body, headers),
+    );
+    mock.setStreamAvailable(false);
+    expect(await screen.findByText('Could not load events')).toBeInTheDocument();
+    down = false;
+    mock.setStreamAvailable(true);
+    expect(await screen.findByText('No installs yet', {}, { timeout: 8000 })).toBeInTheDocument();
+  }, 10000);
 });

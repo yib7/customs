@@ -1,9 +1,9 @@
 // Wires the in-memory MockServer into the browser: patches window.fetch for same-origin
-// /api, /metrics and /healthz requests and replaces window.EventSource with a fake stream.
+// /api requests and replaces window.EventSource with a fake stream.
 // Exposes window.__customsMock for Playwright to push events or drop the stream.
 
 import { MockServer } from './server';
-import type { RawEvent } from './fixtures';
+import { BLOCKED_TYPOSQUAT, type RawEvent } from './fixtures';
 
 export interface MockControls {
   server: MockServer;
@@ -27,10 +27,18 @@ declare global {
 
 const READY = { CONNECTING: 0, OPEN: 1, CLOSED: 2 } as const;
 
-export function installMocks(opts: { latencyMs?: number; autoEmitMs?: number } = {}): MockControls {
-  if (window.__customsMock) return window.__customsMock;
+/** The browser's own fetch, kept from the first install so a fresh mock does not wrap an old one. */
+let nativeFetch: typeof window.fetch | null = null;
+
+/**
+ * Installs the mock API once and returns its controls. `fresh` replaces an installed mock
+ * with a new server in its initial state (tests use it so no state leaks between them).
+ */
+export function installMocks(opts: { latencyMs?: number; autoEmitMs?: number; fresh?: boolean } = {}): MockControls {
+  if (window.__customsMock && !opts.fresh) return window.__customsMock;
   const server = new MockServer();
-  const realFetch = window.fetch.bind(window);
+  nativeFetch ??= window.fetch.bind(window);
+  const realFetch = nativeFetch;
   const streams = new Set<MockEventSource>();
   let streamAvailable = true;
 
@@ -39,9 +47,7 @@ export function installMocks(opts: { latencyMs?: number; autoEmitMs?: number } =
   window.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const raw = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
     const url = new URL(raw, window.location.origin);
-    const isApi =
-      url.origin === window.location.origin &&
-      (url.pathname.startsWith('/api/') || url.pathname === '/metrics' || url.pathname === '/healthz');
+    const isApi = url.origin === window.location.origin && url.pathname.startsWith('/api/');
     if (!isApi) return realFetch(input, init);
     const method = (init?.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase();
     let body: unknown = null;
@@ -130,7 +136,7 @@ export function installMocks(opts: { latencyMs?: number; autoEmitMs?: number } =
     server,
     emit: () => server.emitRandom(),
     emitBlocked: () => {
-      const v = server.verdicts.get('v_7f3a91c2');
+      const v = server.verdicts.get(BLOCKED_TYPOSQUAT.id);
       if (!v) return server.emitRandom();
       return server.record({
         ecosystem: v.ecosystem,

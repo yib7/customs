@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Link, useSearchParams } from 'react-router';
+import { Link, useLocation, useSearchParams } from 'react-router';
 import { api } from '../api/client';
 import type { CustomsEvent, Decision, EventKind, EventQuery, KnownEcosystem } from '../api/types';
 import { DecisionBadge, EcosystemBadge, KindLabel } from '../components/Badges';
@@ -18,6 +18,15 @@ const PAGE_SIZE = 25;
 const DECISIONS: Decision[] = ['allow', 'warn', 'block'];
 const ECOSYSTEMS: KnownEcosystem[] = ['pypi', 'npm'];
 const KINDS: EventKind[] = ['install', 'check', 'nonexistent_package'];
+
+/**
+ * The `before` cursors of the newer pages, kept in the history entry's state so that Back,
+ * Forward and returning from a verdict restore them.
+ */
+function cursorsFrom(state: unknown): string[] {
+  const c = typeof state === 'object' && state !== null ? (state as { cursors?: unknown }).cursors : null;
+  return Array.isArray(c) ? c.filter((x): x is string => typeof x === 'string') : [];
+}
 
 function oneOf<T extends string>(v: string | null, options: readonly T[]): T | undefined {
   return options.find((o) => o === v);
@@ -62,6 +71,7 @@ function Select<T extends string>({
 export function ActivityPage() {
   useTitle('Activity');
   const [params, setParams] = useSearchParams();
+  const location = useLocation();
   const now = useNow(30000);
   const query: EventQuery = useMemo(
     () => ({
@@ -75,7 +85,14 @@ export function ActivityPage() {
     [params],
   );
   const [search, setSearch] = useState(query.q ?? '');
-  const [cursorStack, setCursorStack] = useState<string[]>([]);
+  // Follow the URL when navigation (Back, Forward, a link) changes the search, unless the
+  // box already says the same up to whitespace (the user is typing).
+  const [urlQ, setUrlQ] = useState(query.q ?? '');
+  if (urlQ !== (query.q ?? '')) {
+    setUrlQ(query.q ?? '');
+    if (search.trim() !== (query.q ?? '')) setSearch(query.q ?? '');
+  }
+  const cursorStack = cursorsFrom(location.state);
   const [live, setLive] = useState<CustomsEvent[]>([]);
 
   const key = JSON.stringify(query);
@@ -109,17 +126,18 @@ export function ActivityPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [search]);
 
-  function update(patch: Partial<Record<'decision' | 'ecosystem' | 'kind' | 'q' | 'before', string | undefined>>, resetPaging: boolean) {
+  function update(
+    patch: Partial<Record<'decision' | 'ecosystem' | 'kind' | 'q' | 'before', string | undefined>>,
+    resetPaging: boolean,
+    cursors: string[] = [],
+  ) {
     const next = new URLSearchParams(paramsRef.current);
     for (const [k, v] of Object.entries(patch)) {
       if (v) next.set(k, v);
       else next.delete(k);
     }
-    if (resetPaging) {
-      next.delete('before');
-      setCursorStack([]);
-    }
-    setParams(next, { replace: resetPaging });
+    if (resetPaging) next.delete('before');
+    setParams(next, { replace: resetPaging, state: resetPaging ? null : { cursors } });
   }
 
   const rows = useMemo(() => {
@@ -190,7 +208,6 @@ export function ActivityPage() {
             disabled={!filtersActive}
             onClick={() => {
               setSearch('');
-              setCursorStack([]);
               setParams(new URLSearchParams(), { replace: true });
             }}
           >
@@ -251,6 +268,7 @@ export function ActivityPage() {
                         {e.verdict_id ? (
                           <Link
                             to={`/verdicts/${encodeURIComponent(e.verdict_id)}`}
+                            state={{ kind: e.kind }}
                             className="min-w-0 truncate rounded hover:underline"
                             aria-label={`View verdict for ${safeLabel(e.name, 80)}${e.version ? ` version ${safeLabel(e.version, 20)}` : ''}`}
                           >
@@ -303,10 +321,10 @@ export function ActivityPage() {
               className={btn.secondary}
               disabled={!query.before}
               onClick={() => {
+                // Without cursors (a deep link to an older page) this goes to the newest page.
                 const stack = [...cursorStack];
                 const prev = stack.pop();
-                setCursorStack(stack);
-                update({ before: prev }, false);
+                update({ before: prev }, false, stack);
               }}
             >
               <IconChevronLeft size={15} /> Newer
@@ -317,8 +335,7 @@ export function ActivityPage() {
               disabled={!hasOlder || !lastId}
               onClick={() => {
                 if (!lastId) return;
-                setCursorStack((s) => [...s, query.before ?? '']);
-                update({ before: lastId }, false);
+                update({ before: lastId }, false, [...cursorStack, query.before ?? '']);
               }}
             >
               Older <IconChevronRight size={15} />

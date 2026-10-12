@@ -1,22 +1,24 @@
-// In-memory mock of the Customs HTTP API (DESIGN.md section 7). Used by `vite --mode mock`,
-// the mock-mode build that Playwright runs against, and unit tests. Never bundled into the
-// production build: main.tsx imports it only when VITE_MOCK is "1".
+// In-memory mock of the Customs HTTP API (crates/customs/src/api.rs). Used by
+// `vite --mode mock`, the mock-mode build that Playwright runs against, and unit tests. Never
+// bundled into the production build: main.tsx imports it only when VITE_MOCK is "1".
+// Status codes and bodies follow the server; server.test.ts pins the points that matter.
 
 import {
   AGENT_CLIENT,
   ALL_VERDICTS,
   ALLOWED,
   BLOCKED_TYPOSQUAT,
+  HISTORY_DAYS,
   INITIAL_POLICY,
   MODEL_INFO,
-  MODEL_VERSION,
   NONEXISTENT,
+  base,
   buildHistory,
   eventFromVerdict,
-  fakeSha,
   mulberry32,
   pick,
   nonexistentEvent,
+  nonexistentVerdict,
   type RawEvent,
   type RawVerdict,
 } from './fixtures';
@@ -43,13 +45,14 @@ const ENTRY = /^(pypi|npm):(@[a-z0-9~-][a-z0-9._~-]*\/)?[a-z0-9~-][a-z0-9._~-]*(
 
 export class MockServer {
   events: RawEvent[];
-  verdicts = new Map<string, RawVerdict>();
+  verdicts = new Map<number, RawVerdict>();
   policy: Record<string, unknown> = structuredClone(INITIAL_POLICY);
   /** When set, PUT /api/policy needs `Authorization: Bearer <adminToken>`, as with CUSTOMS_ADMIN_TOKEN. */
   adminToken: string | null = null;
   /** Newest last, as GET /api/policy/changes reports them (newest first). */
   policyChanges: PolicyChange[] = [];
   private nextId: number;
+  private nextVerdictId = 1000;
   private listeners = new Set<Listener>();
   private rnd = mulberry32(99);
 
@@ -114,7 +117,11 @@ export class MockServer {
     if (method === 'GET' && path === '/api/events') return this.listEvents(url.searchParams);
     if (method === 'GET' && path.startsWith('/api/verdicts/')) {
       const id = decodeURIComponent(path.slice('/api/verdicts/'.length));
-      const v = this.verdicts.get(id);
+      // axum's Path<i64> rejection: plain text, 400.
+      if (!/^-?\d+$/.test(id)) {
+        return { status: 400, body: `Invalid URL: Cannot parse \`${id}\` to a \`i64\``, contentType: 'text/plain; charset=utf-8' };
+      }
+      const v = this.verdicts.get(Number(id));
       return v ? json(200, v) : json(404, { error: `no verdict with id ${id}` });
     }
     if (method === 'GET' && path === '/api/stats') return json(200, this.stats());
@@ -132,17 +139,21 @@ export class MockServer {
       return this.putPolicy(body, headers.has('Authorization') ? 'token' : 'none');
     }
     if (method === 'GET' && path === '/api/diff') return this.diff(url.searchParams);
-    if (method === 'GET' && path === '/api/model') return json(200, MODEL_INFO);
+    if (method === 'GET' && path === '/api/model') return json(200, this.model());
     if (method === 'POST' && path === '/api/check') return this.check(body);
-    if (method === 'GET' && path === '/healthz') return { status: 200, body: 'ok', contentType: 'text/plain' };
-    if (method === 'GET' && path === '/metrics') {
-      return {
-        status: 200,
-        contentType: 'text/plain; version=0.0.4',
-        body: `# TYPE customs_events_total counter\ncustoms_events_total ${this.events.length}\n`,
-      };
-    }
     return json(404, { error: `not found: ${method} ${path}` });
+  }
+
+  /** GET /api/model: `thresholds` has the policy overrides applied, `model_thresholds` is the model's own. */
+  private model() {
+    const own = MODEL_INFO.thresholds;
+    const pick = (t: unknown, m: number) => (typeof t === 'number' ? t : m);
+    return {
+      ...MODEL_INFO,
+      untrained: false,
+      thresholds: { ...own, warn: pick(this.policy.warn_threshold, own.warn), block: pick(this.policy.block_threshold, own.block) },
+      model_thresholds: own,
+    };
   }
 
   private listEvents(q: URLSearchParams): MockResponse {
@@ -171,7 +182,7 @@ export class MockServer {
     const byEco: Record<string, { allow: number; warn: number; block: number }> = {};
     const byKind = { install: 0, check: 0, nonexistent_package: 0 };
     const days = new Map<string, number>();
-    for (let d = 13; d >= 0; d--) days.set(new Date(now - d * 86400000).toISOString().slice(0, 10), 0);
+    for (let d = HISTORY_DAYS - 1; d >= 0; d--) days.set(new Date(now - d * 86400000).toISOString().slice(0, 10), 0);
     const reasons = new Map<string, { label: string | null; count: number }>();
     for (const e of this.events) {
       byKind[e.kind] += 1;
@@ -189,7 +200,7 @@ export class MockServer {
           r.count += 1;
           reasons.set('block_nonexistent', r);
         }
-        const v = e.verdict_id ? this.verdicts.get(e.verdict_id) : undefined;
+        const v = e.verdict_id !== null ? this.verdicts.get(e.verdict_id) : undefined;
         if (v) {
           for (const reason of v.reasons.filter((x) => x.contribution > 0).slice(0, 3)) {
             const r = reasons.get(reason.feature) ?? { label: null, count: 0 };
@@ -278,7 +289,7 @@ export class MockServer {
         errors.push({ field: f, message: `${f} entries must look like "pypi:name" or "npm:name@version"` });
       }
     }
-    if (errors.length > 0) return json(422, { error: 'invalid policy', errors });
+    if (errors.length > 0) return json(400, { error: 'invalid policy', errors });
     const next = { ...this.policy, ...body };
     const changes = diffPolicies(this.policy, next);
     if (changes.length > 0) {
@@ -329,34 +340,36 @@ export class MockServer {
     const name = typeof body.name === 'string' ? body.name.trim() : '';
     const version = typeof body.version === 'string' && body.version ? body.version : null;
     if (eco !== 'pypi' && eco !== 'npm') return json(400, { error: 'ecosystem must be "pypi" or "npm"' });
-    if (!name) return json(400, { error: 'name is required' });
+    if (!name) return json(400, { error: 'invalid package name' });
+    // Recorded on the event, "api" when the caller does not say (api.rs `check`).
+    const client = typeof body.client === 'string' ? body.client : 'api';
 
     const known = ALL_VERDICTS.find((v) => v.ecosystem === eco && v.name.toLowerCase() === name.toLowerCase());
     if (known) {
-      this.record(strip(eventFromVerdict(known, 0, new Date(), 'dashboard', 'check')));
+      this.record(strip(eventFromVerdict(known, 0, new Date(), client, 'check')));
       return json(200, known);
     }
     const missing =
       NONEXISTENT.some((n) => n.ecosystem === eco && n.name === name) || /(-pro|-utils-ai|hallucinated)$/.test(name);
     if (missing) {
-      this.record(strip(nonexistentEvent({ ecosystem: eco, name }, 0, new Date(), 'dashboard')));
+      this.record(strip(nonexistentEvent({ ecosystem: eco, name }, 0, new Date(), client)));
       return json(404, {
-        error: `${name} does not exist on ${eco === 'pypi' ? 'PyPI' : 'npm'}`,
+        error: `'${name}' does not exist on ${eco === 'pypi' ? 'PyPI' : 'npm'}`,
         code: 'nonexistent_package',
+        verdict: nonexistentVerdict({ ecosystem: eco, name }, this.nextVerdictId++),
       });
     }
     // Unknown but plausible package: synthesize a clean verdict.
     const r = mulberry32(name.length * 7919 + name.charCodeAt(0));
     const ver = version ?? `${1 + Math.floor(r() * 4)}.${Math.floor(r() * 12)}.${Math.floor(r() * 9)}`;
     const risk = Math.round((0.002 + r() * 0.05) * 1000) / 1000;
-    const id = `v_chk${fakeSha(`${eco}:${name}@${ver}`).slice(0, 6)}`;
-    const verdict: RawVerdict = {
+    const id = this.nextVerdictId++;
+    const verdict: RawVerdict = base({
       id,
       ecosystem: eco,
       name,
       version: ver,
       artifact: eco === 'pypi' ? `${name.replace(/-/g, '_')}-${ver}-py3-none-any.whl` : `${name.split('/').pop() ?? name}-${ver}.tgz`,
-      sha256: fakeSha(`${eco}:${name}@${ver}`),
       decision: 'allow',
       risk,
       scores: { code_gbdt: risk, code_nn: Math.round(r() * 0.06 * 1000) / 1000, name: Math.round(r() * 0.1 * 1000) / 1000 },
@@ -368,11 +381,10 @@ export class MockServer {
       ],
       evidence: [],
       scanned_ms: 11 + Math.floor(r() * 30),
-      model_version: MODEL_VERSION,
       cached: false,
-    };
+    });
     this.verdicts.set(id, verdict);
-    this.record(strip(eventFromVerdict(verdict, 0, new Date(), 'dashboard', 'check')));
+    this.record(strip(eventFromVerdict(verdict, 0, new Date(), client, 'check')));
     return json(200, verdict);
   }
 }

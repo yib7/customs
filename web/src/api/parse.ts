@@ -52,13 +52,13 @@ function asRecord(v: unknown): Rec {
   return isRecord(v) ? v : {};
 }
 
-export function asString(v: unknown): string | null {
+function asString(v: unknown): string | null {
   if (typeof v === 'string') return v;
   if (typeof v === 'number' && Number.isFinite(v)) return String(v);
   return null;
 }
 
-export function asNumber(v: unknown): number | null {
+function asNumber(v: unknown): number | null {
   if (typeof v === 'number' && Number.isFinite(v)) return v;
   if (typeof v === 'string' && v.trim() !== '') {
     const n = Number(v);
@@ -88,22 +88,21 @@ function asStringArray(v: unknown): string[] {
   return asArray(v).filter((x): x is string => typeof x === 'string');
 }
 
-export function parseDecision(v: unknown): Decision | null {
+function parseDecision(v: unknown): Decision | null {
   if (typeof v !== 'string') return null;
   const d = v.toLowerCase();
   return d === 'allow' || d === 'warn' || d === 'block' ? d : null;
 }
 
-export function parseEcosystem(v: unknown): Ecosystem {
+function parseEcosystem(v: unknown): Ecosystem {
   const s = asString(v);
   if (!s) return 'unknown';
   const lower = s.toLowerCase();
   return lower === 'pypi' || lower === 'npm' ? lower : s;
 }
 
-export function parseKind(v: unknown): EventKind {
+function parseKind(v: unknown): EventKind {
   if (v === 'check' || v === 'nonexistent_package' || v === 'install') return v;
-  if (v === 'nonexistent') return 'nonexistent_package';
   return 'install';
 }
 
@@ -122,7 +121,7 @@ export function parseTimestamp(v: unknown): string | null {
   return null;
 }
 
-export function parseScores(v: unknown): Scores {
+function parseScores(v: unknown): Scores {
   const r = asRecord(v);
   return {
     code_gbdt: asProbability(r.code_gbdt),
@@ -168,7 +167,7 @@ function parseEvidence(v: unknown): Evidence | null {
   };
 }
 
-export function parseThresholds(v: unknown): Thresholds | null {
+function parseThresholds(v: unknown): Thresholds | null {
   if (!isRecord(v)) return null;
   const warn = asProbability(v.warn);
   const block = asProbability(v.block);
@@ -183,23 +182,18 @@ function compact<T>(items: (T | null)[]): T[] {
   return items.filter((x): x is T => x !== null);
 }
 
-export function parseVerdict(v: unknown): Verdict {
-  // Some servers wrap the verdict: { verdict: {...}, id }.
-  let body = v;
-  let wrapperId: string | null = null;
-  if (isRecord(v) && isRecord(v.verdict)) {
-    body = v.verdict;
-    wrapperId = asString(v.id) ?? asString(v.verdict_id);
-  }
+export function parseVerdict(body: unknown): Verdict {
   if (!isRecord(body)) throw new ParseError('verdict is not an object');
   const name = asString(body.name);
   if (!name) throw new ParseError('verdict has no package name');
-  const policyHits = compact(asArray(body.policy_hits).map(parsePolicyHit));
-  const decision = parseDecision(body.decision) ?? mostSevere(policyHits.map((h) => h.severity)) ?? 'warn';
+  // Never guess a missing decision: allow-list hits carry severity allow, so a guess could
+  // show a package as allowed.
+  const decision = parseDecision(body.decision);
+  if (!decision) throw new ParseError('verdict has no decision');
   const reasons = compact(asArray(body.reasons).map(parseReason));
   reasons.sort((a, b) => Math.abs(b.contribution) - Math.abs(a.contribution));
   return {
-    id: asString(body.id) ?? asString(body.verdict_id) ?? wrapperId,
+    id: asString(body.id),
     ecosystem: parseEcosystem(body.ecosystem),
     name,
     version: asString(body.version),
@@ -208,31 +202,23 @@ export function parseVerdict(v: unknown): Verdict {
     decision,
     risk: asProbability(body.risk),
     scores: parseScores(body.scores),
-    policy_hits: policyHits,
+    policy_hits: compact(asArray(body.policy_hits).map(parsePolicyHit)),
     reasons,
     evidence: compact(asArray(body.evidence).map(parseEvidence)),
     scanned_ms: asNumber(body.scanned_ms),
     model_version: asString(body.model_version),
     cached: asBool(body.cached, false),
     thresholds: parseThresholds(body.thresholds),
+    model_decision: parseDecision(body.model_decision),
+    mode: body.mode === 'enforce' || body.mode === 'monitor' ? body.mode : null,
   };
-}
-
-const SEVERITY: Record<Decision, number> = { allow: 0, warn: 1, block: 2 };
-
-export function mostSevere(decisions: Decision[]): Decision | null {
-  let best: Decision | null = null;
-  for (const d of decisions) {
-    if (best === null || SEVERITY[d] > SEVERITY[best]) best = d;
-  }
-  return best;
 }
 
 export function parseEvent(v: unknown): CustomsEvent | null {
   if (!isRecord(v)) return null;
   const id = asString(v.id);
   const name = asString(v.name);
-  const ts = parseTimestamp(v.ts ?? v.timestamp);
+  const ts = parseTimestamp(v.ts);
   if (!id || !name || !ts) return null;
   const kind = parseKind(v.kind);
   return {
@@ -249,11 +235,9 @@ export function parseEvent(v: unknown): CustomsEvent | null {
   };
 }
 
-/** Accepts a bare array or an object wrapping one under `events`, `items`, or `data`. */
+/** `GET /api/events`: a bare array. */
 export function parseEventList(v: unknown): CustomsEvent[] {
-  let list: unknown = v;
-  if (isRecord(v)) list = v.events ?? v.items ?? v.data;
-  return compact(asArray(list).map(parseEvent));
+  return compact(asArray(v).map(parseEvent));
 }
 
 function parseDecisionCounts(v: unknown): DecisionCounts {
@@ -266,49 +250,37 @@ function parseDecisionCounts(v: unknown): DecisionCounts {
 }
 
 function parseDayCounts(v: unknown): DayCount[] {
-  let out: DayCount[];
-  if (isRecord(v)) {
-    // Map form: { "2026-10-01": 3 }
-    out = Object.entries(v)
-      .map(([date, count]) => ({ date, count: asNumber(count) ?? 0 }))
-      .filter((d) => /^\d{4}-\d{2}-\d{2}/.test(d.date));
-  } else {
-    out = compact(
-      asArray(v).map((item) => {
-        if (Array.isArray(item)) {
-          const date = asString(item[0]);
-          return date ? { date, count: asNumber(item[1]) ?? 0 } : null;
-        }
-        if (!isRecord(item)) return null;
-        const date = asString(item.date ?? item.day);
-        if (!date) return null;
-        return { date: date.slice(0, 10), count: asNumber(item.count ?? item.blocks ?? item.value) ?? 0 };
-      }),
-    );
-  }
-  return out.sort((a, b) => a.date.localeCompare(b.date));
+  return compact(
+    asArray(v).map((item) => {
+      if (!isRecord(item)) return null;
+      const date = asString(item.date);
+      if (!date) return null;
+      return { date: date.slice(0, 10), count: asNumber(item.count) ?? 0 };
+    }),
+  ).sort((a, b) => a.date.localeCompare(b.date));
 }
 
 function parseTopReasons(v: unknown): TopReason[] {
   return compact(
     asArray(v).map((item) => {
       if (!isRecord(item)) return null;
-      const feature = asString(item.feature ?? item.rule);
+      const feature = asString(item.feature);
       if (!feature) return null;
       return { feature, label: asString(item.label), count: asNumber(item.count) ?? 0 };
     }),
   ).sort((a, b) => b.count - a.count);
 }
 
+/** `GET /api/stats` (`Stats` in `crates/customs/src/store.rs`). */
 export function parseStats(v: unknown): Stats {
   const r = asRecord(v);
-  const byDecision = parseDecisionCounts(r.by_decision ?? r.decisions);
-  const byEcoRaw = asRecord(r.by_ecosystem ?? r.ecosystems);
+  const byDecision = parseDecisionCounts(r.by_decision);
+  const byEcoRaw = asRecord(r.by_ecosystem);
   const byEcosystem: Record<string, DecisionCounts> = {};
   for (const [eco, counts] of Object.entries(byEcoRaw)) {
     byEcosystem[parseEcosystem(eco)] = parseDecisionCounts(counts);
   }
-  const kinds = asRecord(r.by_kind ?? r.kinds);
+  const kinds = asRecord(r.by_kind);
   const total =
     asNumber(r.total) ?? byDecision.allow + byDecision.warn + byDecision.block;
   return {
@@ -318,8 +290,7 @@ export function parseStats(v: unknown): Stats {
     by_kind: {
       install: asNumber(kinds.install) ?? 0,
       check: asNumber(kinds.check) ?? 0,
-      nonexistent_package:
-        asNumber(kinds.nonexistent_package) ?? asNumber(r.nonexistent_package) ?? asNumber(r.nonexistent) ?? 0,
+      nonexistent_package: asNumber(kinds.nonexistent_package) ?? 0,
     },
     blocks_per_day: parseDayCounts(r.blocks_per_day),
     top_reasons: parseTopReasons(r.top_reasons),
@@ -340,8 +311,10 @@ function parseRuleSeverity(v: unknown, fallback: RuleSeverity): RuleSeverity {
   return v === 'off' || v === 'warn' || v === 'block' ? v : fallback;
 }
 
+/** `GET /api/policy`. Missing fields get the server's defaults (`crates/customs/src/config.rs`). */
 export function parsePolicy(v: unknown): Policy {
-  const r = isRecord(v) && isRecord(v.policy) ? v.policy : asRecord(v);
+  if (!isRecord(v)) throw new ParseError('policy is not an object');
+  const r = v;
   const upstreamRaw = asRecord(r.upstream);
   const upstream: Record<string, string> = {};
   for (const [k, val] of Object.entries(upstreamRaw)) {
@@ -358,7 +331,7 @@ export function parsePolicy(v: unknown): Policy {
     mode: parseMode(r.mode),
     warn_threshold: parseThreshold(r.warn_threshold),
     block_threshold: parseThreshold(r.block_threshold),
-    min_age_days: minAge === null ? 0 : minAge,
+    min_age_days: minAge === null ? 3 : minAge,
     min_age_severity: r.min_age_severity === 'warn' ? 'warn' : 'block',
     hide_young_versions: asBool(r.hide_young_versions, true),
     block_nonexistent: asBool(r.block_nonexistent, true),
@@ -388,26 +361,19 @@ export function parsePolicy(v: unknown): Policy {
   };
 }
 
+/** A bare number or `{value, ci_low, ci_high}`, as `models/metrics.json` writes them. */
 function parseMetric(v: unknown): MetricValue | null {
   const n = asNumber(v);
   if (n !== null) return { value: n };
   if (!isRecord(v)) return null;
-  const value = asNumber(v.value ?? v.mean ?? v.point);
+  const value = asNumber(v.value);
   if (value === null) return null;
   const m: MetricValue = { value };
-  const ci = Array.isArray(v.ci) ? v.ci : Array.isArray(v.ci95) ? v.ci95 : null;
-  const lo = asNumber(v.ci_low ?? v.lo ?? (ci ? ci[0] : undefined));
-  const hi = asNumber(v.ci_high ?? v.hi ?? (ci ? ci[1] : undefined));
+  const lo = asNumber(v.ci_low);
+  const hi = asNumber(v.ci_high);
   if (lo !== null) m.ci_low = lo;
   if (hi !== null) m.ci_high = hi;
   return m;
-}
-
-function pick(r: Rec, keys: string[]): unknown {
-  for (const k of keys) {
-    if (r[k] !== undefined) return r[k];
-  }
-  return undefined;
 }
 
 function parseGuardDog(v: unknown): GuardDogComparison | null {
@@ -415,50 +381,37 @@ function parseGuardDog(v: unknown): GuardDogComparison | null {
   const out: GuardDogComparison = {
     fpr: asNumber(v.fpr),
     recall: asNumber(v.recall),
-    customs_recall: asNumber(pick(v, ['customs_recall', 'customs_recall_at_matched_fpr', 'customs_recall_at_same_fpr'])),
+    customs_recall: asNumber(v.customs_recall_at_matched_fpr),
   };
   return out.fpr === null && out.recall === null && out.customs_recall === null ? null : out;
 }
 
-export function parseModelMetrics(v: unknown, root: Rec = {}): ModelMetrics | null {
-  if (!isRecord(v)) return null;
-  // Metrics may be keyed by split: { temporal: {...}, random: {...} }. Prefer temporal.
-  let m: Rec = v;
-  let split = asString(v.split);
-  if (isRecord(v.temporal)) {
-    m = v.temporal;
-    split = split ?? 'temporal';
-  }
-  const baselines = asRecord(m.baselines ?? v.baselines ?? root.baselines);
-  const out: ModelMetrics = {
-    split,
-    roc_auc: parseMetric(pick(m, ['roc_auc', 'auc', 'auroc'])),
-    pr_auc: parseMetric(pick(m, ['pr_auc', 'average_precision', 'auprc'])),
-    recall_at_fpr_0_001: parseMetric(
-      pick(m, ['recall_at_fpr_0_001', 'recall_at_fpr_0.001', 'recall_at_0_1pct_fpr', 'recall_at_fpr_0_1pct']),
-    ),
-    recall_at_fpr_0_01: parseMetric(
-      pick(m, ['recall_at_fpr_0_01', 'recall_at_fpr_0.01', 'recall_at_1pct_fpr', 'recall_at_fpr_1pct']),
-    ),
+/** The `metrics` object of `models/metrics.json` (written by `python/customs_ml/evaluate.py`). */
+function parseModelMetrics(m: unknown): ModelMetrics | null {
+  if (!isRecord(m)) return null;
+  return {
+    split: asString(m.split),
+    roc_auc: parseMetric(m.roc_auc),
+    pr_auc: parseMetric(m.pr_auc),
+    recall_at_fpr_0_001: parseMetric(m.recall_at_fpr_0_001),
+    recall_at_fpr_0_01: parseMetric(m.recall_at_fpr_0_01),
     brier: parseMetric(m.brier),
-    n_test_malicious: asNumber(m.n_test_malicious ?? m.n_malicious),
-    n_test_benign: asNumber(m.n_test_benign ?? m.n_benign),
-    guarddog: parseGuardDog(baselines.guarddog ?? m.guarddog),
+    n_test_malicious: asNumber(m.n_test_malicious),
+    n_test_benign: asNumber(m.n_test_benign),
+    guarddog: parseGuardDog(asRecord(m.baselines).guarddog),
   };
-  return out;
 }
 
+/** `GET /api/model`: `thresholds` has the policy overrides applied, `model_thresholds` is the model's own. */
 export function parseModelInfo(v: unknown): ModelInfo {
   const r = asRecord(v);
-  const manifest = asRecord(r.manifest);
-  const version = asString(r.model_version) ?? asString(manifest.model_version) ?? 'unknown';
-  const schema = asNumber(r.feature_schema_version ?? manifest.feature_schema_version);
-  const ensemble = asRecord(r.ensemble);
   return {
-    model_version: version,
-    feature_schema_version: schema,
-    thresholds: parseThresholds(r.thresholds ?? ensemble.thresholds ?? ensemble),
-    metrics: parseModelMetrics(r.metrics, r),
+    model_version: asString(r.model_version) ?? 'unknown',
+    feature_schema_version: asNumber(r.feature_schema_version),
+    thresholds: parseThresholds(r.thresholds),
+    model_thresholds: parseThresholds(r.model_thresholds),
+    untrained: asBool(r.untrained, false),
+    metrics: parseModelMetrics(r.metrics),
   };
 }
 
@@ -533,12 +486,6 @@ export function parseReleaseDiff(v: unknown): ReleaseDiff {
   const from = parseReleaseSide(v.from);
   const to = parseReleaseSide(v.to);
   if (!name || !from || !to) throw new ParseError('release diff has no package or versions');
-  let verdict: Verdict | null;
-  try {
-    verdict = isRecord(v.verdict) ? parseVerdict(v.verdict) : null;
-  } catch {
-    verdict = null;
-  }
   return {
     ecosystem: parseEcosystem(v.ecosystem),
     name,
@@ -554,6 +501,5 @@ export function parseReleaseDiff(v: unknown): ReleaseDiff {
     files_note: asString(v.files_note),
     new_evidence: compact(asArray(v.new_evidence).map(parseEvidence)),
     new_install_surface: asStringArray(v.new_install_surface),
-    verdict,
   };
 }

@@ -1,24 +1,32 @@
-// Realistic fixtures for development and tests. Shapes follow docs/DESIGN.md sections 6
-// to 8 exactly, as the Rust server would send them. Snippets imitate real malware but are
-// inert strings; some deliberately contain HTML and bidi control characters to prove the
-// UI renders them as text.
+// Realistic fixtures for development and tests. Shapes follow the Rust server's types
+// (`Verdict` and `Event` in crates/customs/src/verdict.rs, `Stats` in store.rs). Snippets
+// imitate real malware but are inert strings; some deliberately contain HTML and bidi
+// control characters to prove the UI renders them as text.
+
+type Decision = 'allow' | 'warn' | 'block';
 
 export interface RawVerdict {
-  id: string;
+  id: number;
+  ts: string;
   ecosystem: 'pypi' | 'npm';
   name: string;
-  version: string;
-  artifact: string;
+  version: string | null;
+  artifact: string | null;
   sha256: string;
-  decision: 'allow' | 'warn' | 'block';
-  risk: number;
-  scores: { code_gbdt: number; code_nn: number | null; name: number };
-  policy_hits: { rule: string; severity: 'allow' | 'warn' | 'block'; detail: string }[];
+  decision: Decision;
+  risk: number | null;
+  model_decision: Decision;
+  thresholds: { warn: number; block: number; target_fpr_block?: number };
+  scores: { code_gbdt: number | null; code_nn: number | null; name: number | null };
+  policy_hits: { rule: string; severity: Decision; detail: string }[];
   reasons: { feature: string; value: number; contribution: number; label: string | null }[];
   evidence: { indicator: string; file: string; line: number | null; snippet: string }[];
+  install_surface: string[];
+  scan_errors: string[];
   scanned_ms: number;
   model_version: string;
   cached: boolean;
+  mode: 'enforce' | 'monitor';
 }
 
 export interface RawEvent {
@@ -31,10 +39,18 @@ export interface RawEvent {
   kind: 'install' | 'check' | 'nonexistent_package';
   decision: 'allow' | 'warn' | 'block' | null;
   risk: number | null;
-  verdict_id: string | null;
+  verdict_id: number | null;
 }
 
-export const MODEL_VERSION = '2026.10.0';
+const MODEL_VERSION = '2026.10.0';
+
+/** The model's own thresholds (ensemble.json). */
+const MODEL_THRESHOLDS = { warn: 0.35, block: 0.8, target_fpr_block: 0.001 };
+
+/** Days of history, as the server's `GET /api/stats` reports by default. */
+export const HISTORY_DAYS = 30;
+
+const SCANNED_AT = '2026-10-07T09:12:00Z';
 
 /** Deterministic pseudo-random generator so fixtures are stable across reloads. */
 export function mulberry32(seed: number): () => number {
@@ -65,7 +81,7 @@ function fnv1a(s: string, seed = 0x811c9dc5): number {
 }
 
 /** Fake but stable 64-hex sha256 for a string. */
-export function fakeSha(s: string): string {
+function fakeSha(s: string): string {
   let out = '';
   let h = fnv1a(s);
   while (out.length < 64) {
@@ -75,14 +91,31 @@ export function fakeSha(s: string): string {
   return out.slice(0, 64);
 }
 
-const base = (v: Omit<RawVerdict, 'sha256' | 'model_version'>): RawVerdict => ({
+type VerdictSpec = Omit<
+  RawVerdict,
+  'ts' | 'sha256' | 'model_version' | 'model_decision' | 'thresholds' | 'install_surface' | 'scan_errors' | 'mode'
+>;
+
+function modelDecision(risk: number | null): Decision {
+  if (risk === null) return 'allow';
+  return risk >= MODEL_THRESHOLDS.block ? 'block' : risk >= MODEL_THRESHOLDS.warn ? 'warn' : 'allow';
+}
+
+/** Completes a verdict with the fields the server always sends. */
+export const base = (v: VerdictSpec): RawVerdict => ({
   ...v,
+  ts: SCANNED_AT,
   sha256: fakeSha(`${v.ecosystem}:${v.name}@${v.version}`),
   model_version: MODEL_VERSION,
+  model_decision: modelDecision(v.risk),
+  thresholds: { ...MODEL_THRESHOLDS },
+  install_surface: [],
+  scan_errors: [],
+  mode: 'enforce',
 });
 
 export const BLOCKED_TYPOSQUAT = base({
-  id: 'v_7f3a91c2',
+  id: 41,
   ecosystem: 'pypi',
   name: 'reqeusts',
   version: '2.32.4',
@@ -140,7 +173,7 @@ export const BLOCKED_TYPOSQUAT = base({
 });
 
 export const BLOCKED_SCOPE_SQUAT = base({
-  id: 'v_c41d0e88',
+  id: 42,
   ecosystem: 'npm',
   name: '@lodash-utils/core',
   version: '4.17.22',
@@ -207,8 +240,8 @@ export const BLOCKED_SCOPE_SQUAT = base({
   cached: false,
 });
 
-export const WARNED_NEW = base({
-  id: 'v_2b8e5f17',
+const WARNED_NEW = base({
+  id: 43,
   ecosystem: 'npm',
   name: 'vite-plugin-env-loader',
   version: '0.0.3',
@@ -244,8 +277,8 @@ export const WARNED_NEW = base({
   cached: false,
 });
 
-export const WARNED_TOKEN = base({
-  id: 'v_9a04c3d5',
+const WARNED_TOKEN = base({
+  id: 44,
   ecosystem: 'pypi',
   name: 'langchain-community-tools',
   version: '0.0.1',
@@ -303,7 +336,7 @@ function allowVerdict(spec: AllowSpec, i: number): RawVerdict {
   const risk = Math.round((0.001 + r() * 0.03) * 1000) / 1000;
   const network = spec.name === 'requests' || spec.name === 'httpx' || spec.name === 'axios';
   return base({
-    id: `v_a${(1000 + i).toString(16)}${fnv1a(spec.name).toString(16).slice(0, 4)}`,
+    id: i + 1,
     ecosystem: spec.ecosystem,
     name: spec.name,
     version: spec.version,
@@ -428,12 +461,38 @@ export function nonexistentEvent(
   };
 }
 
-/** Builds 14 days of history ending at `now`, oldest first, with ids ascending. */
+/** The verdict attached to the 404 for a name the registry does not know. */
+export function nonexistentVerdict(pkg: { ecosystem: 'pypi' | 'npm'; name: string }, id: number): RawVerdict {
+  const registry = pkg.ecosystem === 'pypi' ? 'PyPI' : 'npm';
+  return base({
+    id,
+    ecosystem: pkg.ecosystem,
+    name: pkg.name,
+    version: null,
+    artifact: null,
+    decision: 'block',
+    risk: null,
+    scores: { code_gbdt: null, code_nn: null, name: null },
+    policy_hits: [
+      {
+        rule: 'block_nonexistent',
+        severity: 'block',
+        detail: `'${pkg.name}' does not exist on ${registry} (possibly a hallucinated or mistyped name)`,
+      },
+    ],
+    reasons: [],
+    evidence: [],
+    scanned_ms: 0,
+    cached: false,
+  });
+}
+
+/** Builds HISTORY_DAYS days of history ending at `now`, oldest first, with ids ascending. */
 export function buildHistory(now: number): RawEvent[] {
   const rnd = mulberry32(20261007);
   const items: { at: number; make: (id: number) => RawEvent }[] = [];
   const hour = 3600 * 1000;
-  for (let day = 13; day >= 0; day--) {
+  for (let day = HISTORY_DAYS - 1; day >= 0; day--) {
     const n = 5 + Math.floor(rnd() * 9);
     for (let k = 0; k < n; k++) {
       const at = now - day * 24 * hour - rnd() * 22 * hour - 0.5 * hour;
@@ -496,14 +555,14 @@ export const INITIAL_POLICY = {
 export const MODEL_INFO = {
   model_version: MODEL_VERSION,
   feature_schema_version: 1,
-  thresholds: { warn: 0.35, block: 0.8, target_fpr_block: 0.001 },
+  thresholds: MODEL_THRESHOLDS,
   metrics: {
     split: 'temporal',
     roc_auc: { value: 0.9912, ci_low: 0.9881, ci_high: 0.9938 },
     pr_auc: { value: 0.9618, ci_low: 0.9534, ci_high: 0.9689 },
     recall_at_fpr_0_001: { value: 0.874, ci_low: 0.851, ci_high: 0.896 },
     recall_at_fpr_0_01: { value: 0.943, ci_low: 0.929, ci_high: 0.956 },
-    brier: { value: 0.0114 },
+    brier: 0.0114,
     n_test_malicious: 4210,
     n_test_benign: 18342,
     baselines: {

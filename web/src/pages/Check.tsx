@@ -15,12 +15,20 @@ type Result =
   | { kind: 'nonexistent'; ecosystem: KnownEcosystem; name: string; message: string }
   | { kind: 'error'; error: unknown };
 
+/**
+ * A package the registry does not know. With `block_nonexistent` on the server says so with
+ * `code`; with it off, the 404 message is "'x' does not exist on PyPI". Other 404s (a
+ * missing version or file, "not found upstream") are ordinary errors.
+ */
 function isNonexistent(e: unknown): e is ApiError {
   return (
     e instanceof ApiError &&
-    (e.code === 'nonexistent_package' || (e.status === 404 && /not (exist|found)/i.test(e.message)))
+    (e.code === 'nonexistent_package' || (e.status === 404 && /does not exist/i.test(e.message)))
   );
 }
+
+/** What `CheckRequest.version` takes: an exact version, a range (`>=1,<2`, `^1.2`) or a dist-tag. */
+const VERSION_SPEC = /^[^\s\p{Cc}]{1,64}$/u;
 
 export function CheckPage() {
   useTitle('Check a package');
@@ -48,7 +56,7 @@ export function CheckPage() {
           ? 'Not a valid PyPI name. Use letters, digits, ".", "_" and "-".'
           : 'Not a valid npm name. Use lowercase letters, digits, "-", "." and "_", with an optional @scope/.';
     }
-    if (ver && !/^[A-Za-z0-9][A-Za-z0-9.+!_-]{0,63}$/.test(ver)) next.version = 'Not a valid version, for example 2.32.3.';
+    if (ver && !VERSION_SPEC.test(ver)) next.version = 'Not a valid version. Use a version, a range or a tag, for example 2.32.3 or >=2,<3.';
     setErrors(next);
     if (next.name || next.version) {
       if (next.name) nameRef.current?.focus();
@@ -204,12 +212,16 @@ export function CheckPage() {
           <>
             {result.verdict.id ? (
               <p className="mb-3 text-sm">
-                <Link to={`/verdicts/${encodeURIComponent(result.verdict.id)}`} className="font-medium text-accent hover:underline">
+                <Link
+                  to={`/verdicts/${encodeURIComponent(result.verdict.id)}`}
+                  state={{ kind: 'check' }}
+                  className="font-medium text-accent hover:underline"
+                >
                   Open the full verdict page
                 </Link>
               </p>
             ) : null}
-            <VerdictView verdict={result.verdict} thresholds={thresholds} headingLevel={2} />
+            <VerdictView verdict={result.verdict} thresholds={thresholds} kind="check" headingLevel={2} />
           </>
         ) : null}
       </div>

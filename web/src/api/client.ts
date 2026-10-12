@@ -1,4 +1,5 @@
 import {
+  ParseError,
   isRecord,
   parseEventList,
   parseModelInfo,
@@ -111,10 +112,13 @@ async function request<T>(path: string, parse: (v: unknown) => T, init: RequestI
     if (res.status >= 502 && res.status <= 504 && (body === null || body === '')) throw new ApiError(res.status, UNREACHABLE);
     throw errorFromBody(res.status, body, res.statusText);
   }
+  // Every endpoint answers JSON. Anything else (an HTML page from a proxy, plain text) would
+  // otherwise parse into a set of defaults that look like real data.
+  if (typeof body !== 'object' || body === null) throw new ParseError(`expected JSON from ${path}`);
   return parse(body);
 }
 
-export function eventsPath(q: EventQuery = {}): string {
+function eventsPath(q: EventQuery = {}): string {
   const params = new URLSearchParams();
   if (q.limit !== undefined) params.set('limit', String(q.limit));
   if (q.before) params.set('before', q.before);
@@ -154,7 +158,7 @@ export const api = {
   async policyWithRaw(signal?: AbortSignal): Promise<{ policy: Policy; raw: Record<string, unknown> }> {
     return request(
       '/api/policy',
-      (v) => ({ policy: parsePolicy(v), raw: isRecord(v) ? (isRecord(v.policy) ? v.policy : v) : {} }),
+      (v) => ({ policy: parsePolicy(v), raw: isRecord(v) ? v : {} }),
       { signal },
     );
   },
@@ -175,7 +179,8 @@ export const api = {
   check(req: CheckRequest, signal?: AbortSignal): Promise<Verdict> {
     return request('/api/check', parseVerdict, {
       method: 'POST',
-      body: JSON.stringify(req),
+      // Recorded on the event; without it the server records "api".
+      body: JSON.stringify({ ...req, client: 'dashboard' }),
       signal,
     });
   },

@@ -12,6 +12,8 @@ export interface LiveOptions {
   onStatus: (s: ConnectionStatus) => void;
   /** Fetches the newest events (newest first). Used for polling and catch-up. */
   fetchEvents: () => Promise<CustomsEvent[]>;
+  /** Called after each successful catch-up or poll: the server answered. */
+  onCatchUp?: () => void;
   url?: string;
   pollIntervalMs?: number;
   maxFailuresBeforePolling?: number;
@@ -52,6 +54,7 @@ export class LiveConnection {
       maxDelayMs: 30000,
       sseRetryWhilePollingMs: 60000,
       random: Math.random,
+      onCatchUp: () => undefined,
       ...options,
       EventSourceImpl: 'EventSourceImpl' in options ? options.EventSourceImpl : globalThis.EventSource,
     };
@@ -116,7 +119,6 @@ export class LiveConnection {
     }
     this.es = es;
     es.onopen = () => {
-      const recovering = this.hadOpen || this.failures > 0 || this.polling;
       this.failures = 0;
       this.hadOpen = true;
       if (this.polling) {
@@ -124,7 +126,10 @@ export class LiveConnection {
         this.clearTimer('poll');
       }
       this.setStatus('live');
-      if (recovering) void this.catchUp();
+      // Fetch what the stream did not carry: events from before this subscription (on the
+      // first open, those between the page's initial load and now) or during an outage.
+      // Delivery dedupes ids, so the overlap with events already shown is dropped.
+      this.catchUpQuietly();
     };
     es.addEventListener('install', (msg) => {
       const data = (msg as MessageEvent<unknown>).data;
@@ -136,6 +141,8 @@ export class LiveConnection {
         // Ignore malformed frames.
       }
     });
+    // The server dropped events for this slow client; refetch the newest ones.
+    es.addEventListener('lagged', () => this.catchUpQuietly());
     es.onerror = () => {
       if (this.es !== es) return;
       this.onSseFailure();
@@ -192,8 +199,15 @@ export class LiveConnection {
 
   private async catchUp(): Promise<void> {
     const events = await this.opts.fetchEvents();
+    if (this.stopped) return;
     // Deliver oldest first so consumers that prepend end up newest first.
     for (const e of [...events].reverse()) this.deliver(e);
+    this.opts.onCatchUp();
+  }
+
+  /** A catch-up whose failure is ignored: the stream itself is up, and the next one retries. */
+  private catchUpQuietly(): void {
+    this.catchUp().catch(() => undefined);
   }
 
   private closeEs(): void {

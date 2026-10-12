@@ -86,7 +86,7 @@ test('activity filters and links to a verdict', async ({ page }) => {
   await expect(page).toHaveURL(/q=lodash/);
   await expect(rows.first()).toContainText('@lodash-utils/core');
   await rows.first().getByRole('link').click();
-  await expect(page).toHaveURL(/\/verdicts\/v_c41d0e88$/);
+  await expect(page).toHaveURL(/\/verdicts\/42$/);
   await expect(page.getByRole('heading', { level: 1 })).toContainText('@lodash-utils/core');
 
   await page.getByRole('button', { name: 'Back' }).click();
@@ -105,7 +105,7 @@ test('verdict detail renders evidence safely and explains the decision', async (
     dialogs.push(d.message());
     void d.dismiss();
   });
-  await page.goto('/verdicts/v_c41d0e88');
+  await page.goto('/verdicts/42');
   const verdict = page.getByTestId('verdict');
   await expect(verdict.getByRole('heading', { level: 1 })).toContainText('@lodash-utils/core');
   await expect(page.getByTestId('risk-gauge').getByRole('img')).toHaveAttribute('aria-label', /Risk 96.4%, above the block threshold/);
@@ -125,7 +125,7 @@ test('verdict detail renders evidence safely and explains the decision', async (
 
 test('verdict copy button copies the full sha256', async ({ page, context }) => {
   await context.grantPermissions(['clipboard-read', 'clipboard-write']);
-  await page.goto('/verdicts/v_7f3a91c2');
+  await page.goto('/verdicts/41');
   const short = await page.getByTestId('sha-short').textContent();
   await page.getByRole('button', { name: 'Copy full SHA-256' }).click();
   await expect(page.getByRole('button', { name: 'Copied' })).toBeVisible();
@@ -209,11 +209,12 @@ test('theme toggle persists and follows the system by default', async ({ page })
 
 test('phone layout has no horizontal overflow', async ({ page }) => {
   await page.setViewportSize({ width: 360, height: 780 });
-  for (const path of ['/', '/activity', '/verdicts/v_c41d0e88', '/check', '/policy', '/model']) {
+  for (const path of ['/', '/activity', '/verdicts/42', '/check', '/policy', '/model']) {
     await page.goto(path);
     await page.getByRole('heading', { level: 1 }).first().waitFor();
-    await page.waitForTimeout(200);
-    const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
-    expect(overflow, path).toBeLessThanOrEqual(0);
+    // Charts and fonts settle after the heading renders; poll instead of sleeping.
+    await expect
+      .poll(() => page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth), { message: path })
+      .toBeLessThanOrEqual(0);
   }
 });

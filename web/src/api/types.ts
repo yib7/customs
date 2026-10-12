@@ -65,6 +65,10 @@ export interface Verdict {
   cached: boolean;
   /** Optional extension: thresholds in effect when the verdict was made. */
   thresholds: Thresholds | null;
+  /** Decision from the model alone, before policy rules. Null when the server did not say. */
+  model_decision: Decision | null;
+  /** Policy mode the verdict was made in; in `monitor` mode nothing is refused. */
+  mode: PolicyMode | null;
 }
 
 export interface CustomsEvent {
@@ -127,7 +131,7 @@ export type HistoryRule =
  * The established-release prior: a release of one of the `top` most popular names, published
  * at least `min_age_days` ago and not yanked, is allowed whatever the model scores it.
  */
-export interface EstablishedPolicy {
+interface EstablishedPolicy {
   enabled: boolean;
   top: number;
   min_age_days: number;
@@ -193,7 +197,12 @@ export interface ModelMetrics {
 export interface ModelInfo {
   model_version: string;
   feature_schema_version: number | null;
+  /** Thresholds in effect: the model's own with numeric policy overrides applied. */
   thresholds: Thresholds | null;
+  /** The model's own thresholds (ensemble.json), before policy overrides. */
+  model_thresholds: Thresholds | null;
+  /** True for placeholder models that were not trained on data. */
+  untrained: boolean;
   metrics: ModelMetrics | null;
 }
 
@@ -279,5 +288,4 @@ export interface ReleaseDiff {
   files_note: string | null;
   new_evidence: Evidence[];
   new_install_surface: string[];
-  verdict: Verdict | null;
 }

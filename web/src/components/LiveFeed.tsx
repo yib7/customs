@@ -45,7 +45,7 @@ function FeedRow({ e, now, isNew }: { e: CustomsEvent; now: number; isNew: boole
   return (
     <li className="border-t border-line first:border-t-0" data-testid="feed-row" data-event-id={e.id}>
       {e.verdict_id ? (
-        <Link to={`/verdicts/${encodeURIComponent(e.verdict_id)}`} className={`${cls} hover:bg-surface-2`}>
+        <Link to={`/verdicts/${encodeURIComponent(e.verdict_id)}`} state={{ kind: e.kind }} className={`${cls} hover:bg-surface-2`}>
           {body}
         </Link>
       ) : (

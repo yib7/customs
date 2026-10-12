@@ -79,11 +79,6 @@ export function formatPercent(p: number | null | undefined, digits = 1): string 
   return `${pct.toFixed(digits).replace(/\.0+$/, '')}%`;
 }
 
-export function formatProb(p: number | null | undefined, digits = 3): string {
-  if (p === null || p === undefined || !Number.isFinite(p)) return 'n/a';
-  return p.toFixed(digits);
-}
-
 const compactFmt = new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 1 });
 const intFmt = new Intl.NumberFormat('en-US');
 
