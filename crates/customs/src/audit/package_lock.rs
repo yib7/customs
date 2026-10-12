@@ -7,7 +7,7 @@ use std::path::Path;
 
 use serde_json::{Map, Value};
 
-use super::{json_key_lines, key_line, npm_pin, Parsed};
+use super::{json_key_lines, key_line, npm_pin, Parsed, SkipKind};
 
 pub(super) fn parse(text: &str, file: &Path, out: &mut Parsed) -> Result<(), String> {
     let doc: Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
@@ -28,7 +28,7 @@ pub(super) fn parse(text: &str, file: &Path, out: &mut Parsed) -> Result<(), Str
             let line = key_line(&lines, &["packages", key]);
             match field("version") {
                 Some(v) => npm_pin(out, file, line, name, v, field("resolved")),
-                None => out.skip(file, line, key, "no version recorded"),
+                None => out.skip(file, line, key, SkipKind::Other, "no version recorded"),
             }
         }
         return Ok(());
@@ -52,7 +52,7 @@ fn walk_v1(
         let field = |k: &str| e.get(k).and_then(Value::as_str);
         match field("version") {
             Some(v) => npm_pin(out, file, line, name, v, field("resolved")),
-            None => out.skip(file, line, name, "no version recorded"),
+            None => out.skip(file, line, name, SkipKind::Other, "no version recorded"),
         }
         if let Some(sub) = e.get("dependencies").and_then(Value::as_object) {
             path.push("dependencies".into());

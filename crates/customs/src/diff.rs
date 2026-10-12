@@ -69,20 +69,6 @@ pub struct ReleaseDiff {
     pub verdict: Option<Verdict>,
 }
 
-impl ReleaseDiff {
-    /// True when nothing that runs code or decides what runs changed: no new findings, no
-    /// new install-time code, no install script or dependency changes.
-    pub fn quiet(&self) -> bool {
-        self.new_evidence.is_empty()
-            && self.new_install_surface.is_empty()
-            && self.dependencies.is_empty()
-            && !self
-                .metadata
-                .iter()
-                .any(|m| m.field.starts_with("install script"))
-    }
-}
-
 /// Registry facts that differ between `from` and `to`.
 pub fn metadata_changes(from: &VersionMeta, to: &VersionMeta) -> Vec<MetaChange> {
     let mut out = Vec::new();
@@ -388,7 +374,6 @@ mod tests {
             new_install_surface: vec!["setup.js (postinstall)".into()],
             verdict: None,
         };
-        assert!(!diff.quiet());
         let text = render_text(&diff, None);
         for want in [
             "npm pkg 1.0.0 -> 1.0.1",

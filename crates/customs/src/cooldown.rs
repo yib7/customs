@@ -66,7 +66,7 @@ fn is_pre(eco: Ecosystem, v: &str) -> bool {
 
 /// Where a dist-tag that pointed at a hidden version should point now: the newest visible
 /// version below it, a prerelease only when the tag named one. `None` drops the tag.
-pub fn retarget<'a>(
+fn retarget<'a>(
     eco: Ecosystem,
     target: &str,
     visible: impl Iterator<Item = &'a str>,

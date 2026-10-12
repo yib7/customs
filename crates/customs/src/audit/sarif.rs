@@ -6,11 +6,13 @@ use std::path::Path;
 use customs_model::Decision;
 use serde_json::{json, Value};
 
-use super::{display_path, top_reasons, Finding, Outcome, Report};
+use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
+
+use super::{display_path, normalize, top_reasons, Finding, Outcome, Report};
 use crate::util::ecosystem_str;
 use crate::verdict::Verdict;
 
-pub const INFORMATION_URI: &str = "https://github.com/yib7/customs";
+const INFORMATION_URI: &str = "https://github.com/yib7/customs";
 const SCHEMA: &str = "https://json.schemastore.org/sarif-2.1.0.json";
 
 struct Rule {
@@ -67,6 +69,18 @@ fn rule(id: &str) -> Rule {
             "The scanner rejected the archive, so the malware classifier could not inspect its code.",
             "warning",
         ),
+        "customs/not-scanned" => (
+            "NotScanned",
+            "Package archive was not scanned",
+            "The archive is above the scan size limit, so the malware classifier did not inspect its code. The policy allows such archives unless a rule says otherwise.",
+            "note",
+        ),
+        "customs/min-age-resolution" => (
+            "MinAgeResolution",
+            "Resolved to an older release because of the minimum age",
+            "The newest matching release is younger than min_age_days, so Customs resolved the request to an older release.",
+            "note",
+        ),
         "customs/install-script-added" => (
             "InstallScriptAdded",
             "Release added or changed an install script",
@@ -84,6 +98,30 @@ fn rule(id: &str) -> Rule {
             "Release added a brand-new dependency",
             "This version adds a dependency first published days before it by accounts that do not maintain the package, or one the registry does not know. Hijacked releases pull in their payload this way.",
             "error",
+        ),
+        "customs/provenance-dropped" => (
+            "ProvenanceDropped",
+            "Release dropped its provenance attestation",
+            "This version has no provenance attestation, but the previous release had one. A release published with a stolen token, rather than from the project's CI, usually loses its provenance.",
+            "warning",
+        ),
+        "customs/publisher-changed" => (
+            "PublisherChanged",
+            "Release published by a new account",
+            "The npm account that published this version published none of the previous five releases. Account takeovers and hostile handovers show up this way.",
+            "warning",
+        ),
+        "customs/dormant-revival" => (
+            "DormantRevival",
+            "First release after a long dormancy",
+            "The previous release is older than dormant_days. Abandoned packages taken over by someone else often publish their first release in years.",
+            "warning",
+        ),
+        "customs/version-anomaly" => (
+            "VersionAnomaly",
+            "Unusual version number",
+            "The major version jumps by more than one, or the release extends an old major line that saw no release for dormant_days while a newer one exists, which reaches users who pin the old range.",
+            "warning",
         ),
         "customs/lockfile-mismatch" => (
             "LockfileResolvedMismatch",
@@ -121,6 +159,12 @@ fn rule(id: &str) -> Rule {
             "The registry has no installable files for the pinned version; it may have been removed.",
             "warning",
         ),
+        "customs/unchecked-source" => (
+            "UncheckedSource",
+            "Dependency is fetched from a source Customs did not check",
+            "The entry installs code from a git repository, a URL, a custom package index or a launcher Customs does not recognise, so no verdict covers it. Check where it comes from, or install it from the public registry.",
+            "note",
+        ),
         _ => ("", "", "", "warning"),
     };
     if name.is_empty() {
@@ -150,7 +194,7 @@ fn capitalize(s: &str) -> String {
 }
 
 /// SARIF rule id for a policy rule (`block_nonexistent` -> `customs/nonexistent-package`).
-pub fn policy_rule_id(rule: &str) -> String {
+fn policy_rule_id(rule: &str) -> String {
     match rule {
         "deny" => "customs/deny-list".into(),
         "block_nonexistent" => "customs/nonexistent-package".into(),
@@ -256,8 +300,59 @@ fn describe(f: &Finding) -> Option<(String, &'static str, String)> {
     }
 }
 
+/// Characters a URI path segment cannot carry as they are.
+const SEGMENT: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'%')
+    .add(b'<')
+    .add(b'>')
+    .add(b'?')
+    .add(b'[')
+    .add(b'\\')
+    .add(b']')
+    .add(b'^')
+    .add(b'`')
+    .add(b'{')
+    .add(b'|')
+    .add(b'}');
+
+/// A file inside the working directory is a relative URI under `%SRCROOT%`; one outside it
+/// is a `file://` URI, since `%SRCROOT%` cannot reach it.
+fn artifact_location(file: &Path, cwd: &Path) -> Value {
+    let shown = display_path(file, cwd);
+    let encoded = || {
+        shown
+            .split('/')
+            .map(|seg| utf8_percent_encode(seg, SEGMENT).to_string())
+            .collect::<Vec<_>>()
+            .join("/")
+    };
+    if Path::new(&shown).is_absolute() || shown.starts_with('/') {
+        return match url::Url::from_file_path(normalize(&cwd.join(file))) {
+            Ok(u) => json!({ "uri": u.as_str() }),
+            Err(()) => json!({ "uri": encoded() }),
+        };
+    }
+    json!({ "uri": encoded(), "uriBaseId": "%SRCROOT%" })
+}
+
+/// Severity order of SARIF levels.
+fn rank(level: &str) -> u8 {
+    match level {
+        "error" => 3,
+        "warning" => 2,
+        "note" => 1,
+        _ => 0,
+    }
+}
+
 pub fn to_sarif(report: &Report, cwd: &Path) -> Value {
     let mut rule_ids: Vec<String> = vec!["customs/model-block".into(), "customs/model-warn".into()];
+    // The most severe level each rule's results reach: a rule configured above its default
+    // severity is rated by what it reports.
+    let mut strongest: Vec<&'static str> = vec!["note", "note"];
     let mut results = Vec::new();
     for f in &report.findings {
         let Some((rule_id, lvl, message)) = describe(f) else {
@@ -267,9 +362,13 @@ pub fn to_sarif(report: &Report, cwd: &Path) -> Value {
             Some(i) => i,
             None => {
                 rule_ids.push(rule_id.clone());
+                strongest.push("note");
                 rule_ids.len() - 1
             }
         };
+        if rank(lvl) > rank(strongest[index]) {
+            strongest[index] = lvl;
+        }
         let eco = ecosystem_str(f.dep.ecosystem);
         let verdict = match &f.outcome {
             Outcome::Checked { verdict, url } => Some((verdict, url)),
@@ -297,10 +396,7 @@ pub fn to_sarif(report: &Report, cwd: &Path) -> Value {
             "message": { "text": message },
             "locations": [{
                 "physicalLocation": {
-                    "artifactLocation": {
-                        "uri": display_path(&f.dep.file, cwd),
-                        "uriBaseId": "%SRCROOT%",
-                    },
+                    "artifactLocation": artifact_location(&f.dep.file, cwd),
                     "region": { "startLine": f.dep.line },
                 }
             }],
@@ -310,22 +406,60 @@ pub fn to_sarif(report: &Report, cwd: &Path) -> Value {
             "properties": properties,
         }));
     }
+    // Entries that fetch code nothing checked; the project's own files and unpinned ranges
+    // are left out. Notes, so `--fail-on` is unaffected.
+    for k in report.skipped.iter().filter(|k| k.fetched()) {
+        let rule_id = "customs/unchecked-source";
+        let index = match rule_ids.iter().position(|r| r == rule_id) {
+            Some(i) => i,
+            None => {
+                rule_ids.push(rule_id.into());
+                strongest.push("note");
+                rule_ids.len() - 1
+            }
+        };
+        results.push(json!({
+            "ruleId": rule_id,
+            "ruleIndex": index,
+            "level": "note",
+            "message": { "text": format!("{} was not checked: {}.", k.spec, k.reason) },
+            "locations": [{
+                "physicalLocation": {
+                    "artifactLocation": artifact_location(&k.file, cwd),
+                    "region": { "startLine": k.line },
+                }
+            }],
+            "partialFingerprints": {
+                "customsPackage/v1": format!("unchecked/{}", k.spec),
+            },
+        }));
+    }
     let rules: Vec<Value> = rule_ids
         .iter()
-        .map(|id| {
+        .zip(&strongest)
+        .map(|(id, seen)| {
             let r = rule(id);
+            let rated = if rank(seen) > rank(r.level) {
+                *seen
+            } else {
+                r.level
+            };
             json!({
                 "id": r.id,
                 "name": r.name,
                 "shortDescription": { "text": r.short },
                 "fullDescription": { "text": r.full },
                 "helpUri": format!("{INFORMATION_URI}/blob/main/docs/github-action.md"),
-                "help": { "text": format!("{} Review the package before installing it; to accept it, add it to `allow` in customs.toml.", r.full) },
+                "help": { "text": if r.id == "customs/unchecked-source" {
+                    r.full.clone()
+                } else {
+                    format!("{} Review the package before installing it; to accept it, add it to `allow` in customs.toml.", r.full)
+                } },
                 "defaultConfiguration": { "level": r.level },
                 "properties": {
                     "tags": ["security", "supply-chain"],
-                    "precision": if r.level == "error" { "high" } else { "medium" },
-                    "security-severity": match r.level {
+                    "precision": if rated == "error" { "high" } else { "medium" },
+                    "security-severity": match rated {
                         "error" => "9.0",
                         "warning" => "5.0",
                         _ => "2.0",
@@ -335,15 +469,21 @@ pub fn to_sarif(report: &Report, cwd: &Path) -> Value {
         })
         .collect();
     let failures: Vec<Value> = report
-        .findings
+        .errors
         .iter()
-        .filter_map(|f| match &f.outcome {
+        .map(|e| {
+            json!({
+                "level": "error",
+                "message": { "text": format!("could not read {e}") },
+            })
+        })
+        .chain(report.findings.iter().filter_map(|f| match &f.outcome {
             Outcome::Failed(m) => Some(json!({
                 "level": "error",
                 "message": { "text": format!("checking {} failed: {m}", f.dep.label()) },
             })),
             _ => None,
-        })
+        }))
         .collect();
     json!({
         "$schema": SCHEMA,
@@ -371,6 +511,7 @@ pub fn to_sarif(report: &Report, cwd: &Path) -> Value {
 mod tests {
     use super::super::tests::{checked, finding, verdict};
     use super::*;
+    use crate::audit::{Dependency, SkipKind, Skipped};
     use std::path::PathBuf;
 
     #[test]
@@ -401,6 +542,7 @@ mod tests {
                 finding("swap", 9, Outcome::Mismatch("lockfile installs x".into())),
             ],
             skipped: vec![],
+            errors: vec![],
             via: "test".into(),
         };
         let s = to_sarif(&report, Path::new("/work"));
@@ -480,6 +622,165 @@ mod tests {
             inv["toolExecutionNotifications"].as_array().unwrap().len(),
             1
         );
+    }
+
+    #[test]
+    fn git_entries_become_notes() {
+        let skip = |line: usize, spec: &str, kind: SkipKind| Skipped {
+            file: PathBuf::from("requirements.txt"),
+            line,
+            spec: spec.into(),
+            kind,
+            reason: "installed from a URL or VCS".into(),
+        };
+        let report = Report {
+            files: vec![PathBuf::from("requirements.txt")],
+            findings: vec![],
+            skipped: vec![
+                skip(1, "git+https://github.com/x/y.git", SkipKind::Source),
+                skip(2, "flask>=2", SkipKind::Unpinned),
+                skip(3, "./lib", SkipKind::Local),
+                skip(4, "corp-tool==1.0", SkipKind::CustomIndex),
+            ],
+            errors: vec![],
+            via: "test".into(),
+        };
+        let s = to_sarif(&report, Path::new("/work"));
+        let run = &s["runs"][0];
+        let results = run["results"].as_array().unwrap();
+        // Code fetched from somewhere Customs did not check; not the project's own files
+        // or ranges a resolver pins later.
+        let got: Vec<(&str, &str, u64)> = results
+            .iter()
+            .map(|r| {
+                (
+                    r["ruleId"].as_str().unwrap(),
+                    r["level"].as_str().unwrap(),
+                    r["locations"][0]["physicalLocation"]["region"]["startLine"]
+                        .as_u64()
+                        .unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("customs/unchecked-source", "note", 1),
+                ("customs/unchecked-source", "note", 4)
+            ]
+        );
+        assert!(results[0]["message"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("git+https://github.com/x/y.git"));
+        assert_eq!(
+            results[1]["partialFingerprints"]["customsPackage/v1"],
+            "unchecked/corp-tool==1.0"
+        );
+        let idx = results[0]["ruleIndex"].as_u64().unwrap() as usize;
+        let r = &run["tool"]["driver"]["rules"][idx];
+        assert_eq!(r["name"], "UncheckedSource");
+        // Notes never fail the build.
+        assert_eq!(report.exit_code(super::super::FailOn::Warn), 0);
+    }
+
+    #[test]
+    fn paths_outside_the_root_are_file_uris() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let far = outside.path().join("my dir").join("req#1.txt");
+        let report = Report {
+            files: vec![],
+            findings: vec![
+                Finding {
+                    dep: Dependency {
+                        file: far.clone(),
+                        ..finding("a", 1, Outcome::Mismatch("x".into())).dep
+                    },
+                    outcome: Outcome::Mismatch("x".into()),
+                },
+                Finding {
+                    dep: Dependency {
+                        file: PathBuf::from("sub dir/requirements 100%.txt"),
+                        ..finding("b", 2, Outcome::Mismatch("x".into())).dep
+                    },
+                    outcome: Outcome::Mismatch("x".into()),
+                },
+            ],
+            skipped: vec![],
+            errors: vec![],
+            via: "test".into(),
+        };
+        let s = to_sarif(&report, root.path());
+        let loc = |i: usize| {
+            s["runs"][0]["results"][i]["locations"][0]["physicalLocation"]["artifactLocation"]
+                .clone()
+        };
+        let far_loc = loc(0);
+        let uri = far_loc["uri"].as_str().unwrap();
+        assert!(uri.starts_with("file:///"), "{uri}");
+        assert!(uri.ends_with("/my%20dir/req%231.txt"), "{uri}");
+        assert_eq!(url::Url::parse(uri).unwrap().to_file_path().unwrap(), far);
+        assert!(far_loc.get("uriBaseId").is_none(), "{far_loc}");
+        let near = loc(1);
+        assert_eq!(near["uri"], "sub%20dir/requirements%20100%25.txt");
+        assert_eq!(near["uriBaseId"], "%SRCROOT%");
+    }
+
+    #[test]
+    fn every_policy_rule_has_metadata() {
+        // Every rule policy.rs and engine.rs can report, except the allow-only `allow` and
+        // `established`.
+        for policy in [
+            "deny",
+            "block_nonexistent",
+            "min_age_days",
+            "block_install_scripts_from_new",
+            "install_script_added",
+            "nonregistry_dependency_added",
+            "provenance_dropped",
+            "publisher_changed",
+            "dormant_revival",
+            "young_dependency_added",
+            "version_anomaly",
+            "scan_error",
+            "not_scanned",
+            "unread_code",
+            "startup_hook",
+            "agent_bypass",
+            "min_age_resolution",
+        ] {
+            let r = rule(&policy_rule_id(policy));
+            assert!(
+                !r.short.starts_with("Customs policy rule"),
+                "{policy} has no SARIF metadata"
+            );
+        }
+    }
+
+    #[test]
+    fn security_severity_follows_the_strongest_result() {
+        // provenance_dropped warns by default; configured to block, its alerts are errors.
+        let report = Report {
+            files: vec![PathBuf::from("package-lock.json")],
+            findings: vec![finding(
+                "x",
+                1,
+                checked(verdict("x", Decision::Block, Some("provenance_dropped"))),
+            )],
+            skipped: vec![],
+            errors: vec![],
+            via: "test".into(),
+        };
+        let s = to_sarif(&report, Path::new("/work"));
+        let run = &s["runs"][0];
+        let result = &run["results"][0];
+        assert_eq!(result["ruleId"], "customs/provenance-dropped");
+        assert_eq!(result["level"], "error");
+        let idx = result["ruleIndex"].as_u64().unwrap() as usize;
+        let r = &run["tool"]["driver"]["rules"][idx];
+        assert_eq!(r["defaultConfiguration"]["level"], "warning");
+        assert_eq!(r["properties"]["security-severity"], "9.0");
     }
 
     #[test]

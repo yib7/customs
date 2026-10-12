@@ -6,7 +6,7 @@ use customs_scan::Ecosystem;
 use serde::Deserialize;
 use toml::Spanned;
 
-use super::{host_of, known_registry, LineIndex, Parsed};
+use super::{host_of, LineIndex, Parsed, SkipKind};
 
 #[derive(Deserialize)]
 struct Lock {
@@ -42,20 +42,28 @@ pub(super) fn parse(text: &str, file: &Path, out: &mut Parsed) -> Result<(), Str
             Some(s) => match s.kind.as_str() {
                 // Path dependencies are the project's own code.
                 "directory" => {}
-                "legacy" if known_registry(&s.url) => {
+                "legacy" if out.known_registry(&s.url) => {
                     out.dep(Ecosystem::Pypi, name, &p.version, file, line)
                 }
                 "legacy" => out.skip(
                     file,
                     line,
                     &spec,
+                    SkipKind::CustomIndex,
                     format!("from a custom package index ({})", host_of(&s.url)),
                 ),
-                "file" => out.skip(file, line, &spec, "installed from a local file"),
+                "file" => out.skip(
+                    file,
+                    line,
+                    &spec,
+                    SkipKind::Local,
+                    "installed from a local file",
+                ),
                 other => out.skip(
                     file,
                     line,
                     &spec,
+                    SkipKind::Source,
                     format!("installed from a {other} source ({})", s.url),
                 ),
             },

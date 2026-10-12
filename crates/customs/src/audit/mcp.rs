@@ -15,8 +15,8 @@ use std::path::Path;
 use customs_scan::Ecosystem;
 use serde_json::Value;
 
-use super::{json_key_lines, key_line, Parsed};
-use crate::hook::parse::{parse_command, Target};
+use super::{json_key_lines, jsonc, key_line, Parsed, SkipKind};
+use crate::hook::parse::{looks_like_path, looks_like_url, parse_command, Target};
 
 /// File names read as MCP configurations. `settings.json` and `config.toml` count only
 /// inside `.gemini` and `.codex`.
@@ -111,7 +111,8 @@ fn is_exact(eco: Ecosystem, v: &str) -> bool {
 pub fn parse(text: &str, path: &Path, out: &mut Parsed) -> Result<(), String> {
     let is_toml = path.extension().is_some_and(|e| e == "toml");
     let servers = if is_toml {
-        let doc: toml::Value = toml::from_str(text).map_err(|e| e.message().to_string())?;
+        let doc: toml::Value =
+            toml::from_str(text).map_err(|e| e.to_string().trim_end().to_string())?;
         let v = serde_json::to_value(doc).map_err(|e| e.to_string())?;
         let header_line = |p: &[&str]| {
             let name = p.last().copied().unwrap_or("");
@@ -124,8 +125,10 @@ pub fn parse(text: &str, path: &Path, out: &mut Parsed) -> Result<(), String> {
         };
         servers_in(&v["mcp_servers"], &["mcp_servers"], &header_line)
     } else {
-        let v: Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
-        let lines = json_key_lines(text);
+        // `.vscode/mcp.json` and `.gemini/settings.json` are JSON with comments.
+        let text = jsonc(text);
+        let v: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+        let lines = json_key_lines(&text);
         let at = |p: &[&str]| key_line(&lines, p);
         let mut all = servers_in(&v["mcpServers"], &["mcpServers"], &at);
         // VS Code.
@@ -156,24 +159,28 @@ pub fn parse(text: &str, path: &Path, out: &mut Parsed) -> Result<(), String> {
                 .collect::<Vec<_>>()
                 .join(" ")
         };
-        let base = s
-            .command
-            .rsplit(['/', '\\'])
-            .next()
-            .unwrap_or(&s.command)
-            .trim_end_matches(".exe")
-            .to_string();
+        // The program and its arguments, also when `command` holds the whole command line.
+        let (program, args): (&str, Vec<String>) = match s.command.split_once(' ') {
+            Some((p, rest)) if s.args.is_empty() => {
+                (p, rest.split_whitespace().map(str::to_string).collect())
+            }
+            _ => (&s.command, s.args.clone()),
+        };
+        let base = program_name(program);
         if matches!(base.as_str(), "docker" | "podman") {
             out.skip(
                 path,
                 s.line,
                 &format!("{}: {cmd}", s.name),
+                SkipKind::Other,
                 "a container image; Customs checks PyPI and npm packages",
             );
             continue;
         }
+        let mut targets = 0usize;
         for install in parse_command(&cmd, cwd) {
             for t in install.targets {
+                targets += 1;
                 match t {
                     Target::Package {
                         ecosystem,
@@ -189,22 +196,138 @@ pub fn parse(text: &str, path: &Path, out: &mut Parsed) -> Result<(), String> {
                         out.server_dep(ecosystem, &name, &version, pinned, path, s.line);
                     }
                     Target::Unverifiable { spec, reason, .. } => {
-                        out.skip(path, s.line, &format!("{}: {spec}", s.name), reason);
+                        let kind = if looks_like_url(&spec) {
+                            SkipKind::Source
+                        } else if looks_like_path(&spec) {
+                            SkipKind::Local
+                        } else {
+                            SkipKind::Other
+                        };
+                        out.skip(path, s.line, &format!("{}: {spec}", s.name), kind, reason);
                     }
                     Target::RemoteScript { url, runner } => {
                         out.skip(
                             path,
                             s.line,
                             &format!("{}: {url}", s.name),
+                            SkipKind::Source,
                             format!("downloads a script and runs it with {runner}"),
                         );
                     }
-                    Target::Project { .. } => {}
+                    Target::Project { dir, .. } => {
+                        // `uv run --directory srv ...` syncs that project at every start.
+                        out.skip(
+                            path,
+                            s.line,
+                            &format!("{}: {cmd}", s.name),
+                            SkipKind::Other,
+                            format!(
+                                "installs the project in {} at start; audit its lockfile",
+                                dir.display()
+                            ),
+                        );
+                    }
                 }
             }
         }
+        if targets == 0 && !runs_local_program(&base, program, &args) {
+            out.skip(
+                path,
+                s.line,
+                &format!("{}: {cmd}", s.name),
+                SkipKind::Other,
+                "launcher not recognised; Customs could not tell what it installs",
+            );
+        }
     }
     Ok(())
+}
+
+/// The program's file name, lowercased, without a Windows executable suffix:
+/// `C:\nodejs\npx.cmd` is `npx`.
+fn program_name(command: &str) -> String {
+    let file = command
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(command)
+        .to_ascii_lowercase();
+    [".exe", ".cmd", ".bat", ".ps1"]
+        .iter()
+        .find_map(|s| file.strip_suffix(s))
+        .unwrap_or(&file)
+        .to_string()
+}
+
+/// Programs that fetch packages or run other commands; a configuration that starts one of
+/// them without Customs finding a package could still install anything.
+const LAUNCHERS: &[&str] = &[
+    "npx",
+    "npm",
+    "pnpm",
+    "pnpx",
+    "yarn",
+    "yarnpkg",
+    "bunx",
+    "uvx",
+    "uv",
+    "pip",
+    "pip3",
+    "pipx",
+    "poetry",
+    "pdm",
+    "pipenv",
+    "cmd",
+    "powershell",
+    "pwsh",
+    "sh",
+    "bash",
+    "zsh",
+    "env",
+    "sudo",
+];
+
+/// Interpreters that install nothing when they run a file from disk.
+const INTERPRETERS: &[&str] = &[
+    "node", "python", "python3", "py", "deno", "bun", "ruby", "java", "dotnet",
+];
+
+/// True when a server starts a program already on disk, so nothing is installed at start:
+/// a path to an executable (`/opt/mcp/server`, `C:\tools\server.exe`), or an interpreter
+/// running a local file (`node build/index.js`) or an installed module (`python -m x`).
+fn runs_local_program(base: &str, command: &str, args: &[String]) -> bool {
+    if LAUNCHERS.contains(&base) {
+        return false;
+    }
+    if INTERPRETERS.contains(&base) {
+        let python = matches!(base, "python" | "python3" | "py");
+        for a in args {
+            if python && a == "-m" {
+                return true;
+            }
+            // `deno run ./main.ts`, `bun run ./index.ts`; other words before the file are
+            // options.
+            if a.starts_with('-') || a == "run" {
+                continue;
+            }
+            return is_local_file(a);
+        }
+        return false;
+    }
+    looks_like_path(command) || command.contains(['/', '\\'])
+}
+
+/// A script or program file on disk, as opposed to a package name.
+fn is_local_file(a: &str) -> bool {
+    const SCRIPTS: &[&str] = &[
+        ".js", ".mjs", ".cjs", ".ts", ".mts", ".cts", ".py", ".rb", ".jar", ".dll",
+    ];
+    // `jsr:@std/x`, `npm:pkg` and URLs are fetched, whatever their slashes.
+    if a.contains(':') && !looks_like_path(a) {
+        return false;
+    }
+    looks_like_path(a)
+        || a.contains(['/', '\\'])
+        || SCRIPTS.iter().any(|e| a.to_ascii_lowercase().ends_with(e))
 }
 
 #[cfg(test)]
@@ -277,6 +400,65 @@ mod tests {
         let p = deps(user, "home/.claude.json");
         assert_eq!(p.deps[0].name, "mcp-x");
         assert_eq!(p.deps[0].line, 1);
+    }
+
+    #[test]
+    fn unrecognised_launcher_gets_a_row() {
+        let cfg = r#"{
+  "mcpServers": {
+    "weird": { "command": "weird-launcher", "args": ["-y", "pkg"] },
+    "bare": { "command": "some-mcp-server" },
+    "local": { "command": "node", "args": ["./server.js"] },
+    "built": { "command": "node", "args": ["--inspect", "build/index.js"] },
+    "py": { "command": "python3", "args": ["-m", "my_server"] },
+    "bin": { "command": "/opt/mcp/bin/server", "args": ["--stdio"] },
+    "win": { "command": "C:\\tools\\server.exe" },
+    "gh": { "command": "docker.EXE", "args": ["run", "-i", "ghcr.io/github/github-mcp-server"] }
+  }
+}"#;
+        let p = deps(cfg, "proj/.mcp.json");
+        let rows: Vec<(usize, &str, SkipKind)> = p
+            .skipped
+            .iter()
+            .map(|s| (s.line, s.reason.as_str(), s.kind))
+            .collect();
+        // Programs already on disk install nothing at start; a launcher Customs cannot read
+        // could install anything, so it is listed rather than silently left out.
+        // `cmd /c npx -y pkg` and `npx.cmd` land here too until the hook's command parser
+        // unwraps them, and then become package targets.
+        assert_eq!(rows.len(), 3, "{rows:?}");
+        assert_eq!((rows[0].0, rows[0].2), (3, SkipKind::Other));
+        assert!(rows[0].1.contains("launcher not recognised"), "{rows:?}");
+        assert_eq!(p.skipped[0].spec, "weird: weird-launcher -y pkg");
+        assert!(p.skipped[0].fetched());
+        assert_eq!(rows[1].0, 4);
+        assert!(rows[1].1.contains("launcher not recognised"), "{rows:?}");
+        assert_eq!(rows[2].0, 10);
+        assert!(rows[2].1.contains("container image"), "{rows:?}");
+        assert!(p.deps.is_empty(), "{:?}", p.deps);
+
+        // The whole command line in `command`.
+        let p = deps(
+            r#"{"mcpServers": {"a": {"command": "node ./server.js"}, "b": {"command": "weird-launcher x"}}}"#,
+            "proj/.mcp.json",
+        );
+        assert_eq!(p.skipped.len(), 1, "{:?}", p.skipped);
+        assert_eq!(p.skipped[0].spec, "b: weird-launcher x");
+        // A registry specifier is not a file on disk.
+        assert!(!is_local_file("jsr:@std/http/file-server"));
+        assert!(!is_local_file("https://example.com/mod.ts"));
+        assert!(is_local_file("C:\\srv\\main.ts"));
+    }
+
+    #[test]
+    fn uv_run_directory_is_listed() {
+        let cfg = r#"{"mcpServers": {"srv": {"command": "uv", "args": ["run", "--directory", "srv", "main.py"]}}}"#;
+        let p = deps(cfg, "proj/.mcp.json");
+        assert_eq!(p.skipped.len(), 1, "{:?}", p.skipped);
+        let s = &p.skipped[0];
+        assert!(s.reason.contains("srv"), "{}", s.reason);
+        assert!(s.reason.contains("lockfile"), "{}", s.reason);
+        assert!(s.fetched());
     }
 
     #[test]

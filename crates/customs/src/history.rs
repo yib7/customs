@@ -97,6 +97,18 @@ pub fn is_nonregistry_spec(spec: &str) -> bool {
     if PREFIXES.iter().any(|p| s.starts_with(p)) {
         return true;
     }
+    // Local paths, as npm-package-arg recognises them: `.`/`..` relative, `/` and `~/`
+    // absolute, Windows drive and UNC paths.
+    let b = s.as_bytes();
+    if s.starts_with(['.', '/', '\\'])
+        || s.starts_with("~/")
+        || (b.len() > 2
+            && b[0].is_ascii_alphabetic()
+            && b[1] == b':'
+            && matches!(b[2], b'/' | b'\\'))
+    {
+        return true;
+    }
     // `owner/repo` and `owner/repo#ref`: GitHub shorthand.
     let repo = s.split('#').next().unwrap_or("");
     let mut parts = repo.split('/');
@@ -106,6 +118,25 @@ pub fn is_nonregistry_spec(spec: &str) -> bool {
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
     };
     matches!((parts.next(), parts.next(), parts.next()), (Some(a), Some(b), None) if ok(a) && ok(b) && !a.starts_with('@'))
+}
+
+/// The package a dependency entry installs: the key, unless the spec is an npm alias
+/// (`"left-pad": "npm:real@^1"` or `"npm:@scope/real"`), which installs `real` under the
+/// key's name.
+fn install_target<'a>(key: &'a str, spec: &'a str) -> &'a str {
+    let Some(aliased) = spec.trim().strip_prefix("npm:") else {
+        return key;
+    };
+    let start = usize::from(aliased.starts_with('@'));
+    let name = match aliased[start..].find('@') {
+        Some(at) => &aliased[..start + at],
+        None => aliased,
+    };
+    if name.is_empty() {
+        key
+    } else {
+        name
+    }
 }
 
 /// An earlier release, as `version_anomaly` sees it.
@@ -217,24 +248,33 @@ pub fn release_history(meta: &PackageMeta, version: &str) -> Option<ReleaseHisto
                 .is_some_and(|t| cur_time - t >= chrono::Duration::hours(SETTLED_HOURS))
         })
         .copied();
-    let lacks = |v: &VersionMeta, n: &String| !v.dependencies.iter().any(|(p, _)| p == n);
+    // Compared by the package installed, not the key: an alias can swap the package behind
+    // an existing key, or give a new package a familiar key.
+    let lacks = |v: &VersionMeta, n: &str| {
+        !v.dependencies
+            .iter()
+            .any(|(k, s)| install_target(k, s) == n)
+    };
     let added_dependencies = match earlier.first() {
         Some(prev) => {
             let mut added: Vec<AddedDependency> = cur
                 .dependencies
                 .iter()
+                .map(|(k, s)| (install_target(k, s), s))
                 .filter(|(n, s)| {
-                    n != &meta.name
+                    *n != meta.name
                         && !is_nonregistry_spec(s)
                         && (lacks(prev, n) || settled.is_some_and(|v| lacks(v, n)))
                 })
                 .map(|(n, s)| AddedDependency {
-                    name: n.clone(),
+                    name: n.to_string(),
                     spec: s.clone(),
                     info: None,
                 })
                 .collect();
             added.sort_by(|a, b| a.name.cmp(&b.name));
+            // Two keys can alias one package.
+            added.dedup_by(|a, b| a.name == b.name);
             added
         }
         None => Vec::new(),
@@ -269,6 +309,17 @@ mod tests {
             "owner/repo",
             "owner/repo#main",
             "gitlab:a/b",
+            // Local paths, which npm installs without the registry.
+            "./x",
+            "../x",
+            "~/x",
+            "/abs/x",
+            "../../x",
+            "./a/b",
+            "C:\\x",
+            "c:/x",
+            "\\\\server\\share",
+            ".",
         ] {
             assert!(is_nonregistry_spec(s), "{s}");
         }
@@ -310,6 +361,44 @@ mod tests {
             .unwrap()
             .added_dependencies
             .is_empty());
+    }
+
+    #[test]
+    fn aliased_dependency_counts_as_added_under_its_real_name() {
+        let v = serde_json::json!({
+            "name": "app",
+            "time": {"1.0.0": "2024-01-01T00:00:00Z", "1.0.1": "2024-02-01T00:00:00Z"},
+            "versions": {
+                "1.0.0": {"dist": {"tarball": "t"}, "dependencies":
+                    {"left-pad": "^1.3.0", "lodash": "^4.17.21", "types": "npm:@types/node@^20"}},
+                "1.0.1": {"dist": {"tarball": "t"}, "dependencies": {
+                    // Same key, another package.
+                    "left-pad": "npm:fresh-evil@1.0.0",
+                    // Still the real lodash, now through an alias: not an addition.
+                    "lodash": "npm:lodash@^4.17.21",
+                    // A new key named after a well-known package.
+                    "react": "npm:@evil/react",
+                    "types": "npm:@types/node@^22"
+                }}
+            }
+        });
+        let m = parse_npm_packument(&v).unwrap();
+        let h = release_history(&m, "1.0.1").unwrap();
+        let added: Vec<(&str, &str)> = h
+            .added_dependencies
+            .iter()
+            .map(|d| (d.name.as_str(), d.spec.as_str()))
+            .collect();
+        assert_eq!(
+            added,
+            vec![
+                ("@evil/react", "npm:@evil/react"),
+                ("fresh-evil", "npm:fresh-evil@1.0.0"),
+            ]
+        );
+        assert_eq!(install_target("x", "npm:@scope/real@^1"), "@scope/real");
+        assert_eq!(install_target("x", "npm:real"), "real");
+        assert_eq!(install_target("x", "^1"), "x");
     }
 
     type Row<'a> = (&'a str, &'a str, Option<&'a str>, bool, Option<&'a str>);

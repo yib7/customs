@@ -1009,7 +1009,7 @@ itself a prerelease. A version without a publish time gets no history rules.
 | `dormant_revival` | npm, PyPI | the previous release is more than `dormant_days` (1 to 3650) older |
 | `version_anomaly` | npm, PyPI | the major version is more than one above the highest earlier version, or the release extends an older major line while a newer major exists and that line had no release for `dormant_days` (or never had one) |
 | `nonregistry_dependency_added` | npm | a `dependencies` or `optionalDependencies` entry whose spec fetches code outside the registry (`git+`, `github:`, `owner/repo`, `http(s):`, `file:`, `link:` and the like) is new or changed since the previous release, or since the newest release at least 24 hours older |
-| `young_dependency_added` | npm | a dependency new since the previous release (or since the newest release at least 24 hours older) does not exist on the registry, or was first published less than `young_dependency_days` (1 to 365) before this release, and shares no maintainer or publisher with the package |
+| `young_dependency_added` | npm | a dependency new since the previous release (or since the newest release at least 24 hours older), compared by the package installed so an `npm:` alias counts under its real name, does not exist on the registry, or was first published less than `young_dependency_days` (1 to 365) before this release, and shares no maintainer or publisher with the package |
 
 `provenance_dropped`, `publisher_changed`, `dormant_revival`, `version_anomaly` and
 `young_dependency_added` apply only to releases published within `history_window_days` (90
@@ -1218,7 +1218,7 @@ concurrently. Stdout carries protocol messages only; logs go to stderr.
 | `check_package` | `ecosystem` (`pypi`/`npm`), `name`, `version?` | Same path as `customs check`: summary text (decision, risk, top reasons, policy hits, nearest popular name for a typosquat or nonexistent name) plus the verdict as `structuredContent` |
 | `check_install_command` | `command`, `cwd?` | Parses the command with the hook parser (section 9), checks every target, returns a per-package table and the most severe decision |
 | `explain_verdict` | `id` | `GET /api/verdicts/{id}` on the server, rendered with reasons and evidence (file, line, snippet) |
-| `audit_lockfile` | `path`, `recursive?` | Same as `customs audit` (section 11) with the default 8 concurrent checks: the overall decision, a summary, and one row per package that is not allowed (mismatched download URLs included); allowed rows are only counted so a large lockfile stays small |
+| `audit_lockfile` | `path`, `recursive?` | Same as `customs audit` (section 11) with the default 8 concurrent checks: the overall decision, a summary, and one row per package that is not allowed (mismatched download URLs included); allowed rows are only counted so a large lockfile stays small. A package whose check failed makes the decision at least `warn` and, unless something blocks, sets `isError` |
 | `diff_release` | `ecosystem`, `name`, `to?`, `from?` | Same as `customs diff` (`GET /api/diff`, section 7): the report as text, the diff as `structuredContent` |
 | `scan_archive` | `path`, `ecosystem?`, `name?` | Same as `customs scan`: offline, a throwaway engine, nothing stored |
 
@@ -1411,20 +1411,21 @@ base model is made at matched false positive rates. It was not adopted (see the 
 
 `customs audit [PATHS...]` checks every dependency a project pins, for CI and for reviewing
 a pull request before anything is installed. PATHS are lockfiles or directories
-(searched for known names; `--recursive` walks subdirectories, skipping `node_modules`,
-`.git`, `.venv` and `target`). Parsing is offline (`crates/customs/src/audit/`):
+(searched for known names; `--recursive` walks subdirectories, skipping hidden ones,
+`node_modules`, `target` and virtual environments: `venv`, `env`, `__pypackages__`,
+`site-packages` and any directory holding a `pyvenv.cfg`). Parsing is offline (`crates/customs/src/audit/`):
 
 | File | Pins taken from |
 |---|---|
-| `requirements*.txt` | `name==version` / `===` lines; `-r` includes relative to the file; markers, extras, `--hash` and `\` continuations handled |
+| `requirements*.txt` | `name==version` / `===` lines; `-r` includes relative to the file; markers, extras, `--hash` and `\` continuations handled; UTF-16 with a byte order mark is read; a remote `-r` URL is an error. An index other than PyPI (`-i`, `--index-url`, `--extra-index-url`, `-f`/`--find-links`, `--no-index`) anywhere in the include tree lists every pin as not checked, since pip may take any of them from that index |
 | `poetry.lock`, `uv.lock` | `[[package]]` `name` and `version` |
-| `Pipfile.lock` | `default` and `develop`, `"version": "==x"` |
+| `Pipfile.lock` | `default` and `develop`, `"version": "==x"`; the entry's `index`, or the first of `_meta.sources` when it names none, must be PyPI, and an index the sources do not list leaves the entry unchecked |
 | `package-lock.json`, `npm-shrinkwrap.json` | v2/v3 `packages` (node_modules paths, nested and scoped, `name` for aliases); v1 `dependencies` tree |
 | `pnpm-lock.yaml` | `packages:` keys (v5 `/a/1.0.0`, v6 `/a@1.0.0(peer@1)`, v9 `a@1.0.0`), read line by line |
-| `yarn.lock` | classic and berry entry headers with `version` (berry `resolution` names the installed package) |
+| `yarn.lock` | classic: entry headers with `version` and `resolved`; berry: `resolution` names the package and version Yarn fetches (a different `version` field is a mismatch) and its `__archiveUrl` is checked like `resolved` |
 | `bun.lock` | `packages` entries: `name@version` first (the real name for aliases), then the tarball URL, empty for the default registry; trailing commas allowed. `bun.lockb` is binary and refused with a hint to write `bun.lock` |
-| `deno.lock` | v4/v5 `npm` map (v3: `packages.npm`), keys `name@version` with `_peer@version` suffixes, `tarball` when the registry is not the default; `jsr` packages and `remote` modules listed as not checked |
-| MCP server configurations | `mcpServers` in `.mcp.json`, `.cursor/mcp.json`, `.gemini/settings.json`, `claude_desktop_config.json`, `mcp_config.json` (Windsurf) and `~/.claude.json` (also per project); `servers` in `.vscode/mcp.json`; `[mcp_servers.*]` in `.codex/config.toml`. `command` and `args` go through the hook's command parser, so `npx`, `bunx`, `pnpm dlx`, `uvx` and `pipx run` name their packages; `docker` servers are listed as not checked |
+| `deno.lock` | v4/v5 `npm` map (v3: `packages.npm`, v2: `npm.packages`; other versions are an error), keys `name@version` with `_peer@version` suffixes, `tarball` when the registry is not the default; `jsr` packages and `remote` modules listed as not checked |
+| MCP server configurations | `mcpServers` in `.mcp.json`, `.cursor/mcp.json`, `.gemini/settings.json`, `claude_desktop_config.json`, `mcp_config.json` (Windsurf) and `~/.claude.json` (also per project); `servers` in `.vscode/mcp.json`; `[mcp_servers.*]` in `.codex/config.toml`. `command` and `args` go through the hook's command parser, so `npx`, `bunx`, `pnpm dlx`, `uvx` and `pipx run` name their packages; `docker` servers are listed as not checked, and so are `uv run --directory` projects (audit that project's lockfile) and any server whose launcher Customs does not recognise, so no server goes unlisted. Only a program on disk (a path, or `node`, `python`, `deno`, `bun` and similar running a local file or `python -m`) is skipped silently |
 
 A directory search also looks in `.cursor`, `.vscode`, `.gemini` and `.codex` without
 `--recursive`. An agent starts its MCP servers itself, before any tool call, so the hook
@@ -1439,8 +1440,9 @@ and `resolved_version`).
 Each pin keeps its file and 1-based line. Pins are deduplicated on (ecosystem, normalized
 name, version), keeping the first location. Entries that cannot be checked are listed as
 "not checked" with a reason: unpinned requirements, editable installs, URLs, VCS and local
-paths, and packages resolved from a registry other than PyPI, npm, Yarn's npm mirror or a
-loopback host (a Customs proxy). The project's own workspace packages (`editable`,
+paths, and packages resolved from a registry other than PyPI, npm, Yarn's npm mirror or the
+Customs server's own origin (`--server`, at its port only, under any loopback name for a
+local server; a local Verdaccio on another port is a custom registry). The project's own workspace packages (`editable`,
 `virtual`, `workspace:`, `link:`, `portal:`, npm `link: true`) and berry `patch:` entries
 (the unpatched entry is listed too) are skipped silently.
 
@@ -1459,8 +1461,11 @@ package and version back out of every registry tarball URL (`<name>/-/<base>-<ve
 scoped and percent-encoded names, any path prefix such as the proxy's `/npm/`) and reports a
 `mismatch` when they differ from the entry or the URL is not a tarball path. A mismatch
 counts as block, and the package the URL actually serves is checked in its place. uv
-records file URLs too, but it validates the downloaded distribution's name and version
-against the lock entry, so `uv.lock` gets no such check.
+records file URLs too (`sdist.url`, `wheels[].url`) and downloads them as written: an entry
+whose file is on a host other than PyPI is listed as not checked (custom index), and one
+whose wheel or sdist file name names another package or version is a `mismatch`, with the
+named file checked in its place. A registry entry with no `version` is listed as not
+checked.
 
 Pins are checked through the same client as `customs check` (a running server, else
 in-process), `--jobs` (default 8) at a time; PyPI pins are sent as `==version` so a version
@@ -1468,14 +1473,19 @@ the registry lacks is reported as unavailable instead of resolving to another on
 verdict cache makes repeated audits cheap.
 
 Exit codes: 1 when a package meets `--fail-on` (`block` by default, `warn`, or `never`; an
-unavailable version counts as warn and a mismatch as block), otherwise 2 when a check failed (network, server) or
-on usage and parse errors, otherwise 0. `--format text` prints a summary line and a table
+unavailable version counts as warn and a mismatch as block), otherwise 2 when a check failed (network, server), a file
+could not be read, or on usage errors, otherwise 0. A file that cannot be parsed does not
+stop the audit: the others are still checked and the report lists it under "Could not
+read" (JSON `errors`, SARIF `toolExecutionNotifications`). MCP configurations are read as
+JSON with comments and trailing commas, as VS Code and Gemini CLI write them. `--format text` prints a summary line and a table
 of non-allowed packages; `json` prints every result with its full verdict; `sarif` prints
 SARIF 2.1.0 with one run (driver `Customs`), rules `customs/model-block`,
 `customs/model-warn`, `customs/unavailable`, `customs/lockfile-mismatch` and one per policy rule that appears
 (`customs/deny-list`, `customs/nonexistent-package`, `customs/min-age`,
 `customs/install-scripts-from-new-package`, `customs/scan-error`), and one result per warned
-or blocked package, or mismatched entry, at its lockfile line (path relative to the working directory) with
+or blocked package, or mismatched entry, at its lockfile line (a percent-encoded path relative to the working directory under `%SRCROOT%`, or a `file://` URI for a file outside it) with
 `partialFingerprints.customsPackage/v1 = <ecosystem>/<name>/<version>`, so GitHub keeps one
-alert per package version across runs. `action.yml` wraps this for GitHub Actions
+alert per package version across runs. Not-checked entries that fetch code (git, URL,
+custom index, unrecognised MCP launcher; not local paths or unpinned ranges) are
+note-level results under `customs/unchecked-source`, which never affect `--fail-on`. `action.yml` wraps this for GitHub Actions
 (`docs/github-action.md`).

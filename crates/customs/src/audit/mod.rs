@@ -61,12 +61,31 @@ impl Dependency {
     }
 }
 
+/// Why an entry is not checked. Decided by the parser, never from the reason text, which
+/// can quote lockfile-controlled URLs and hosts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkipKind {
+    /// The project's own files: a local path, an editable install, a workspace member.
+    Local,
+    /// A range or bare name that a resolver pins later.
+    Unpinned,
+    /// A git repository or a URL.
+    Source,
+    /// A package index or registry Customs does not check.
+    CustomIndex,
+    /// Anything else that installs code Customs did not check: an entry it could not read,
+    /// a JSR package, a container image, a launcher it does not recognise.
+    Other,
+}
+
 /// An entry that is not checked: not pinned to an exact version, or not from a registry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Skipped {
     pub file: PathBuf,
     pub line: usize,
     pub spec: String,
+    pub kind: SkipKind,
     pub reason: String,
 }
 
@@ -75,9 +94,7 @@ impl Skipped {
     /// Customs does not check), as opposed to the project's own files or a range a resolver
     /// will pin later.
     pub fn fetched(&self) -> bool {
-        !["local", "editable", "no version pinned", "no exact version"]
-            .iter()
-            .any(|k| self.reason.contains(k))
+        !matches!(self.kind, SkipKind::Local | SkipKind::Unpinned)
     }
 }
 
@@ -91,14 +108,37 @@ pub struct Mismatch {
 }
 
 /// What the parsers produce.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Parsed {
     pub deps: Vec<Dependency>,
     pub skipped: Vec<Skipped>,
     pub mismatches: Vec<Mismatch>,
+    /// The Customs server whose proxy URLs count as the public registry.
+    trusted: Option<TrustedOrigin>,
+}
+
+impl Default for Parsed {
+    /// Trusts the default Customs server.
+    fn default() -> Self {
+        Self::trusting(DEFAULT_SERVER)
+    }
 }
 
 impl Parsed {
+    /// Empty, trusting the Customs server at `server` (`--server`) as a registry.
+    pub fn trusting(server: &str) -> Self {
+        Self {
+            deps: Vec::new(),
+            skipped: Vec::new(),
+            mismatches: Vec::new(),
+            trusted: TrustedOrigin::of(server),
+        }
+    }
+
+    fn known_registry(&self, url: &str) -> bool {
+        known_registry(url, self.trusted.as_ref())
+    }
+
     fn dep(&mut self, eco: Ecosystem, name: &str, version: &str, file: &Path, line: usize) {
         self.deps.push(Dependency {
             ecosystem: eco,
@@ -130,11 +170,24 @@ impl Parsed {
         });
     }
 
+    /// An npm entry that installs another package than it names.
     fn mismatch(&mut self, name: &str, version: &str, file: &Path, line: usize, message: String) {
+        self.mismatch_in(Ecosystem::Npm, name, version, file, line, message);
+    }
+
+    fn mismatch_in(
+        &mut self,
+        eco: Ecosystem,
+        name: &str,
+        version: &str,
+        file: &Path,
+        line: usize,
+        message: String,
+    ) {
         self.mismatches.push(Mismatch {
             dep: Dependency {
-                ecosystem: Ecosystem::Npm,
-                name: normalize_name(Ecosystem::Npm, name),
+                ecosystem: eco,
+                name: normalize_name(eco, name),
                 version: version.to_string(),
                 file: file.to_path_buf(),
                 line,
@@ -144,11 +197,19 @@ impl Parsed {
         });
     }
 
-    fn skip(&mut self, file: &Path, line: usize, spec: &str, reason: impl Into<String>) {
+    fn skip(
+        &mut self,
+        file: &Path,
+        line: usize,
+        spec: &str,
+        kind: SkipKind,
+        reason: impl Into<String>,
+    ) {
         self.skipped.push(Skipped {
             file: file.to_path_buf(),
             line,
             spec: spec.to_string(),
+            kind,
             reason: reason.into(),
         });
     }
@@ -227,8 +288,22 @@ impl LockKind {
     }
 }
 
-/// Directories a recursive search never enters.
-const SKIP_DIRS: &[&str] = &["node_modules", ".git", ".venv", "target"];
+/// Directories a recursive search never enters, besides hidden ones (`.git`, `.venv`,
+/// `.tox`; agent configurations in them are probed directly) and virtual environments
+/// under any name (a `pyvenv.cfg` marks one). Installed and vendored copies are not the
+/// project's dependencies, and one broken file in them would stop the audit.
+const SKIP_DIRS: &[&str] = &[
+    "node_modules",
+    "target",
+    "venv",
+    "env",
+    "__pypackages__",
+    "site-packages",
+];
+
+fn skipped_dir(name: &str, path: &Path) -> bool {
+    name.starts_with('.') || SKIP_DIRS.contains(&name) || path.join("pyvenv.cfg").is_file()
+}
 
 /// Lockfiles named by `paths`: files as given, directories searched for known names.
 pub fn find_lockfiles(paths: &[PathBuf], recursive: bool) -> Result<Vec<PathBuf>, String> {
@@ -281,7 +356,7 @@ fn search_dir(dir: &Path, recursive: bool, out: &mut Vec<PathBuf>) -> std::io::R
         // `file_type` does not follow symlinks, so linked directories cannot loop.
         let ft = e.file_type()?;
         if ft.is_dir() {
-            if recursive && !SKIP_DIRS.contains(&name.as_str()) {
+            if recursive && !skipped_dir(&name, &e.path()) {
                 subdirs.push(e.path());
             }
         } else if LockKind::discoverable(&name) && e.path().is_file() {
@@ -301,11 +376,16 @@ fn search_dir(dir: &Path, recursive: bool, out: &mut Vec<PathBuf>) -> std::io::R
     Ok(())
 }
 
-/// Parse one lockfile.
+/// Parse one lockfile, trusting the default Customs server as a registry.
 pub fn parse_lockfile(path: &Path) -> Result<Parsed, String> {
+    parse_lockfile_trusting(path, DEFAULT_SERVER)
+}
+
+/// Parse one lockfile; URLs at the Customs server `server` count as the public registry.
+pub fn parse_lockfile_trusting(path: &Path, server: &str) -> Result<Parsed, String> {
     let kind = LockKind::detect(path)
         .ok_or_else(|| format!("{}: unrecognized lockfile name", path.display()))?;
-    let mut out = Parsed::default();
+    let mut out = Parsed::trusting(server);
     if kind == LockKind::Requirements {
         requirements::parse(path, &mut out)?;
         return Ok(out);
@@ -332,12 +412,14 @@ pub fn parse_lockfile(path: &Path) -> Result<Parsed, String> {
     Ok(out)
 }
 
-/// Parse every lockfile and merge the pins; `Err` lists every file that failed.
-pub fn collect(files: &[PathBuf]) -> Result<Parsed, Vec<String>> {
-    let mut all = Parsed::default();
+/// Parse every lockfile and merge the pins, with an error for each file that could not be
+/// read. A broken file does not hide the others; the report lists it and the audit counts
+/// as incomplete.
+pub fn collect(files: &[PathBuf], server: &str) -> (Parsed, Vec<String>) {
+    let mut all = Parsed::trusting(server);
     let mut errors = Vec::new();
     for f in files {
-        match parse_lockfile(f) {
+        match parse_lockfile_trusting(f, server) {
             Ok(p) => {
                 all.deps.extend(p.deps);
                 all.skipped.extend(p.skipped);
@@ -346,11 +428,8 @@ pub fn collect(files: &[PathBuf]) -> Result<Parsed, Vec<String>> {
             Err(e) => errors.push(e),
         }
     }
-    if !errors.is_empty() {
-        return Err(errors);
-    }
     all.dedup();
-    Ok(all)
+    (all, errors)
 }
 
 // ------------------------------------------------------------------ parser helpers
@@ -503,31 +582,109 @@ impl KeyLines<'_> {
     }
 }
 
+/// JSON with comments, as VS Code and Gemini CLI read their settings: `//` and `/* */`
+/// comments outside strings and trailing commas are blanked out, so serde_json accepts the
+/// text. Line numbers are unchanged.
+fn jsonc(text: &str) -> String {
+    let b = text.as_bytes();
+    let mut out = b.to_vec();
+    let mut in_str = false;
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        if in_str {
+            match c {
+                b'\\' => i += 1,
+                b'"' => in_str = false,
+                _ => {}
+            }
+            i += 1;
+            continue;
+        }
+        let end = match (c, b.get(i + 1)) {
+            (b'"', _) => {
+                in_str = true;
+                i += 1;
+                continue;
+            }
+            (b'/', Some(b'/')) => b[i..]
+                .iter()
+                .position(|&c| c == b'\n')
+                .map_or(b.len(), |n| i + n),
+            (b'/', Some(b'*')) => b[i + 2..]
+                .windows(2)
+                .position(|w| w == b"*/")
+                .map_or(b.len(), |n| i + 2 + n + 2),
+            _ => {
+                i += 1;
+                continue;
+            }
+        };
+        // Whole characters are replaced, so the text stays UTF-8.
+        for o in &mut out[i..end] {
+            if *o != b'\n' {
+                *o = b' ';
+            }
+        }
+        i = end;
+    }
+    bun::strip_trailing_commas(&String::from_utf8(out).expect("still UTF-8"))
+}
+
 fn key_line(lines: &HashMap<Vec<String>, usize>, path: &[&str]) -> usize {
     let key: Vec<String> = path.iter().map(|s| s.to_string()).collect();
     lines.get(&key).copied().unwrap_or(1)
 }
 
-/// Public registries, and loopback hosts (lockfiles written through `customs serve`).
-/// Packages from any other index are not checked against the public registry.
-fn known_registry(url: &str) -> bool {
-    let Some(host) = url::Url::parse(url)
-        .ok()
-        .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
-    else {
+/// The CLI's default `--server` (`cli.rs`): lockfiles written through a Customs proxy there
+/// record its URLs.
+const DEFAULT_SERVER: &str = "http://127.0.0.1:7878";
+
+/// Where a Customs server listens: lockfiles written through its proxy record URLs there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TrustedOrigin {
+    host: String,
+    port: u16,
+}
+
+impl TrustedOrigin {
+    fn of(url: &str) -> Option<Self> {
+        let u = url::Url::parse(url).ok()?;
+        Some(Self {
+            host: u.host_str()?.to_ascii_lowercase(),
+            port: u.port_or_known_default()?,
+        })
+    }
+}
+
+fn loopback_host(h: &str) -> bool {
+    matches!(h, "localhost" | "127.0.0.1" | "[::1]")
+}
+
+/// Public registries, and the Customs server's own origin (any loopback name for a local
+/// one). Packages from any other index, a local Verdaccio included, are not checked against
+/// the public registry.
+fn known_registry(url: &str, trusted: Option<&TrustedOrigin>) -> bool {
+    let Some(u) = url::Url::parse(url).ok() else {
         return false;
     };
-    matches!(
+    let Some(host) = u.host_str().map(str::to_ascii_lowercase) else {
+        return false;
+    };
+    if matches!(
         host.as_str(),
         "pypi.org"
             | "files.pythonhosted.org"
             | "pypi.python.org"
             | "registry.npmjs.org"
             | "registry.yarnpkg.com"
-            | "localhost"
-            | "127.0.0.1"
-            | "[::1]"
-    )
+    ) {
+        return true;
+    }
+    trusted.is_some_and(|t| {
+        u.port_or_known_default() == Some(t.port)
+            && (host == t.host || (loopback_host(&host) && loopback_host(&t.host)))
+    })
 }
 
 fn host_of(url: &str) -> String {
@@ -595,29 +752,47 @@ fn npm_pin(
         let local = ["file:", "link:", ".", "/"]
             .iter()
             .any(|p| version.starts_with(p));
-        let reason = if local {
-            "installed from a local path"
+        if local {
+            out.skip(
+                file,
+                line,
+                &spec,
+                SkipKind::Local,
+                "installed from a local path",
+            );
         } else {
-            "not a registry package (git or URL)"
-        };
-        out.skip(file, line, &spec, reason);
+            out.skip(
+                file,
+                line,
+                &spec,
+                SkipKind::Source,
+                "not a registry package (git or URL)",
+            );
+        }
         return;
     }
     if let Some(r) = resolved {
         if !(r.starts_with("https://") || r.starts_with("http://")) {
+            let kind = if r.starts_with("file:") {
+                SkipKind::Local
+            } else {
+                SkipKind::Source
+            };
             out.skip(
                 file,
                 line,
                 &spec,
+                kind,
                 format!("resolved from {r}, not a registry"),
             );
             return;
         }
-        if !known_registry(r) {
+        if !out.known_registry(r) {
             out.skip(
                 file,
                 line,
                 &spec,
+                SkipKind::CustomIndex,
                 format!("from a custom registry ({})", host_of(r)),
             );
             return;
@@ -640,7 +815,13 @@ fn npm_pin(
                 if valid_npm_name(&n) && is_npm_version(&v) {
                     out.dep(Ecosystem::Npm, &n, &v, file, line);
                 } else {
-                    out.skip(file, line, &installed, "not a registry package version");
+                    out.skip(
+                        file,
+                        line,
+                        &installed,
+                        SkipKind::Other,
+                        "not a registry package version",
+                    );
                 }
                 return;
             }
@@ -733,6 +914,8 @@ pub struct Report {
     pub files: Vec<PathBuf>,
     pub findings: Vec<Finding>,
     pub skipped: Vec<Skipped>,
+    /// Files that could not be read, one message each (naming the file).
+    pub errors: Vec<String>,
     /// Where verdicts came from (`server ...`, `in-process`).
     pub via: String,
 }
@@ -745,7 +928,8 @@ impl Report {
             .count()
     }
 
-    /// 1 when a finding meets `fail_on`, else 2 when any check failed, else 0.
+    /// 1 when a finding meets `fail_on`, else 2 when any check failed or a file could not
+    /// be read, else 0.
     pub fn exit_code(&self, fail_on: FailOn) -> i32 {
         let threshold = match fail_on {
             FailOn::Warn => Some(Decision::Warn),
@@ -761,11 +945,7 @@ impl Report {
                 return 1;
             }
         }
-        if self
-            .findings
-            .iter()
-            .any(|f| matches!(f.outcome, Outcome::Failed(_)))
-        {
+        if self.incomplete() > 0 {
             return 2;
         }
         0
@@ -826,6 +1006,11 @@ impl Report {
     pub fn failed(&self) -> usize {
         self.count("failed")
     }
+
+    /// Failed checks plus unreadable files: what the result does not cover.
+    pub fn incomplete(&self) -> usize {
+        self.failed() + self.errors.len()
+    }
 }
 
 pub struct AuditOptions {
@@ -853,15 +1038,10 @@ pub async fn run(opts: AuditOptions) -> i32 {
             return 2;
         }
     };
-    let parsed = match collect(&files) {
-        Ok(p) => p,
-        Err(errors) => {
-            for e in errors {
-                eprintln!("customs audit: {e}");
-            }
-            return 2;
-        }
-    };
+    let (parsed, errors) = collect(&files, &opts.server);
+    for e in &errors {
+        eprintln!("customs audit: {e}");
+    }
     let mismatched = mismatch_findings(parsed.mismatches);
     let (mut findings, via) = if parsed.deps.is_empty() {
         (Vec::new(), "nothing to check".to_string())
@@ -891,6 +1071,7 @@ pub async fn run(opts: AuditOptions) -> i32 {
         files,
         findings,
         skipped: parsed.skipped,
+        errors,
         via,
     };
     for f in &report.findings {
@@ -1016,7 +1197,17 @@ pub fn render_text(r: &Report, cwd: &Path) -> String {
     if !r.skipped.is_empty() {
         s.push_str(&format!(", {} not checked", r.skipped.len()));
     }
+    if !r.errors.is_empty() {
+        let n = r.errors.len();
+        s.push_str(&format!(", {n} unreadable file{}", plural(n)));
+    }
     s.push('\n');
+    if !r.errors.is_empty() {
+        s.push_str("\nCould not read (the audit is incomplete):\n");
+        for e in &r.errors {
+            s.push_str(&format!("  {e}\n"));
+        }
+    }
 
     let rank = |f: &Finding| match f.status() {
         "mismatch" | "block" => 0,
@@ -1159,7 +1350,9 @@ pub fn render_json(r: &Report, cwd: &Path) -> Value {
             "unavailable": r.count("unavailable"),
             "failed": r.count("failed"),
             "not_checked": r.skipped.len(),
+            "unreadable": r.errors.len(),
         },
+        "errors": r.errors,
         "results": results,
         "not_checked": skipped,
     })
@@ -1294,7 +1487,8 @@ pub(crate) mod tests {
         let twice = find_lockfiles(&[d.to_path_buf(), d.join("requirements.txt")], false).unwrap();
         assert_eq!(twice.len(), 2);
 
-        let parsed = collect(&flat).unwrap();
+        let (parsed, errors) = collect(&flat, DEFAULT_SERVER);
+        assert!(errors.is_empty(), "{errors:?}");
         assert_eq!(parsed.deps.len(), 2);
         assert!(parsed.deps[0].file.ends_with("requirements-dev.txt"));
         assert_eq!(parsed.deps[0].line, 1);
@@ -1307,12 +1501,109 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn recursive_search_skips_hidden_and_virtualenv_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        for sub in [
+            "venv",
+            "env",
+            ".tox/py311",
+            ".cache/pip",
+            "myenv/lib",
+            "__pypackages__/3.11",
+            "sub",
+        ] {
+            std::fs::create_dir_all(d.join(sub)).unwrap();
+            std::fs::write(d.join(sub).join("requirements.txt"), "a==1.0\n").unwrap();
+        }
+        // A virtual environment under any name is recognised by its marker file.
+        std::fs::write(d.join("myenv/pyvenv.cfg"), "home = /usr/bin\n").unwrap();
+        std::fs::create_dir_all(d.join(".vscode")).unwrap();
+        std::fs::write(d.join(".vscode/mcp.json"), r#"{"servers": {}}"#).unwrap();
+        let found = find_lockfiles(&[d.to_path_buf()], true).unwrap();
+        let rel: Vec<String> = found.iter().map(|f| display_path(f, d)).collect();
+        assert_eq!(rel, vec![".vscode/mcp.json", "sub/requirements.txt"]);
+    }
+
+    #[test]
+    fn commented_vscode_mcp_json_is_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join(".vscode/mcp.json");
+        std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+        // VS Code and Gemini CLI read these files as JSON with comments.
+        std::fs::write(
+            &f,
+            r#"{
+  // Servers for this workspace.
+  "servers": {
+    /* the docs server */
+    "docs": {
+      "command": "npx",
+      "args": ["-y", "docs-mcp@1.2.3", "--url=http://x//y"], // pinned
+    },
+  },
+}
+"#,
+        )
+        .unwrap();
+        let p = parse_lockfile(&f).unwrap();
+        assert_eq!(pins(&p), vec![("docs-mcp".into(), "1.2.3".into(), 5)]);
+    }
+
+    #[test]
     fn parse_errors_name_the_file() {
         let dir = tempfile::tempdir().unwrap();
         let f = dir.path().join("package-lock.json");
         std::fs::write(&f, "{ not json").unwrap();
-        let e = collect(&[f]).unwrap_err();
+        let (_, e) = collect(&[f], DEFAULT_SERVER);
         assert!(e[0].contains("package-lock.json"), "{e:?}");
+        // TOML errors keep their position.
+        let f = dir.path().join(".codex/config.toml");
+        std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+        std::fs::write(&f, "[mcp_servers.x]\ncommand = \n").unwrap();
+        let (_, e) = collect(&[f], DEFAULT_SERVER);
+        assert!(e[0].contains("line 2"), "{e:?}");
+    }
+
+    #[test]
+    fn a_broken_file_does_not_hide_the_others() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        std::fs::write(d.join("requirements.txt"), "flask>=2\na==1.0\n").unwrap();
+        std::fs::create_dir_all(d.join(".gemini")).unwrap();
+        std::fs::write(d.join(".gemini/settings.json"), "{ \"mcpServers\": ").unwrap();
+        let files = find_lockfiles(&[d.to_path_buf()], false).unwrap();
+        let (parsed, errors) = collect(&files, DEFAULT_SERVER);
+        assert_eq!(pins(&parsed), vec![("a".into(), "1.0".into(), 2)]);
+        assert_eq!(parsed.skipped.len(), 1);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("settings.json"), "{errors:?}");
+        let report = Report {
+            files,
+            findings: vec![],
+            skipped: parsed.skipped,
+            errors,
+            via: "test".into(),
+        };
+        // An unreadable file leaves the audit incomplete, like a failed check.
+        assert_eq!(report.exit_code(FailOn::Never), 2);
+        let t = render_text(&report, d);
+        assert!(
+            t.lines().next().unwrap().ends_with("1 unreadable file"),
+            "{t}"
+        );
+        assert!(t.contains("Could not read"), "{t}");
+        assert!(t.contains(".gemini/settings.json"), "{t}");
+        let j = render_json(&report, d);
+        assert_eq!(j["summary"]["unreadable"], 1);
+        assert!(j["errors"][0].as_str().unwrap().contains("settings.json"));
+        let s = sarif::to_sarif(&report, d);
+        let inv = &s["runs"][0]["invocations"][0];
+        assert_eq!(inv["executionSuccessful"], false);
+        assert!(inv["toolExecutionNotifications"][0]["message"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("settings.json"));
     }
 
     #[test]
@@ -1365,6 +1656,102 @@ pub(crate) mod tests {
         );
         assert_eq!(p.skipped.len(), 3);
         assert!(p.skipped[0].reason.contains("npm.corp.example"));
+    }
+
+    #[test]
+    fn fetched_comes_from_the_kind_not_the_lockfile_text() {
+        let f = Path::new("package-lock.json");
+        let mut p = Parsed::default();
+        // Hosts and URLs the lockfile controls that contain "local" or "editable".
+        npm_pin(
+            &mut p,
+            f,
+            1,
+            "a",
+            "1.0.0",
+            Some("git+https://github.com/x/localize.git#abc"),
+        );
+        npm_pin(
+            &mut p,
+            f,
+            2,
+            "b",
+            "1.0.0",
+            Some("https://npm.local.corp/b/-/b-1.0.0.tgz"),
+        );
+        npm_pin(
+            &mut p,
+            f,
+            3,
+            "c",
+            "1.0.0",
+            Some("https://editable.example/c/-/c-1.0.0.tgz"),
+        );
+        // The project's own files are not fetched.
+        npm_pin(&mut p, f, 4, "d", "file:../d", None);
+        let fetched: Vec<(usize, bool)> = p.skipped.iter().map(|s| (s.line, s.fetched())).collect();
+        assert_eq!(
+            fetched,
+            vec![(1, true), (2, true), (3, true), (4, false)],
+            "{:?}",
+            p.skipped
+        );
+        assert_eq!(p.skipped[0].kind, SkipKind::Source);
+        assert_eq!(p.skipped[1].kind, SkipKind::CustomIndex);
+    }
+
+    #[test]
+    fn loopback_registry_only_on_the_customs_port() {
+        let f = Path::new("package-lock.json");
+        let mut p = Parsed::default();
+        // A local Verdaccio is not Customs.
+        npm_pin(
+            &mut p,
+            f,
+            1,
+            "x",
+            "1.0.0",
+            Some("http://localhost:4873/x/-/x-1.0.0.tgz"),
+        );
+        // The default Customs server.
+        npm_pin(
+            &mut p,
+            f,
+            2,
+            "y",
+            "1.0.0",
+            Some("http://127.0.0.1:7878/npm/y/-/y-1.0.0.tgz"),
+        );
+        assert_eq!(pins(&p), vec![("y".into(), "1.0.0".into(), 2)]);
+        assert_eq!(p.skipped.len(), 1, "{:?}", p.skipped);
+        assert_eq!(p.skipped[0].kind, SkipKind::CustomIndex);
+        assert!(p.skipped[0].reason.contains("localhost"));
+
+        // A configured server: any loopback name, its port only.
+        let mut p = Parsed::trusting("http://localhost:9000/");
+        npm_pin(
+            &mut p,
+            f,
+            1,
+            "z",
+            "1.0.0",
+            Some("http://[::1]:9000/npm/z/-/z-1.0.0.tgz"),
+        );
+        npm_pin(
+            &mut p,
+            f,
+            2,
+            "y",
+            "1.0.0",
+            Some("http://127.0.0.1:7878/npm/y/-/y-1.0.0.tgz"),
+        );
+        assert_eq!(pins(&p), vec![("z".into(), "1.0.0".into(), 1)]);
+        assert_eq!(p.skipped.len(), 1, "{:?}", p.skipped);
+        // A remote Customs server is trusted at its own origin.
+        let p = Parsed::trusting("https://customs.corp.example");
+        assert!(p.known_registry("https://customs.corp.example/pypi/simple/"));
+        assert!(!p.known_registry("https://customs.corp.example:8443/pypi/simple/"));
+        assert!(p.known_registry("https://pypi.org/simple"));
     }
 
     #[test]
@@ -1488,6 +1875,7 @@ pub(crate) mod tests {
                 finding("lodash", 2, Outcome::Mismatch("lockfile installs x".into())),
             ],
             skipped: vec![],
+            errors: vec![],
             via: "test".into(),
         };
         assert_eq!(report.exit_code(FailOn::Block), 1);
@@ -1512,6 +1900,7 @@ pub(crate) mod tests {
             files: vec![],
             findings,
             skipped: vec![],
+            errors: vec![],
             via: "test".into(),
         };
         let block = finding("x", 1, checked(verdict("x", Decision::Block, None)));
@@ -1547,8 +1936,10 @@ pub(crate) mod tests {
                 file: PathBuf::from("sub/requirements.txt"),
                 line: 4,
                 spec: "flask>=2".into(),
+                kind: SkipKind::Unpinned,
                 reason: "not pinned".into(),
             }],
+            errors: vec![],
             via: "in-process".into(),
         };
         let t = render_text(&report, cwd);

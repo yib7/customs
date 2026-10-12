@@ -6,7 +6,7 @@
 //! messages only; logs go to stderr. Package checks use the same [`Checker`] as
 //! `customs check`: a running server when one answers, otherwise an in-process engine.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -16,7 +16,7 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::sync::{mpsc, OnceCell};
+use tokio::sync::{mpsc, OnceCell, Semaphore};
 
 use crate::audit;
 use crate::cli::{scan_file, split_package_arg};
@@ -193,7 +193,7 @@ pub fn tool_definitions() -> Value {
                     },
                     "recursive": {
                         "type": "boolean",
-                        "description": "Also search subdirectories of a directory (node_modules and hidden folders are skipped). Default false."
+                        "description": "Also search subdirectories of a directory (node_modules, virtual environments and hidden folders are skipped). Default false."
                     }
                 },
                 "required": ["path"],
@@ -285,6 +285,7 @@ fn parse_eco(s: &str) -> Result<Ecosystem, RpcError> {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CheckPackageArgs {
     ecosystem: String,
     name: String,
@@ -304,6 +305,7 @@ struct DiffArgs {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CheckCommandArgs {
     command: String,
     #[serde(default)]
@@ -311,11 +313,13 @@ struct CheckCommandArgs {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ExplainArgs {
     id: i64,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AuditArgs {
     path: String,
     #[serde(default)]
@@ -323,6 +327,7 @@ struct AuditArgs {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ScanArchiveArgs {
     path: String,
     #[serde(default)]
@@ -531,15 +536,29 @@ impl McpServer {
             .map(PathBuf::from)
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| PathBuf::from("."));
-        let installs = parse_command(&a.command, &cwd);
+        // Parsing reads requirements files, scripts and project manifests: keep that file
+        // I/O off the async workers.
+        let command = a.command;
+        let parsed = tokio::task::spawn_blocking(move || {
+            let installs = parse_command(&command, &cwd);
+            let targets: Vec<Target> = installs.iter().flat_map(|i| i.targets.clone()).collect();
+            (installs, expand_projects(targets))
+        })
+        .await;
+        let (installs, expanded) = match parsed {
+            Ok(p) => p,
+            Err(e) => {
+                return Ok(ToolOutput::error(format!(
+                    "reading the command failed: {e}"
+                )))
+            }
+        };
         let mut tools: Vec<&str> = Vec::new();
         for i in &installs {
             if !tools.contains(&i.tool.as_str()) {
                 tools.push(&i.tool);
             }
         }
-        let targets: Vec<Target> = installs.iter().flat_map(|i| i.targets.clone()).collect();
-        let expanded = expand_projects(targets);
         if expanded.targets.is_empty() && expanded.mismatches.is_empty() {
             return Ok(ToolOutput::ok(
                 "No package installs found in this command; Customs has nothing to check.".into(),
@@ -634,13 +653,24 @@ impl McpServer {
     }
 
     async fn audit(&self, a: AuditArgs) -> Result<ToolOutput, RpcError> {
-        let files = match audit::find_lockfiles(&[PathBuf::from(&a.path)], a.recursive) {
-            Ok(f) => f,
-            Err(e) => return Ok(ToolOutput::error(e)),
-        };
-        let parsed = match audit::collect(&files) {
-            Ok(p) => p,
-            Err(errors) => return Ok(ToolOutput::error(errors.join("\n"))),
+        // Walking a tree and reading lockfiles is blocking file I/O: run it off the async
+        // workers so other requests keep being served.
+        let (path, recursive, server) = (
+            PathBuf::from(&a.path),
+            a.recursive,
+            self.opts.server.clone(),
+        );
+        let found = tokio::task::spawn_blocking(move || {
+            audit::find_lockfiles(&[path], recursive).map(|files| {
+                let collected = audit::collect(&files, &server);
+                (files, collected)
+            })
+        })
+        .await;
+        let (files, (parsed, errors)) = match found {
+            Ok(Ok(f)) => f,
+            Ok(Err(e)) => return Ok(ToolOutput::error(e)),
+            Err(e) => return Ok(ToolOutput::error(format!("reading lockfiles failed: {e}"))),
         };
         let mut findings = audit::mismatch_findings(parsed.mismatches);
         let via = if parsed.deps.is_empty() {
@@ -657,32 +687,11 @@ impl McpServer {
             files,
             findings,
             skipped: parsed.skipped,
+            errors,
             via,
         };
         let cwd = std::env::current_dir().unwrap_or_default();
-        let decision = report.decision();
-        let mut text = format!("Decision: {}. {}\n", decision.as_str(), guidance(decision));
-        if report.failed() > 0 {
-            text.push_str(&format!(
-                "{} check(s) failed, so this result is incomplete.\n",
-                report.failed()
-            ));
-        }
-        text.push('\n');
-        text.push_str(&audit::render_text(&report, &cwd));
-        // Allowed rows and full verdicts would swamp a large lockfile; the text and the
-        // verdict URLs carry the rest.
-        let mut json = audit::render_json(&report, &cwd);
-        if let Some(rows) = json["results"].as_array_mut() {
-            rows.retain(|r| r["status"] != "allow");
-            for r in rows.iter_mut() {
-                if let Some(o) = r.as_object_mut() {
-                    o.remove("verdict");
-                }
-            }
-        }
-        json["decision"] = json!(decision.as_str());
-        Ok(ToolOutput::ok(text, json))
+        Ok(audit_output(&report, &cwd))
     }
 
     async fn scan(&self, a: ScanArchiveArgs) -> Result<ToolOutput, RpcError> {
@@ -742,6 +751,69 @@ impl McpServer {
             Ok(Err(e)) => ToolOutput::error(format!("scan failed: {e:#}")),
             Err(e) => ToolOutput::error(format!("scan failed: {e}")),
         })
+    }
+}
+
+/// The answer of `audit_lockfile`.
+fn audit_output(report: &audit::Report, cwd: &Path) -> ToolOutput {
+    // A package Customs failed to check is unverified, never allowed.
+    let failed = report.failed();
+    let unreadable = report.errors.len();
+    let incomplete = report.incomplete() > 0;
+    let decision = if incomplete {
+        report.decision().max(Decision::Warn)
+    } else {
+        report.decision()
+    };
+    let mut text = format!("Decision: {}. ", decision.as_str());
+    if incomplete && decision < Decision::Block {
+        let mut gaps = Vec::new();
+        if failed > 0 {
+            gaps.push(format!(
+                "{failed} package{} could not be checked because Customs failed",
+                if failed == 1 { "" } else { "s" }
+            ));
+        }
+        if unreadable > 0 {
+            gaps.push(format!(
+                "{unreadable} file{} could not be read",
+                if unreadable == 1 { "" } else { "s" }
+            ));
+        }
+        text.push_str(&format!(
+            "{}; treat what they install as unverified and ask the user before installing.\n",
+            gaps.join(" and ")
+        ));
+    } else {
+        text.push_str(guidance(decision));
+        text.push('\n');
+        if incomplete {
+            text.push_str(&format!(
+                "{failed} check(s) failed and {unreadable} file(s) could not be read, so this result is incomplete.\n"
+            ));
+        }
+    }
+    text.push('\n');
+    text.push_str(&audit::render_text(report, cwd));
+    // Allowed rows and full verdicts would swamp a large lockfile; the text and the
+    // verdict URLs carry the rest.
+    let mut json = audit::render_json(report, cwd);
+    if let Some(rows) = json["results"].as_array_mut() {
+        rows.retain(|r| r["status"] != "allow");
+        for r in rows.iter_mut() {
+            if let Some(o) = r.as_object_mut() {
+                o.remove("verdict");
+            }
+        }
+    }
+    json["decision"] = json!(decision.as_str());
+    json["failed"] = json!(failed);
+    ToolOutput {
+        text,
+        structured: Some(json),
+        // A block stands on its own; otherwise a failed check or an unreadable file leaves
+        // the answer incomplete.
+        is_error: incomplete && decision < Decision::Block,
     }
 }
 
@@ -1111,10 +1183,15 @@ fn command_report(
     }
 }
 
-/// Serve MCP on stdin and stdout until stdin closes. Requests run concurrently; replies are
-/// written one per line as they finish.
+/// Requests handled at once. A client that floods the server waits for a slot instead of
+/// starting an unbounded number of package checks.
+const MAX_IN_FLIGHT: usize = 16;
+
+/// Serve MCP on stdin and stdout until stdin closes. Requests run concurrently, at most
+/// [`MAX_IN_FLIGHT`] at a time; replies are written one per line as they finish.
 pub async fn run_mcp(opts: McpOptions) -> i32 {
     let server = McpServer::new(opts);
+    let slots = Arc::new(Semaphore::new(MAX_IN_FLIGHT));
     let (tx, mut rx) = mpsc::unbounded_channel::<Value>();
     let writer = tokio::spawn(async move {
         let mut out = tokio::io::stdout();
@@ -1137,8 +1214,14 @@ pub async fn run_mcp(opts: McpOptions) -> i32 {
                 if line.is_empty() {
                     continue;
                 }
+                // Wait for a free slot before reading on, so the number of tasks (and the
+                // lines they hold) stays bounded too. The semaphore is never closed.
+                let Ok(slot) = slots.clone().acquire_owned().await else {
+                    break 1;
+                };
                 let (server, tx) = (server.clone(), tx.clone());
                 tokio::spawn(async move {
+                    let _slot = slot;
                     if let Some(reply) = server.handle_line(&line).await {
                         let _ = tx.send(reply);
                     }
@@ -1163,9 +1246,14 @@ mod tests {
     use customs_model::{Reason, Scores, Thresholds};
 
     fn server() -> Arc<McpServer> {
+        // A port that was free a moment ago: no server, and no network either. A fixed
+        // port (the discard port 9) breaks the tests whenever something listens there.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .and_then(|l| l.local_addr())
+            .map(|a| a.port())
+            .unwrap();
         McpServer::new(McpOptions {
-            // Nothing listens on the discard port: no server, and no network either.
-            server: "http://127.0.0.1:9".into(),
+            server: format!("http://127.0.0.1:{port}"),
             local: LocalOptions::default(),
         })
     }
@@ -1221,6 +1309,45 @@ mod tests {
             cached: false,
             mode: crate::config::Mode::Enforce,
         }
+    }
+
+    #[test]
+    fn audit_lockfile_failed_checks_are_not_allow() {
+        use crate::audit::tests::finding;
+        use crate::audit::Outcome;
+        let mut report = audit::Report {
+            files: vec![PathBuf::from("sub/requirements.txt")],
+            findings: vec![finding(
+                "requests",
+                1,
+                Outcome::Failed("registry unreachable".into()),
+            )],
+            skipped: vec![],
+            errors: vec![],
+            via: "in-process".into(),
+        };
+        let out = audit_output(&report, Path::new("."));
+        let s = out.structured.as_ref().unwrap();
+        assert_ne!(s["decision"], "allow", "{s}");
+        assert_eq!(s["failed"], 1, "{s}");
+        assert!(out.is_error, "{}", out.text);
+        assert!(!out.text.starts_with("Decision: allow"), "{}", out.text);
+        assert!(out.text.contains("unverified"), "{}", out.text);
+        // A block stands on its own, failed checks or not.
+        report
+            .findings
+            .push(finding("evil", 2, Outcome::Mismatch("serves evil".into())));
+        let out = audit_output(&report, Path::new("."));
+        assert_eq!(out.structured.as_ref().unwrap()["decision"], "block");
+        assert!(!out.is_error);
+
+        // An unreadable configuration is no more an allow than a failed check.
+        report.findings.clear();
+        report.errors = vec![".gemini/settings.json: EOF while parsing".into()];
+        let out = audit_output(&report, Path::new("."));
+        assert_eq!(out.structured.as_ref().unwrap()["decision"], "warn");
+        assert!(out.is_error);
+        assert!(out.text.contains("could not be read"), "{}", out.text);
     }
 
     #[tokio::test]
@@ -1375,6 +1502,41 @@ mod tests {
         ] {
             let r = tool(&s, name, args.clone()).await;
             assert_eq!(r["error"]["code"], INVALID_PARAMS, "{name} {args}: {r}");
+        }
+    }
+
+    #[tokio::test]
+    async fn unknown_arguments_are_rejected() {
+        // The schemas say additionalProperties: false. A misspelt argument must not be
+        // dropped silently (a "verison" typo would otherwise check the latest release).
+        let s = server();
+        for (name, args, typo) in [
+            (
+                "check_package",
+                json!({"ecosystem": "npm", "name": "x", "verison": "1"}),
+                "verison",
+            ),
+            (
+                "check_install_command",
+                json!({"command": "npm i x", "dir": "/tmp"}),
+                "dir",
+            ),
+            ("explain_verdict", json!({"id": 1, "server": "x"}), "server"),
+            (
+                "audit_lockfile",
+                json!({"path": ".", "recursve": true}),
+                "recursve",
+            ),
+            (
+                "scan_archive",
+                json!({"path": "x.tgz", "packge": "x"}),
+                "packge",
+            ),
+        ] {
+            let r = tool(&s, name, args.clone()).await;
+            assert_eq!(r["error"]["code"], INVALID_PARAMS, "{name} {args}: {r}");
+            let msg = r["error"]["message"].as_str().unwrap_or_default();
+            assert!(msg.contains(typo), "{name}: {msg}");
         }
     }
 

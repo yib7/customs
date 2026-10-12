@@ -4,7 +4,7 @@
 
 use std::path::Path;
 
-use super::{npm_pin, split_npm_spec, Parsed};
+use super::{npm_pin, split_npm_spec, Parsed, SkipKind};
 
 pub(super) fn parse(text: &str, file: &Path, out: &mut Parsed) -> Result<(), String> {
     let mut in_packages = false;
@@ -51,10 +51,20 @@ fn flush(entry: Option<(usize, String, Option<String>)>, file: &Path, out: &mut 
     };
     match split_key(&key) {
         Some((name, version)) => npm_pin(out, file, line, name, version, tarball.as_deref()),
-        None if key.contains("file:") || key.contains("link:") => {
-            out.skip(file, line, &key, "installed from a local path")
-        }
-        None => out.skip(file, line, &key, "not a registry package (git or URL)"),
+        None if key.contains("file:") || key.contains("link:") => out.skip(
+            file,
+            line,
+            &key,
+            SkipKind::Local,
+            "installed from a local path",
+        ),
+        None => out.skip(
+            file,
+            line,
+            &key,
+            SkipKind::Source,
+            "not a registry package (git or URL)",
+        ),
     }
 }
 
