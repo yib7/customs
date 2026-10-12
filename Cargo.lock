@@ -446,7 +446,7 @@ dependencies = [
 
 [[package]]
 name = "customs"
-version = "0.9.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -486,7 +486,7 @@ dependencies = [
 
 [[package]]
 name = "customs-model"
-version = "0.9.0"
+version = "1.0.0"
 dependencies = [
  "base64",
  "customs-scan",
@@ -497,7 +497,7 @@ dependencies = [
 
 [[package]]
 name = "customs-py"
-version = "0.9.0"
+version = "1.0.0"
 dependencies = [
  "customs-scan",
  "pyo3",
@@ -506,7 +506,7 @@ dependencies = [
 
 [[package]]
 name = "customs-scan"
-version = "0.9.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "bzip2",
