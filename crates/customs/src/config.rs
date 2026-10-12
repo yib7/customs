@@ -587,8 +587,11 @@ impl Policy {
         })
     }
 
-    pub fn to_toml(&self) -> String {
-        toml::to_string_pretty(self).unwrap_or_default()
+    /// The policy file text. An error rather than an empty string, which written over the
+    /// policy file would bring back the defaults (no deny list) at the next start.
+    pub fn to_toml(&self) -> Result<String, ConfigError> {
+        toml::to_string_pretty(self)
+            .map_err(|e| ConfigError::new("", format!("cannot write the policy as TOML: {e}")))
     }
 
     /// Check every value and normalize URLs (no trailing slash).
@@ -806,7 +809,7 @@ npm = "https://registry.npmjs.org"
         assert_eq!(p.upstream.pypi_simple, "https://pypi.org/simple");
         assert_eq!(p.deny_rules()[0].version.as_deref(), Some("3.3.6"));
         // Round trip through TOML and JSON.
-        assert_eq!(Policy::from_toml(&p.to_toml()).unwrap(), p);
+        assert_eq!(Policy::from_toml(&p.to_toml().unwrap()).unwrap(), p);
         let json = serde_json::to_string(&p).unwrap();
         assert_eq!(Policy::from_json(&json).unwrap(), p);
     }
@@ -863,7 +866,7 @@ npm = "https://registry.npmjs.org"
         let mut q = p.clone();
         q.provenance_dropped = RuleSeverity::Off;
         assert!(!q.pypi_history_rules_enabled());
-        assert_eq!(Policy::from_toml(&p.to_toml()).unwrap(), p);
+        assert_eq!(Policy::from_toml(&p.to_toml().unwrap()).unwrap(), p);
         let json = serde_json::to_value(&p).unwrap();
         assert_eq!(json["provenance_dropped"], "block");
         assert_eq!(json["install_script_added"], "off");
@@ -899,7 +902,7 @@ npm = "https://registry.npmjs.org"
         assert!(!p.established.enabled);
         assert_eq!(p.established.top, 1000);
         assert_eq!(p.established.min_age_days, 30);
-        assert_eq!(Policy::from_toml(&p.to_toml()).unwrap(), p);
+        assert_eq!(Policy::from_toml(&p.to_toml().unwrap()).unwrap(), p);
         let json = serde_json::to_string(&p).unwrap();
         assert_eq!(Policy::from_json(&json).unwrap(), p);
         let p = Policy::from_json(r#"{"established": {"min_age_days": 60}}"#).unwrap();

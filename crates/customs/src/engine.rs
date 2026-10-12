@@ -282,13 +282,14 @@ impl Engine {
 
     /// Persist and activate a validated policy.
     pub fn set_policy(&self, p: Policy) -> anyhow::Result<()> {
+        let text = p.to_toml()?;
         if let Some(dir) = self.policy_path.parent() {
             if !dir.as_os_str().is_empty() {
                 std::fs::create_dir_all(dir)?;
             }
         }
         let tmp = self.policy_path.with_extension("toml.tmp");
-        std::fs::write(&tmp, p.to_toml())?;
+        std::fs::write(&tmp, text)?;
         std::fs::rename(&tmp, &self.policy_path)?;
         *self.policy.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(p);
         Ok(())
