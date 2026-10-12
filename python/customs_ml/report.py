@@ -625,7 +625,7 @@ def render(scheme: str = SCHEME) -> str:
                             "jumps by that share whenever a retrain moves that score across a "
                             "threshold; per-archive numbers between runs are only comparable "
                             "when that campaign stays on the same side."
-                            if sizes
+                            if sizes.get("n")
                             else ""
                         )
                     )

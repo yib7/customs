@@ -213,6 +213,8 @@ def _matched_fpr(df: pd.DataFrame, g: pd.DataFrame, col: str = "risk") -> dict:
 
 
 def _largest_cluster(g: pd.DataFrame) -> dict:
+    if g.empty:
+        return {"n": 0, "share": None, "median_risk": None}
     sizes = g.cluster.value_counts()
     big = g[g.cluster == sizes.index[0]]
     return {
@@ -220,6 +222,12 @@ def _largest_cluster(g: pd.DataFrame) -> dict:
         "share": float(sizes.iloc[0] / len(g)),
         "median_risk": float(big.risk_code.median()),
     }
+
+
+def _originals(t: pd.DataFrame) -> pd.DataFrame:
+    """Corpus rows that are not augmentation copies (tables built before augment have no
+    ``augmented`` column)."""
+    return t[t.augmented.isna()] if "augmented" in t else t
 
 
 def evaluate(save_as: str | None = None) -> dict:
@@ -234,10 +242,12 @@ def evaluate(save_as: str | None = None) -> dict:
     from .pipeline import load_table, log, work
 
     ext = pd.read_json(manifest_path(), lines=True)
-    ext = ext[ext.get("path").notna()].drop_duplicates("sha256").reset_index(drop=True)
+    if "path" not in ext or ext.path.isna().all():
+        raise ValueError(f"no fetched archives in {manifest_path()}: run `fetch` first")
+    ext = ext[ext.path.notna()].drop_duplicates("sha256").reset_index(drop=True)
     df = load_table()
     dev_in_training = "source" in df and bool((df.source == "malregistry").any())
-    df = df[df.augmented.isna()] if "augmented" in df else df
+    df = _originals(df)
     df = df[df.source.isna()] if "source" in df else df
     df = df.assign(
         ens_risk=df.ens_risk_temporal,
@@ -424,6 +434,26 @@ def _corpus_rows(df: pd.DataFrame, sel: pd.DataFrame, work_dir: Path) -> pd.Data
     return placed
 
 
+def _link_dir(src: Path, dst: Path) -> None:
+    """Make ``dst`` show ``src``: a symlink, or where symlinks are not allowed (Windows
+    without the privilege) a tree of hard links, copying files that cannot be linked."""
+    import os
+
+    try:
+        dst.symlink_to(src, target_is_directory=True)
+        return
+    except OSError:
+        pass
+
+    def link_or_copy(s: str, d: str) -> None:
+        try:
+            os.link(s, d)
+        except OSError:
+            shutil.copy2(s, d)
+
+    shutil.copytree(src, dst, copy_function=link_or_copy)
+
+
 def adapt(fraction: float = 1.0, seed: int = 0) -> dict:
     """Experiment: add MalRegistry dev-half malware to training, test on the held-out half.
 
@@ -446,7 +476,7 @@ def adapt(fraction: float = 1.0, seed: int = 0) -> dict:
     (exp / "work").mkdir(parents=True, exist_ok=True)
     for d in ("benign", "benign_canonical", "malicious", "external", "names", "ossf"):
         if not (exp / d).exists():
-            (exp / d).symlink_to(main / d)
+            _link_dir(main / d, exp / d)
     for f in ("dataset.parquet", "split_meta.json", "name_model.json"):
         shutil.copy(main / "work" / f, exp / "work" / f)
     ext = pd.read_parquet(main / "work" / "external_malregistry.parquet")
@@ -479,10 +509,11 @@ def adapt(fraction: float = 1.0, seed: int = 0) -> dict:
             os.environ["CUSTOMS_DATA"] = prev
 
     main_ens = json.loads((ROOT / "models/ensemble.json").read_text(encoding="utf-8"))
-    control = control[control.augmented.isna()]
+    control = _originals(control)
     control = control.assign(ens_risk=control.ens_risk_temporal)
     control["ens_risk_code"] = code_only_risk(control, main_ens)
-    adapted = df[df.augmented.isna() & (df.split_temporal != "external")]
+    adapted = _originals(df)
+    adapted = adapted[adapted.split_temporal != "external"]
     adapted = adapted.assign(ens_risk=adapted.ens_risk_temporal)
     adapted["ens_risk_code"] = code_only_risk(adapted, ens)
     scored = df[df.split_temporal == "external"]

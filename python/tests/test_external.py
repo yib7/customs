@@ -1,5 +1,8 @@
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
+import pytest
 
 from customs_ml import external
 
@@ -107,3 +110,29 @@ def test_score_with_binary_timeout_is_recorded(monkeypatch):
     monkeypatch.setattr(subprocess, "run", slow)
     monkeypatch.setenv("CUSTOMS_BIN", "/opt/customs")
     assert external.score_with_binary(["a.tar.gz"], ["a"]) == [{"error": "timeout"}]
+
+
+def test_largest_cluster_empty():
+    empty = pd.DataFrame({"cluster": pd.Series([], dtype=int), "risk_code": []})
+    assert external._largest_cluster(empty)["n"] == 0
+
+
+def test_evaluate_without_fetched_archives_says_so(monkeypatch, tmp_path):
+    manifest = tmp_path / "manifest.jsonl"
+    manifest.write_text('{"sha256": "ab", "name": "x"}\n', encoding="utf-8")
+    monkeypatch.setattr(external, "manifest_path", lambda: manifest)
+    with pytest.raises(ValueError, match="fetch"):
+        external.evaluate()
+
+
+def test_link_dir_falls_back_when_symlinks_are_not_allowed(monkeypatch, tmp_path):
+    src = tmp_path / "src"
+    (src / "a").mkdir(parents=True)
+    (src / "a" / "f.txt").write_text("x", encoding="utf-8")
+
+    def refuse(self, target, target_is_directory=False):
+        raise OSError("symbolic link privilege not held")
+
+    monkeypatch.setattr(Path, "symlink_to", refuse)
+    external._link_dir(src, tmp_path / "dst")
+    assert (tmp_path / "dst" / "a" / "f.txt").read_text(encoding="utf-8") == "x"
