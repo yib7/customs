@@ -285,6 +285,7 @@ fn parse_eco(s: &str) -> Result<Ecosystem, RpcError> {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CheckPackageArgs {
     ecosystem: String,
     name: String,
@@ -304,6 +305,7 @@ struct DiffArgs {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CheckCommandArgs {
     command: String,
     #[serde(default)]
@@ -311,11 +313,13 @@ struct CheckCommandArgs {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ExplainArgs {
     id: i64,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AuditArgs {
     path: String,
     #[serde(default)]
@@ -323,6 +327,7 @@ struct AuditArgs {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ScanArchiveArgs {
     path: String,
     #[serde(default)]
@@ -1458,6 +1463,41 @@ mod tests {
         ] {
             let r = tool(&s, name, args.clone()).await;
             assert_eq!(r["error"]["code"], INVALID_PARAMS, "{name} {args}: {r}");
+        }
+    }
+
+    #[tokio::test]
+    async fn unknown_arguments_are_rejected() {
+        // The schemas say additionalProperties: false. A misspelt argument must not be
+        // dropped silently (a "verison" typo would otherwise check the latest release).
+        let s = server();
+        for (name, args, typo) in [
+            (
+                "check_package",
+                json!({"ecosystem": "npm", "name": "x", "verison": "1"}),
+                "verison",
+            ),
+            (
+                "check_install_command",
+                json!({"command": "npm i x", "dir": "/tmp"}),
+                "dir",
+            ),
+            ("explain_verdict", json!({"id": 1, "server": "x"}), "server"),
+            (
+                "audit_lockfile",
+                json!({"path": ".", "recursve": true}),
+                "recursve",
+            ),
+            (
+                "scan_archive",
+                json!({"path": "x.tgz", "packge": "x"}),
+                "packge",
+            ),
+        ] {
+            let r = tool(&s, name, args.clone()).await;
+            assert_eq!(r["error"]["code"], INVALID_PARAMS, "{name} {args}: {r}");
+            let msg = r["error"]["message"].as_str().unwrap_or_default();
+            assert!(msg.contains(typo), "{name}: {msg}");
         }
     }
 
