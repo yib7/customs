@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use customs_model::{decide, Decision, Models, Reason, ScoreInput, Scores};
@@ -57,6 +57,9 @@ pub struct Limits {
     pub max_check_bytes: u64,
     /// The artifact cache is trimmed (least recently used first) when it grows past this.
     pub max_cache_bytes: u64,
+    /// An archive download that takes longer than this in all is abandoned (502), so an
+    /// upstream that drips bytes cannot hold the download and everyone waiting on it.
+    pub download_timeout: Duration,
 }
 
 impl Default for Limits {
@@ -66,6 +69,7 @@ impl Default for Limits {
             max_scan_bytes: 256 << 20,
             max_check_bytes: 64 << 20,
             max_cache_bytes: 10 << 30,
+            download_timeout: Duration::from_secs(600),
         }
     }
 }
@@ -239,10 +243,39 @@ fn install_scripts_from_report(r: &ScanReport) -> Vec<String> {
     out
 }
 
+/// Partial downloads older than this were left by a crash. Age-gated rather than removed
+/// outright because a server and in-process engines may share a data directory.
+const STALE_PART_AGE: Duration = Duration::from_secs(3600);
+
+/// Remove `.part` files in `tmp` last written more than `older_than` ago; returns how many.
+fn remove_stale_parts(tmp: &Path, older_than: Duration) -> usize {
+    let Ok(entries) = std::fs::read_dir(tmp) else {
+        return 0;
+    };
+    let mut n = 0;
+    for e in entries.flatten() {
+        let stale = e.file_name().to_string_lossy().ends_with(".part")
+            && e.metadata()
+                .and_then(|m| m.modified())
+                .is_ok_and(|t| t.elapsed().is_ok_and(|age| age > older_than));
+        if stale && std::fs::remove_file(e.path()).is_ok() {
+            n += 1;
+        }
+    }
+    n
+}
+
 impl Engine {
     pub fn new(cfg: EngineConfig) -> anyhow::Result<Arc<Self>> {
         let cache_dir = cfg.data_dir.join("cache");
         std::fs::create_dir_all(cache_dir.join("tmp"))?;
+        let n = remove_stale_parts(&cache_dir.join("tmp"), STALE_PART_AGE);
+        if n > 0 {
+            tracing::info!(
+                files = n,
+                "removed partial downloads left by an earlier run"
+            );
+        }
         let store = Store::open(&cfg.data_dir.join("customs.db"))?;
         // Summaries from an earlier scanner or summary version are never read again.
         match store.scan_cache_prune(&scan_suffix(&cfg.limits)) {
@@ -548,7 +581,8 @@ impl Engine {
     ) -> Result<(PathBuf, String, u64), EngineError> {
         if let Some(row) = self.store.artifact_get(url).map_err(internal)? {
             let p = self.blob_path(&row.sha256);
-            if p.exists() {
+            // A blob cut short (a crash mid-write, a full disk) is a miss, not a hit.
+            if std::fs::metadata(&p).is_ok_and(|m| m.len() == row.size) {
                 crate::cache::touch(&p);
                 self.metrics.cache("artifact_hit");
                 return Ok((p, row.sha256, row.size));
@@ -563,7 +597,12 @@ impl Engine {
         ));
         let dl = match self
             .registry
-            .download(url, &tmp, self.limits.max_download_bytes)
+            .download(
+                url,
+                &tmp,
+                self.limits.max_download_bytes,
+                self.limits.download_timeout,
+            )
             .await
         {
             Ok(d) => d,
@@ -1718,5 +1757,23 @@ mod tests {
             agent_bypass: vec![],
         };
         assert_eq!(install_scripts_from_report(&r), vec!["postinstall"]);
+    }
+
+    #[test]
+    fn stale_partial_downloads_are_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join("1-1-0.part");
+        let new = dir.path().join("2-2-0.part");
+        std::fs::write(&old, b"x").unwrap();
+        std::fs::write(&new, b"x").unwrap();
+        std::fs::File::options()
+            .append(true)
+            .open(&old)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - Duration::from_secs(7200))
+            .unwrap();
+        assert_eq!(remove_stale_parts(dir.path(), Duration::from_secs(3600)), 1);
+        assert!(!old.exists());
+        assert!(new.exists());
     }
 }

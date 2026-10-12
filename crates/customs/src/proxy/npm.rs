@@ -274,7 +274,13 @@ async fn passthrough(
     let Ok(m) = reqwest::Method::from_bytes(method.as_str().as_bytes()) else {
         return StatusCode::METHOD_NOT_ALLOWED.into_response();
     };
-    let mut req = state.engine.registry.client().request(m, &url).body(body);
+    let mut req = state
+        .engine
+        .registry
+        .client()
+        .request(m, &url)
+        .timeout(crate::registry::PAGE_TIMEOUT)
+        .body(body);
     for h in [
         header::CONTENT_TYPE,
         header::ACCEPT,
@@ -294,15 +300,22 @@ async fn passthrough(
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or("application/json")
                 .to_string();
-            let bytes = resp.bytes().await.unwrap_or_default();
-            (status, [(header::CONTENT_TYPE, ct)], bytes).into_response()
+            match resp.bytes().await {
+                Ok(bytes) => (status, [(header::CONTENT_TYPE, ct)], bytes).into_response(),
+                // A body cut short is an upstream failure, not an empty answer.
+                Err(e) => upstream_error(e),
+            }
         }
-        Err(e) => (
-            StatusCode::BAD_GATEWAY,
-            format!("customs: upstream error: {e}\n"),
-        )
-            .into_response(),
+        Err(e) => upstream_error(e),
     }
+}
+
+fn upstream_error(e: reqwest::Error) -> Response {
+    (
+        StatusCode::BAD_GATEWAY,
+        format!("customs: upstream error: {e}\n"),
+    )
+        .into_response()
 }
 
 #[cfg(test)]

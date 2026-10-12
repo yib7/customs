@@ -23,6 +23,9 @@ use crate::metrics::Metrics;
 use crate::util::{ecosystem_str, normalize_name};
 
 const META_TTL: Duration = Duration::from_secs(300);
+/// A page, metadata or passthrough request that takes longer than this in all fails, so an
+/// upstream that drips bytes (each read inside the 60 s read timeout) cannot hold it forever.
+pub const PAGE_TIMEOUT: Duration = Duration::from_secs(120);
 /// A cached document that was itself refetched for a missing version is served for this
 /// long before another miss refetches it, so requests for a version that does not exist
 /// cannot turn every lookup into an upstream request.
@@ -219,6 +222,34 @@ pub fn npm_escape(name: &str) -> String {
     name.replacen('/', "%2f", 1)
 }
 
+/// Extra root certificates from `CUSTOMS_CA_FILE` and `SSL_CERT_FILE` (read through `env`).
+/// An unreadable `CUSTOMS_CA_FILE` is an error: it is set for Customs alone, and ignoring it
+/// would only surface later as certificate failures on every upstream request. An unreadable
+/// `SSL_CERT_FILE` is shared with other tools, so it is logged and skipped.
+fn extra_roots(env: impl Fn(&str) -> Option<String>) -> anyhow::Result<Vec<reqwest::Certificate>> {
+    let mut out = Vec::new();
+    for var in ["CUSTOMS_CA_FILE", "SSL_CERT_FILE"] {
+        let Some(path) = env(var).filter(|p| !p.is_empty()) else {
+            continue;
+        };
+        let pem = match std::fs::read(&path) {
+            Ok(pem) => pem,
+            Err(e) if var == "CUSTOMS_CA_FILE" => {
+                anyhow::bail!("reading {var}={path}: {e}");
+            }
+            Err(e) => {
+                tracing::warn!(%path, error = %e, "{var} is unreadable; not adding its certificates");
+                continue;
+            }
+        };
+        out.extend(
+            reqwest::Certificate::from_pem_bundle(&pem)
+                .with_context(|| format!("parsing {var}={path}"))?,
+        );
+    }
+    Ok(out)
+}
+
 impl Registry {
     pub fn new(metrics: Arc<Metrics>) -> anyhow::Result<Self> {
         let mut b = reqwest::Client::builder()
@@ -227,16 +258,8 @@ impl Registry {
             .connect_timeout(Duration::from_secs(15))
             .read_timeout(Duration::from_secs(60))
             .pool_idle_timeout(Duration::from_secs(60));
-        for var in ["CUSTOMS_CA_FILE", "SSL_CERT_FILE"] {
-            if let Ok(path) = std::env::var(var) {
-                if let Ok(pem) = std::fs::read(&path) {
-                    let certs = reqwest::Certificate::from_pem_bundle(&pem)
-                        .with_context(|| format!("parsing {var}={path}"))?;
-                    for c in certs {
-                        b = b.add_root_certificate(c);
-                    }
-                }
-            }
+        for c in extra_roots(|var| std::env::var(var).ok())? {
+            b = b.add_root_certificate(c);
         }
         Ok(Self {
             client: b.build().context("building HTTP client")?,
@@ -261,9 +284,8 @@ impl Registry {
         if let Some(a) = accept {
             req = req.header(reqwest::header::ACCEPT, a);
         }
-        let resp = req.send().await;
         let result = async {
-            let resp = resp?;
+            let resp = req.send().await?;
             let status = resp.status().as_u16();
             let final_url = resp.url().to_string();
             let content_type = resp
@@ -278,8 +300,15 @@ impl Registry {
                 body,
                 url: final_url,
             })
-        }
-        .await;
+        };
+        let result = tokio::time::timeout(PAGE_TIMEOUT, result)
+            .await
+            .unwrap_or_else(|_| {
+                Err(FetchError::Transport(format!(
+                    "{url} took longer than {} s",
+                    PAGE_TIMEOUT.as_secs()
+                )))
+            });
         self.metrics.upstream_latency(kind, start.elapsed());
         result
     }
@@ -433,12 +462,14 @@ impl Registry {
         }
     }
 
-    /// Stream `url` into `dest`, hashing as it goes. Fails with `TooLarge` past `max_bytes`.
+    /// Stream `url` into `dest`, hashing as it goes. Fails with `TooLarge` past `max_bytes`,
+    /// and with `Transport` when the whole download takes longer than `timeout`.
     pub async fn download(
         &self,
         url: &str,
         dest: &Path,
         max_bytes: u64,
+        timeout: Duration,
     ) -> Result<Download, FetchError> {
         let start = Instant::now();
         let result = async {
@@ -469,12 +500,23 @@ impl Registry {
             file.flush()
                 .await
                 .map_err(|e| FetchError::Other(format!("cache write: {e}")))?;
+            // On disk before the caller renames it into the cache and records it.
+            file.sync_all()
+                .await
+                .map_err(|e| FetchError::Other(format!("cache write: {e}")))?;
             Ok(Download {
                 sha256: hex::encode(hasher.finalize()),
                 size,
             })
-        }
-        .await;
+        };
+        let result = tokio::time::timeout(timeout, result)
+            .await
+            .unwrap_or_else(|_| {
+                Err(FetchError::Transport(format!(
+                    "downloading {url} took longer than {} s",
+                    timeout.as_secs()
+                )))
+            });
         self.metrics.upstream_latency("artifact", start.elapsed());
         result
     }
@@ -874,5 +916,27 @@ mod tests {
     fn escapes_scoped_names() {
         assert_eq!(npm_escape("@babel/core"), "@babel%2fcore");
         assert_eq!(npm_escape("left-pad"), "left-pad");
+    }
+
+    #[test]
+    fn an_unreadable_customs_ca_file_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("ca.pem").display().to_string();
+        let Err(err) = extra_roots(|v| (v == "CUSTOMS_CA_FILE").then(|| missing.clone())) else {
+            panic!("an unreadable CUSTOMS_CA_FILE was ignored");
+        };
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("CUSTOMS_CA_FILE") && msg.contains(&missing),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_ssl_cert_file_is_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("ca.pem").display().to_string();
+        let roots = extra_roots(|v| (v == "SSL_CERT_FILE").then(|| missing.clone())).unwrap();
+        assert!(roots.is_empty());
     }
 }

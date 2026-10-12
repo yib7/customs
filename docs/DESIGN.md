@@ -726,7 +726,13 @@ Registry proxy:
 - `GET /npm/{package}/-/{file}.tgz`: fetch, scan, decide, stream or 403 with
   `{"error": "<explanation>"}` (npm prints `error`).
 - `/npm/-/...` (audit, search and other registry endpoints) passes through unchanged,
-  query string included.
+  query string included. A response body cut short upstream is a 502, not an empty answer.
+- Upstream requests time out: 15 s to connect, 60 s per read, 2 min in all for a page,
+  metadata or passthrough request, and 10 min in all for an archive download (502). The
+  client trusts the platform roots plus the bundles named by `CUSTOMS_CA_FILE` (startup
+  fails if it cannot be read) and `SSL_CERT_FILE` (logged and skipped if unreadable).
+  A cached archive whose size on disk differs from the recorded size is downloaded again,
+  and partial downloads over an hour old are removed at startup.
 - Artifact responses carry `x-customs-decision` and `x-customs-verdict` (verdict id).
 - Every path that ends up in an upstream URL is checked after the router has
   percent-decoded it once: a `?`, `#`, `\`, `%`, whitespace or control character, or an

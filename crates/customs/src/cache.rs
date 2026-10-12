@@ -32,7 +32,8 @@ fn blobs(dir: &Path) -> Vec<(SystemTime, u64, PathBuf)> {
         return out;
     };
     for shard in shards.flatten() {
-        // Two-hex-digit shard directories only; `tmp/` holds downloads in progress.
+        // Two-hex-digit shard directories only; `tmp/` holds downloads in progress (ones
+        // left by a crash are removed when an engine starts, see `Engine::new`).
         let name = shard.file_name();
         if name.len() != 2 || !shard.path().is_dir() {
             continue;

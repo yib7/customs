@@ -3359,3 +3359,106 @@ async fn a_proxy_install_joining_a_check_records_an_install_event() {
     assert!(ev.iter().all(|e| e["verdict_id"] == v["id"]), "{ev:?} {v}");
     Arc::try_unwrap(h).ok().unwrap().stop().await;
 }
+
+/// An upstream that answers every request with `head` (status line and headers), then
+/// `body` (one byte per `gap` when set), then closes the connection.
+async fn raw_upstream(head: &'static str, body: Vec<u8>, gap: Option<Duration>) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = listener.accept().await {
+            let body = body.clone();
+            tokio::spawn(async move {
+                let mut buf = [0u8; 4096];
+                let _ = s.read(&mut buf).await;
+                if s.write_all(head.as_bytes()).await.is_err() {
+                    return;
+                }
+                match gap {
+                    None => {
+                        let _ = s.write_all(&body).await;
+                    }
+                    Some(g) => {
+                        for b in body {
+                            if s.write_all(&[b]).await.is_err() {
+                                return;
+                            }
+                            tokio::time::sleep(g).await;
+                        }
+                    }
+                }
+                let _ = s.shutdown().await;
+            });
+        }
+    });
+    base
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cut_off_npm_passthrough_body_is_a_502() {
+    let base = raw_upstream(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n",
+        b"{\"objects\":[".to_vec(),
+        None,
+    )
+    .await;
+    let h = Harness::start(|p| p.upstream.npm = base).await;
+    let r = h.get("/npm/-/v1/search?text=left-pad").await;
+    assert_eq!(r.status(), 502);
+    assert!(r.text().await.unwrap().contains("upstream"));
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_download_that_drips_is_abandoned() {
+    let files = raw_upstream(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: 600\r\n\r\n",
+        vec![b'x'; 600],
+        Some(Duration::from_millis(100)),
+    )
+    .await;
+    let limits = Limits {
+        download_timeout: Duration::from_secs(1),
+        ..Limits::default()
+    };
+    let h = Harness::start_full(|p| p.upstream.pypi_files = files, None, limits).await;
+    let r = tokio::time::timeout(
+        Duration::from_secs(20),
+        h.get(&pypi_file_path("goodpkg", "1.0.0")),
+    )
+    .await
+    .expect("the download was never cut off");
+    assert_eq!(r.status(), 502);
+    let tmp = h._dir.path().join("cache").join("tmp");
+    assert_eq!(
+        std::fs::read_dir(&tmp).unwrap().count(),
+        0,
+        "partial download left behind"
+    );
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_truncated_cached_archive_is_downloaded_again() {
+    let h = Harness::start(|_| {}).await;
+    let path = pypi_file_path("goodpkg", "1.0.0");
+    let r = h.get(&path).await;
+    assert_eq!(r.status(), 200);
+    let whole = r.bytes().await.unwrap();
+    let blob = std::fs::read_dir(h._dir.path().join("cache"))
+        .unwrap()
+        .flatten()
+        .filter(|d| d.file_name().len() == 2)
+        .flat_map(|d| std::fs::read_dir(d.path()).unwrap().flatten())
+        .map(|f| f.path())
+        .next()
+        .unwrap();
+    std::fs::write(&blob, &whole[..1]).unwrap();
+
+    let r = h.get(&path).await;
+    assert_eq!(r.status(), 200);
+    assert_eq!(r.bytes().await.unwrap(), whole);
+    assert_eq!(h.mock.hits("packages/ab/cd/goodpkg-1.0.0.tar.gz"), 2);
+    h.stop().await;
+}
