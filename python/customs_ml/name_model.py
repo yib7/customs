@@ -48,9 +48,23 @@ NUMERIC = [
 ]
 
 
+# Unicode White_Space, which Rust's str::trim strips. Python's str.strip also strips
+# U+001C..U+001F, so it does not match.
+_RUST_WHITESPACE = (
+    "\t\n\x0b\x0c\r \x85\xa0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008"
+    "\u2009\u200a\u2028\u2029\u202f\u205f\u3000"
+)
+
+
 def normalize(ecosystem: str, name: str) -> str:
+    """Mirror of ``normalize`` in crates/customs-model/src/name.rs, character for character.
+
+    PyPI lowercases each character on its own (Rust's char::to_lowercase, so a final capital
+    sigma becomes "σ"); npm lowercases the whole string (Rust's str::to_lowercase and
+    Python's str.lower both apply the final-sigma rule)."""
+    name = name.strip(_RUST_WHITESPACE)
     if ecosystem == "pypi":
-        return re.sub(r"[-_.]+", "-", name).lower()
+        return "".join(c.lower() for c in re.sub(r"[-_.]+", "-", name))
     return name.lower()
 
 
@@ -194,18 +208,5 @@ def score_exported(model: dict, ecosystem: str, name: str, pop: Popular) -> floa
     return logit
 
 
-def nearest_popular(name: str, pop: Popular) -> tuple[str | None, int]:
-    b = _bare(name)
-    best, bd = None, MAX_DIST + 1
-    for p in pop.names:
-        pb = _bare(p)
-        if pb == b:
-            continue
-        d = OSA.distance(b, pb, score_cutoff=MAX_DIST)
-        if d < bd:
-            best, bd = p, d
-    return best, bd
-
-
 def save(model: dict, path: Path) -> None:
-    path.write_text(json.dumps(model, separators=(",", ":")))
+    path.write_text(json.dumps(model, separators=(",", ":")), encoding="utf-8")

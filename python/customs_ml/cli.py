@@ -35,7 +35,7 @@ def cmd_ossf(args) -> None:
     print(f"{len(df)} reports -> {out}")
 
 
-def _datadog_listing() -> list[str]:
+def _datadog_listing(repo_url: str = DATADOG_REPO) -> list[str]:
     """List sample paths with a blobless clone (no sample content is downloaded)."""
     with tempfile.TemporaryDirectory() as td:
         subprocess.run(
@@ -47,18 +47,32 @@ def _datadog_listing() -> list[str]:
                 "1",
                 "--filter=blob:none",
                 "--no-checkout",
-                DATADOG_REPO,
+                repo_url,
                 td,
             ],
             check=True,
         )
+        # quotepath off and -z: otherwise git C-quotes non-ASCII paths and they fail SAMPLE_RE.
         out = subprocess.run(
-            ["git", "-C", td, "ls-tree", "-r", "--name-only", "HEAD"],
+            [
+                "git",
+                "-c",
+                "core.quotepath=off",
+                "-C",
+                td,
+                "ls-tree",
+                "-r",
+                "-z",
+                "--name-only",
+                "HEAD",
+            ],
             check=True,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         ).stdout
-    return [p for p in out.split("\n") if malicious.SAMPLE_RE.search(p)]
+    return [p for p in out.split("\0") if malicious.SAMPLE_RE.search(p)]
 
 
 def pick_samples(paths: list[str], cap_intent: int, cap_compromised: int, seed: int) -> list[str]:
@@ -82,6 +96,16 @@ def pick_samples(paths: list[str], cap_intent: int, cap_compromised: int, seed: 
     return picked
 
 
+def fetch_to(session: requests.Session, url: str, dest: Path) -> bool:
+    """Download ``url`` to ``dest`` atomically; report and skip a failed download."""
+    r = session.get(url, timeout=60)
+    if not r.ok:
+        print(f"skipped {url}: HTTP {r.status_code}")
+        return False
+    config.write_atomic(dest, r.content)
+    return True
+
+
 def cmd_malicious(args) -> None:
     picked = pick_samples(_datadog_listing(), args.cap_intent, args.cap_compromised, args.seed)
     raw_dir = config.sub("datadog_raw")
@@ -90,12 +114,8 @@ def cmd_malicious(args) -> None:
 
     def fetch(rel: str) -> None:
         dest = raw_dir / rel
-        if dest.exists():
-            return
-        r = session.get(DATADOG_RAW + requests.utils.quote(rel), timeout=60)
-        if r.ok:
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_bytes(r.content)
+        if not dest.exists():
+            fetch_to(session, DATADOG_RAW + requests.utils.quote(rel), dest)
 
     # Download and ingest in chunks, deleting the encrypted zips after each chunk, so the
     # disk only ever holds one chunk of raw samples.
@@ -104,7 +124,7 @@ def cmd_malicious(args) -> None:
         with ThreadPoolExecutor(16) as ex:
             list(ex.map(fetch, chunk))
         listing = raw_dir / "chunk.txt"
-        listing.write_text("\n".join(chunk) + "\n")
+        listing.write_text("\n".join(chunk) + "\n", encoding="utf-8")
         malicious.ingest(raw_dir, workers=args.workers, tree_listing=listing)
         for p in raw_dir.rglob("*.zip"):
             p.unlink()
@@ -129,22 +149,12 @@ def cmd_names(args) -> None:
 
 
 def cmd_train(args) -> None:
-    from . import nn as cnn
-    from . import pipeline, robustness
+    from . import external, pipeline
 
-    pipeline.main(["table", "cluster", "split", "gbdt", "ablation"])
-    pipeline.stage_cnn(cfg=cnn.Config(max_len=768, epochs=10, patience=3))
-    pipeline.main(["names", "ensemble", "evaluate", "export"])
-    robustness.run(n=800)
-    if args.augment:
-        work = pipeline.work()
-        for f in ("eval", "robustness", "ensemble", "ablation"):
-            src = work / f"{f}_{pipeline.SCHEME}.json"
-            (work / f"baseline_{src.name}").write_text(src.read_text())
-        pipeline.main(["augment", "gbdt", "ablation"])
-        pipeline.stage_cnn(cfg=cnn.Config(max_len=768, epochs=10, patience=3))
-        pipeline.main(["ensemble", "evaluate", "export"])
-        robustness.run(n=800)
+    malregistry = args.malregistry and external.fetched()
+    if args.malregistry and not malregistry:
+        print("MalRegistry archives not fetched: training without the malregistry stages")
+    pipeline.main(pipeline.plan(augment=args.augment, malregistry=malregistry))
 
 
 def cmd_report(args) -> None:
@@ -174,6 +184,7 @@ def main(argv: list[str] | None = None) -> None:
     sub.add_parser("names", help="build name-model data").set_defaults(fn=cmd_names)
     p = sub.add_parser("train", help="run every training and evaluation stage")
     p.add_argument("--no-augment", dest="augment", action="store_false")
+    p.add_argument("--no-malregistry", dest="malregistry", action="store_false")
     p.set_defaults(fn=cmd_train)
     sub.add_parser("report", help="write docs/EVALUATION.md").set_defaults(fn=cmd_report)
     args = ap.parse_args(argv)

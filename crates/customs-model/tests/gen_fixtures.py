@@ -52,7 +52,7 @@ def b64(arr):
 
 
 def dump(path, obj):
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         json.dump(obj, f, indent=1, sort_keys=True)
         f.write("\n")
 
@@ -155,10 +155,18 @@ NUMERIC_FEATURES = ["len", "n_digits", "n_hyphens", "n_underscores", "n_dots", "
 MAX_DISTANCE = 4
 
 
+# Unicode White_Space, what Rust's str::trim strips (Python's str.strip also strips \x1c-\x1f).
+RUST_WHITESPACE = (
+    "\t\n\x0b\x0c\r \x85\xa0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008"
+    "\u2009\u200a\u2028\u2029\u202f\u205f\u3000"
+)
+
+
 def normalize(eco, name):
-    name = name.strip()
+    # As in name.rs: PyPI lowercases per character (no final-sigma rule), npm per string.
+    name = name.strip(RUST_WHITESPACE)
     if eco == "pypi":
-        return re.sub(r"[-_.]+", "-", name.lower())
+        return "".join(c.lower() for c in re.sub(r"[-_.]+", "-", name))
     return name.lower()
 
 
@@ -386,9 +394,9 @@ def main():
     dump(os.path.join(OUT, "expected_gbdt.json"), {"cases": cases})
 
     # Name model.
-    with open(os.path.join(MODELS, "popular_pypi.txt"), "w") as f:
+    with open(os.path.join(MODELS, "popular_pypi.txt"), "w", encoding="utf-8") as f:
         f.write("\n".join(normalize("pypi", n) for n in POPULAR_PYPI) + "\n")
-    with open(os.path.join(MODELS, "popular_npm.txt"), "w") as f:
+    with open(os.path.join(MODELS, "popular_npm.txt"), "w", encoding="utf-8") as f:
         f.write("\n".join(normalize("npm", n) for n in POPULAR_NPM) + "\n")
     pops = {"pypi": Popular("pypi", POPULAR_PYPI), "npm": Popular("npm", POPULAR_NPM)}
     n_buckets = 4096

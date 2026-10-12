@@ -49,6 +49,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from . import config
 from .pipeline import SCHEME, load_table, log, work
 
 RULES = (
@@ -193,7 +194,7 @@ def fetch(name: str, cache: Path) -> dict:
     when the request failed (not cached, so a later run retries)."""
     path = cache / (hashlib.sha1(name.encode()).hexdigest() + ".json")
     if path.exists():
-        return json.loads(path.read_text())
+        return json.loads(path.read_text(encoding="utf-8"))
     url = "https://registry.npmjs.org/" + urllib.parse.quote(name, safe="@")
     try:
         with urllib.request.urlopen(url, timeout=120) as r:
@@ -204,7 +205,7 @@ def fetch(name: str, cache: Path) -> dict:
         doc = {"missing": True}
     except OSError, ValueError:
         return {}
-    path.write_text(json.dumps(doc))
+    path.write_text(json.dumps(doc), encoding="utf-8")
     return doc
 
 
@@ -430,7 +431,7 @@ def history_rules(
     sv = _semver(version)
     prior = [(v, _semver(v), t) for t, v in earlier if _semver(v)]
     if sv and prior:
-        hv, hs, _ = max(prior, key=lambda x: x[1])
+        _, hs, _ = max(prior, key=lambda x: x[1])
         if sv[0] > hs[0] + 1:
             out["version_anomaly"] = True
         elif sv[0] < hs[0]:
@@ -682,14 +683,14 @@ def run(n_benign: int = 400, years: float = 2.0, seed: int = 5, scheme: str = SC
         df = df[df.source.isna()]
     cache = work() / "packuments2"
     cache.mkdir(exist_ok=True)
-    thr = json.loads((work() / f"ensemble_{scheme}.json").read_text())["thresholds"]
+    thr = json.loads((work() / f"ensemble_{scheme}.json").read_text(encoding="utf-8"))["thresholds"]
     comp = compromised(df, cache, thr, scheme)
     ben = benign(df, cache, n_benign, years, seed)
     res = summarize(comp, ben)
     res["benign_window_years"] = years
-    (work() / "history_eval.json").write_text(json.dumps(res, indent=1))
+    (work() / "history_eval.json").write_text(json.dumps(res, indent=1), encoding="utf-8")
     (work() / "history_eval_rows.json").write_text(
-        json.dumps({"compromised": comp["rows"], "benign": ben})
+        json.dumps({"compromised": comp["rows"], "benign": ben}), encoding="utf-8"
     )
     log(
         "history_eval",
@@ -706,7 +707,9 @@ def parity(binary: Path, models: Path, per_rule: int = 20, quiet: int = 30, seed
     on releases where each rule fired here, plus releases where none did, and compares the
     rules it reports with the replay's.
     """
-    rows = pd.DataFrame(json.loads((work() / "history_eval_rows.json").read_text())["benign"])
+    rows = pd.DataFrame(
+        json.loads((work() / "history_eval_rows.json").read_text(encoding="utf-8"))["benign"]
+    )
     known = rows[list(RULES)].map(lambda v: v is not None).all(axis=1)
     rows = rows[known]
     picks = []
@@ -723,15 +726,23 @@ def parity(binary: Path, models: Path, per_rule: int = 20, quiet: int = 30, seed
         'publisher_changed = "warn"\ndormant_revival = "warn"\nversion_anomaly = "warn"\n'
         'nonregistry_dependency_added = "warn"\nyoung_dependency_added = "warn"\n'
         # Historical releases: replay the rules as they applied at publication.
-        "history_window_days = 0\n"
+        "history_window_days = 0\n",
+        encoding="utf-8",
     )
 
     def check(r) -> list[str] | None:
         cmd = [str(binary), "check", "--json", "--server", "http://127.0.0.1:9"]
         cmd += ["--config", str(policy), "--models", str(models), "--data-dir", str(tmp)]
-        p = subprocess.run(
-            [*cmd, "npm", f"{r.name}@{r.version}"], capture_output=True, text=True, timeout=300
-        )
+        try:
+            p = subprocess.run(
+                [*cmd, "npm", f"{r.name}@{r.version}"],
+                capture_output=True,
+                text=True,
+                timeout=300,
+                encoding="utf-8",
+            )
+        except subprocess.TimeoutExpired:
+            return None  # no verdict, like unparsable output
         try:
             hits = json.loads(p.stdout).get("policy_hits", [])
         except ValueError:
@@ -756,7 +767,7 @@ def parity(binary: Path, models: Path, per_rule: int = 20, quiet: int = 30, seed
             out["disagree"].append(
                 {"name": r.name, "version": r.version, "replay": mine, "proxy": g}
             )
-    (work() / "history_parity.json").write_text(json.dumps(out, indent=1))
+    (work() / "history_parity.json").write_text(json.dumps(out, indent=1), encoding="utf-8")
     return out
 
 
@@ -772,5 +783,4 @@ if __name__ == "__main__":
     args = ap.parse_args()
     print(json.dumps(run(args.benign, args.years), indent=1))
     if args.parity:
-        root = Path(__file__).resolve().parents[2]
-        print(json.dumps(parity(Path(args.parity), root / "models"), indent=1))
+        print(json.dumps(parity(Path(args.parity), config.MODELS_DIR), indent=1))

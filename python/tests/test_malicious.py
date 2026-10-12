@@ -1,6 +1,8 @@
 import io
 import tarfile
 
+import pytest
+
 from customs_ml import malicious
 
 
@@ -38,3 +40,19 @@ def test_traversal_entries_are_dropped():
     assert malicious._safe_rel("../etc/passwd") is None
     assert malicious._safe_rel("/abs/path") is None
     assert malicious._safe_rel("a/./b") == "a/b"
+
+
+def test_tar_entry_cap(monkeypatch):
+    def tar(n: int) -> bytes:
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+            for i in range(n):
+                info = tarfile.TarInfo(f"pkg/f{i}.py")
+                info.size = 1
+                tf.addfile(info, io.BytesIO(b"x"))
+        return buf.getvalue()
+
+    monkeypatch.setattr(malicious, "MAX_ENTRIES", 2)
+    assert len(malicious.read_tar_tree(tar(2))) == 2
+    with pytest.raises(ValueError, match="too many entries"):
+        malicious.read_tar_tree(tar(3))

@@ -4,26 +4,53 @@
 #   scripts/demo.sh            build, start the server, run every scenario, stop
 #   KEEP=1 scripts/demo.sh     leave the server running so you can open the dashboard
 #
+# The binary is $CUSTOMS_BIN, else target/release/customs (under $CARGO_TARGET_DIR when set).
+#
 # Nothing here executes package code. The "malicious" package below is an inert string
 # fixture that is only packed and scanned.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-BIN=target/release/customs
+BIN="${CUSTOMS_BIN:-${CARGO_TARGET_DIR:-target}/release/customs}"
 PORT=${PORT:-7878}
 URL="http://127.0.0.1:${PORT}"
 WORK=$(mktemp -d)
-trap 'if [ -z "${KEEP:-}" ]; then kill "${SERVER_PID:-0}" 2>/dev/null || true; fi; rm -rf "$WORK"' EXIT
+cleanup() {
+  status=$?
+  [ -n "${KEEP:-}" ] || kill "${SERVER_PID:-0}" 2>/dev/null || true
+  # With KEEP the running server still uses $WORK/data; after a failure the log is kept.
+  if [ -n "${KEEP:-}" ] || [ "$status" -ne 0 ]; then
+    echo "Work directory kept: $WORK" >&2
+  else
+    rm -rf "$WORK"
+  fi
+}
+trap cleanup EXIT
 
 step() { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 
 [ -x "$BIN" ] || cargo build --release -p customs -p customs-scan
 [ -d web/dist ] || (cd web && npm ci --no-audit --no-fund && npm run build)
 
+if curl -fsS "$URL/healthz" >/dev/null 2>&1; then
+  echo "Something already answers on $URL; set PORT to another port." >&2
+  exit 1
+fi
+
 step "Start the firewall on $URL"
 "$BIN" serve --bind "127.0.0.1:${PORT}" --data-dir "$WORK/data" --ui-dir web/dist >"$WORK/server.log" 2>&1 &
 SERVER_PID=$!
-for _ in $(seq 50); do curl -fsS "$URL/healthz" >/dev/null 2>&1 && break; sleep 0.2; done
+up=
+for _ in $(seq 50); do
+  if curl -fsS "$URL/healthz" >/dev/null 2>&1; then up=1; break; fi
+  kill -0 "$SERVER_PID" 2>/dev/null || break
+  sleep 0.2
+done
+if [ -z "$up" ]; then
+  echo "customs serve did not start; its log:" >&2
+  cat "$WORK/server.log" >&2
+  exit 1
+fi
 curl -fsS "$URL/api/model" | python3 -c 'import json,sys; m=json.load(sys.stdin); print("model", m["model_version"])'
 
 step "A popular package passes"

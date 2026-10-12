@@ -67,3 +67,36 @@ def test_injected_payload_reaches_the_install_or_import_path():
         assert b"os.system" in text, mode
         if mode == "new_module":
             assert b"from . import" in out["pkg/__init__.py"]
+
+
+def test_no_valid_donor_adds_no_synthetic_row(monkeypatch, tmp_path):
+    tree = {"package.json": b'{"name":"a"}', "index.js": b"x\n"}
+    monkeypatch.setattr(diff, "load_tree", lambda p: dict(tree))
+    monkeypatch.setattr(diff, "resolve_previous", lambda *a: ("0.9.0", "https://x/a-0.9.0.tgz"))
+    monkeypatch.setattr(diff, "_get", lambda *a, **k: b"prev")
+    monkeypatch.setattr(diff, "registry_tree", lambda *a: dict(tree))
+    monkeypatch.setattr(diff, "_write_delta", lambda *a: str(tmp_path / "d.tgz"))
+    monkeypatch.setattr(diff, "payload_ok", lambda eco, donor: False)
+    task = {
+        "row": 1,
+        "ecosystem": "npm",
+        "name": "a",
+        "version": "1.0.0",
+        "label": 0,
+        "kind": "benign",
+        "split": "train",
+        "canonical_path": "a.tgz",
+        "donors": ["d1.tgz", "d2.tgz"],
+        "out_dir": str(tmp_path),
+    }
+    rows = diff._pair_one(task)
+    # Only the benign pair: a synthetic compromise without a payload would be label noise.
+    assert [r["label"] for r in rows] == [0]
+    assert "error" not in rows[0]
+
+
+def test_delta_ecosystem_from_any_path_style():
+    assert diff._delta_eco("/data/diff/npm/ab/abc.tgz") == "npm"
+    assert diff._delta_eco(r"C:\data\diff\npm\ab\abc.tgz") == "npm"
+    assert diff._delta_eco(r"C:\data\diff\pypi\ab\abc.tar.gz") == "pypi"
+    assert diff._delta_eco("/data/diff/pypi/ab/abc.tar.gz") == "pypi"

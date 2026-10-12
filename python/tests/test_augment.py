@@ -42,3 +42,30 @@ def test_self_repo_renames_core_metadata_headers_only():
     assert "Home-page: https://github.com/psf/reqeusts" in head
     assert "Project-URL: Source, https://github.com/psf/reqeusts.git" in head
     assert "github.com/psf/requests for docs" in body
+
+
+def test_missing_donor_ecosystem_is_skipped(monkeypatch, tmp_path):
+    import pandas as pd
+
+    from customs_ml import augment
+
+    df = pd.DataFrame(
+        {
+            "label": [1, 0],
+            "ecosystem": ["pypi", "npm"],
+            "tier": ["malicious", "top"],
+            "f_all_n_lines": [50, 500],
+            "cluster": [0, 1],
+            "split_temporal": ["train", "train"],
+            "canonical_path": ["mal.tar.gz", "benign.tgz"],
+            "name": ["evil", "good"],
+            "version": ["1.0", "1.0"],
+        }
+    )
+    monkeypatch.setenv("CUSTOMS_DATA", str(tmp_path))
+    monkeypatch.setattr(augment, "load_table", lambda: df.copy())
+    monkeypatch.setattr(augment, "work", lambda: tmp_path)
+    # The only training malware is PyPI and there is no PyPI donor: nothing to augment.
+    augment.stage_augment(scheme="temporal")
+    out = pd.read_parquet(tmp_path / "dataset.parquet")
+    assert len(out) == 2 and out.augmented.isna().all()

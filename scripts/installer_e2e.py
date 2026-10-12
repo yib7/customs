@@ -27,8 +27,8 @@ import hashlib
 import io
 import json
 import os
+import re
 import shutil
-import socket
 import subprocess
 import sys
 import tarfile
@@ -420,10 +420,49 @@ class Registry:
 # ---------------------------------------------------------------------------- harness
 
 
-def free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
+# `customs serve` logs the address it bound, as text (`addr=...`) or JSON (`"addr":"..."`).
+LISTENING = re.compile(r"customs listening.*?\baddr\W+(127\.0\.0\.1:\d+)")
+
+
+def listening_url(log: Path) -> str | None:
+    """The proxy URL from the server log, once `customs serve` has bound its port."""
+    text = log.read_text(encoding="utf-8", errors="replace") if log.exists() else ""
+    m = LISTENING.search(text)
+    return f"http://{m.group(1)}" if m else None
+
+
+def wait_listening(log: Path, server: subprocess.Popen, seconds: float = 60) -> str | None:
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline and server.poll() is None:
+        url = listening_url(log)
+        if url and wait_healthy(url, server, seconds=max(deadline - time.monotonic(), 1)):
+            return url
+        time.sleep(0.1)
+    return None
+
+
+def isolated_env(work: Path) -> dict[str, str]:
+    """The environment for the installers: the caller's, minus every pip/uv/npm setting.
+
+    A user's pip.conf `extra-index-url`, uv.toml index or .npmrc registry would let an
+    installer reach the real registry around the proxy, so config files are switched off
+    and inherited `PIP_*`, `UV_*` and `npm_config_*` variables are dropped.
+    """
+    # npm refuses one file as both the user and the global config.
+    user, glob = work / "empty-user.npmrc", work / "empty-global.npmrc"
+    for f in (user, glob):
+        f.write_text("", encoding="utf-8")
+    drop = ("PIP_", "UV_", "NPM_CONFIG_")
+    return {
+        **{k: v for k, v in os.environ.items() if not k.upper().startswith(drop)},
+        "PIP_CONFIG_FILE": os.devnull,
+        "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+        "PIP_NO_CACHE_DIR": "1",
+        "PIP_NO_INPUT": "1",
+        "UV_NO_CONFIG": "1",
+        "npm_config_userconfig": str(user),
+        "npm_config_globalconfig": str(glob),
+    }
 
 
 FAILURES = 0
@@ -442,7 +481,15 @@ def run(
     cmd: list[str], cwd: Path | None = None, env: dict | None = None
 ) -> subprocess.CompletedProcess:
     return subprocess.run(
-        cmd, cwd=cwd, env=env, capture_output=True, text=True, timeout=300, check=False
+        cmd,
+        cwd=cwd,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+        encoding="utf-8",
+        errors="replace",
     )
 
 
@@ -461,23 +508,22 @@ def main() -> int:
     reg.base = f"http://127.0.0.1:{upstream.server_address[1]}"
     threading.Thread(target=upstream.serve_forever, daemon=True).start()
 
-    port = free_port()
-    url = f"http://127.0.0.1:{port}"
     (work / "customs.toml").write_text(
         "min_age_days = 3\n"
         "[upstream]\n"
         f'pypi_simple = "{reg.base}/simple"\n'
         f'pypi_files = "{reg.base}/files"\n'
         f'pypi_json = "{reg.base}/pypi"\n'
-        f'npm = "{reg.base}/npm"\n'
+        f'npm = "{reg.base}/npm"\n',
+        encoding="utf-8",
     )
-    with open(work / "server.log", "w") as log:
+    with open(work / "server.log", "w", encoding="utf-8") as log:
         server = subprocess.Popen(
             [
                 args.bin,
                 "serve",
                 "--bind",
-                f"127.0.0.1:{port}",
+                "127.0.0.1:0",
                 "--data-dir",
                 str(work / "data"),
                 "--config",
@@ -486,10 +532,13 @@ def main() -> int:
             stdout=log,
             stderr=subprocess.STDOUT,
             cwd=ROOT,
+            # The bound port is read back from the "customs listening" line.
+            env={**os.environ, "CUSTOMS_LOG": "info"},
         )
         try:
-            if not wait_healthy(url, server):
-                print((work / "server.log").read_text())
+            url = wait_listening(work / "server.log", server)
+            if url is None:
+                print((work / "server.log").read_text(encoding="utf-8"))
                 print("customs serve did not start")
                 return 1
             scenarios(url, work, required)
@@ -504,7 +553,7 @@ def main() -> int:
             upstream.shutdown()
             if FAILURES:
                 print("--- server log (tail)")
-                print((work / "server.log").read_text()[-4000:])
+                print((work / "server.log").read_text(encoding="utf-8")[-4000:])
             shutil.rmtree(work, ignore_errors=True)
     print(f"\n{FAILURES} failed" if FAILURES else "\nall passed")
     return 1 if FAILURES else 0
@@ -516,7 +565,9 @@ def js_manager(tool: str, url: str, work: Path, env: dict) -> None:
     registry = f"{url}/npm/"
     proj = work / tool
     proj.mkdir()
-    (proj / "package.json").write_text('{"name": "e2e", "version": "1.0.0", "private": true}\n')
+    (proj / "package.json").write_text(
+        '{"name": "e2e", "version": "1.0.0", "private": true}\n', encoding="utf-8"
+    )
     tool_env = {
         **env,
         "npm_config_registry": registry,
@@ -534,7 +585,7 @@ def js_manager(tool: str, url: str, work: Path, env: dict) -> None:
 
     def version(pkg: str) -> str | None:
         p = proj / "node_modules" / pkg / "package.json"
-        return json.loads(p.read_text())["version"] if p.exists() else None
+        return json.loads(p.read_text(encoding="utf-8"))["version"] if p.exists() else None
 
     r = run([*add, "plain-js"], cwd=proj, env=tool_env)
     expect(
@@ -545,7 +596,7 @@ def js_manager(tool: str, url: str, work: Path, env: dict) -> None:
     # pnpm keeps transitive dependencies out of the top-level node_modules.
     nested = proj / "node_modules" / "plain-js" / "node_modules" / "calm-js" / "package.json"
     calm = version("calm-js") or (
-        json.loads(nested.read_text())["version"] if nested.exists() else None
+        json.loads(nested.read_text(encoding="utf-8"))["version"] if nested.exists() else None
     )
     if calm is None:
         store = proj / "node_modules" / ".pnpm"
@@ -579,12 +630,7 @@ def installed(target: Path) -> set[str]:
 
 
 def scenarios(url: str, work: Path, required: set[str]) -> None:
-    env = {
-        **os.environ,
-        "PIP_DISABLE_PIP_VERSION_CHECK": "1",
-        "PIP_NO_CACHE_DIR": "1",
-        "PIP_NO_INPUT": "1",
-    }
+    env = isolated_env(work)
     index = f"{url}/pypi/simple"
 
     print("== pip (HTML simple index)")
@@ -657,7 +703,9 @@ def scenarios(url: str, work: Path, required: set[str]) -> None:
         registry = f"{url}/npm/"
         proj = work / "npm1"
         proj.mkdir()
-        (proj / "package.json").write_text('{"name": "e2e", "version": "1.0.0", "private": true}\n')
+        (proj / "package.json").write_text(
+            '{"name": "e2e", "version": "1.0.0", "private": true}\n', encoding="utf-8"
+        )
         npm_env = {
             **env,
             "npm_config_cache": str(work / "npm-cache"),
@@ -675,7 +723,7 @@ def scenarios(url: str, work: Path, required: set[str]) -> None:
 
         def version(pkg: str) -> str | None:
             p = proj / "node_modules" / pkg / "package.json"
-            return json.loads(p.read_text())["version"] if p.exists() else None
+            return json.loads(p.read_text(encoding="utf-8"))["version"] if p.exists() else None
 
         r = run(npm + ["plain-js"], cwd=proj, env=npm_env)
         expect(
@@ -684,7 +732,11 @@ def scenarios(url: str, work: Path, required: set[str]) -> None:
             r.stdout + r.stderr,
         )
         r = run(npm + ["calm-js"], cwd=proj, env=npm_env)
-        dep = json.loads((proj / "package.json").read_text()).get("dependencies", {}).get("calm-js")
+        dep = (
+            json.loads((proj / "package.json").read_text(encoding="utf-8"))
+            .get("dependencies", {})
+            .get("calm-js")
+        )
         expect(
             r.returncode == 0 and version("calm-js") == "1.0.0" and dep == "^1.0.0",
             "npm install calm-js saves ^1.0.0",
@@ -702,10 +754,13 @@ def scenarios(url: str, work: Path, required: set[str]) -> None:
             "evil-js 1.0.1 (install script added) is refused with 403",
             r.stdout + r.stderr,
         )
-        lock = json.loads((proj / "package-lock.json").read_text())
-        resolved = lock["packages"]["node_modules/calm-js"]["resolved"]
+        lockfile = proj / "package-lock.json"
+        lock = json.loads(lockfile.read_text(encoding="utf-8")) if lockfile.exists() else {}
+        resolved = lock.get("packages", {}).get("node_modules/calm-js", {}).get("resolved", "")
         expect(
-            resolved.startswith(registry), "package-lock.json resolves through the proxy", resolved
+            resolved.startswith(registry),
+            "package-lock.json resolves through the proxy",
+            resolved or f"no calm-js entry in {lockfile}",
         )
     else:
         expect(

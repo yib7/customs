@@ -13,17 +13,19 @@ evaluation end to end.
 
     CUSTOMS_DATA=/path/to/data python scripts/replay.py --n 300 [--keep]
 
-Requires the dataset built by `customs-ml` (see README).
+Requires the dataset built by `customs-ml` (see README). The firewall binary is
+`$CUSTOMS_BIN`, else `target/release/customs` (under `$CARGO_TARGET_DIR` when set).
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import shutil
-import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -40,6 +42,45 @@ import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[1]
 OLD = "2025-01-01T00:00:00.000Z"  # older than any min-age policy: the model decides
+
+
+def customs_bin() -> str:
+    """``$CUSTOMS_BIN``, else this checkout's ``target/release/customs`` (under
+    ``$CARGO_TARGET_DIR`` when set, ``.exe`` on Windows)."""
+    env = os.environ.get("CUSTOMS_BIN")
+    if env:
+        return env
+    target = os.environ.get("CARGO_TARGET_DIR")
+    base = Path(target) if target else ROOT / "target"
+    return str(base / "release" / ("customs.exe" if os.name == "nt" else "customs"))
+
+
+def require_free_port(port: int) -> None:
+    """Exit if something already listens on ``port``: its answers would be counted as ours."""
+    with socket.socket() as s:
+        try:
+            s.bind(("127.0.0.1", port))
+        except OSError:
+            sys.exit(f"port {port} is in use; pick another with --port")
+
+
+def wait_healthy(proxy: str, server: subprocess.Popen, log: Path, seconds: float = 30) -> None:
+    """Return once the server we started answers ``/healthz``; exit with its log otherwise."""
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline and server.poll() is None:
+        try:
+            urllib.request.urlopen(f"{proxy}/healthz", timeout=1).read()
+            if server.poll() is None:
+                return
+        except OSError:
+            time.sleep(0.1)
+    sys.exit("customs serve did not start:\n" + log.read_text(encoding="utf-8")[-3000:])
+
+
+def finite(x) -> float | None:
+    """``x`` as a float, or None for NaN (an empty group), so the JSON stays valid."""
+    x = float(x)
+    return x if math.isfinite(x) else None
 
 
 def dist_name(name: str) -> str:
@@ -184,13 +225,15 @@ def main() -> None:
         # off and the model decides every sample, as in the evaluation.
         "[established]\nenabled = false\n"
         f'[upstream]\npypi_simple = "{base}/simple"\npypi_files = "{base}/files"\n'
-        f'pypi_json = "{base}/pypi"\nnpm = "{base}/npm"\n'
+        f'pypi_json = "{base}/pypi"\nnpm = "{base}/npm"\n',
+        encoding="utf-8",
     )
     proxy = f"http://127.0.0.1:{args.port}"
-    with open(work / "server.log", "w") as log:
+    require_free_port(args.port)
+    with open(work / "server.log", "w", encoding="utf-8") as log:
         server = subprocess.Popen(
             [
-                str(ROOT / "target/release/customs"),
+                customs_bin(),
                 "serve",
                 "--bind",
                 f"127.0.0.1:{args.port}",
@@ -207,12 +250,7 @@ def main() -> None:
             stderr=log,
         )
         try:
-            for _ in range(100):
-                try:
-                    urllib.request.urlopen(f"{proxy}/healthz", timeout=1)
-                    break
-                except OSError:
-                    time.sleep(0.1)
+            wait_healthy(proxy, server, work / "server.log")
             out = []
             t0 = time.time()
             for r in rows.itertuples():
@@ -245,7 +283,9 @@ def main() -> None:
                 )
             elapsed = time.time() - t0
             res = pd.DataFrame(out)
-            ens = json.loads((ROOT / "models/ensemble.json").read_text())["thresholds"]
+            ens = json.loads((ROOT / "models/ensemble.json").read_text(encoding="utf-8"))[
+                "thresholds"
+            ]
             res["py_decision"] = np.select(
                 [res.py_risk >= ens["block"], res.py_risk >= ens["warn"]],
                 ["block", "warn"],
@@ -255,16 +295,16 @@ def main() -> None:
             summary = {
                 "requests": len(res),
                 "seconds_per_request": round(elapsed / max(len(res), 1), 3),
-                "malicious_blocked": float((res[res.label == 1].status == 403).mean()),
-                "malicious_block_or_warn": float(
+                "malicious_blocked": finite((res[res.label == 1].status == 403).mean()),
+                "malicious_block_or_warn": finite(
                     res[res.label == 1].decision.isin(["block", "warn"]).mean()
                 ),
-                "benign_blocked": float((res[res.label == 0].status == 403).mean()),
-                "benign_warned": float((res[res.label == 0].decision == "warn").mean()),
-                "decision_agreement_with_python": float(
+                "benign_blocked": finite((res[res.label == 0].status == 403).mean()),
+                "benign_warned": finite((res[res.label == 0].decision == "warn").mean()),
+                "decision_agreement_with_python": finite(
                     (res.decision == res.py_decision)[ok].mean()
                 ),
-                "max_abs_risk_diff": float((res.risk - res.py_risk).abs()[ok].max()),
+                "max_abs_risk_diff": finite((res.risk - res.py_risk).abs()[ok].max()),
             }
             summary["status_counts"] = {
                 str(k): int(v) for k, v in res.status.value_counts().items()
@@ -274,11 +314,15 @@ def main() -> None:
             if len(bad):
                 print(bad.head(10).to_string())
             print(json.dumps(summary, indent=1))
-            (data / "work" / "replay.json").write_text(json.dumps(summary, indent=1))
+            (data / "work" / "replay.json").write_text(
+                json.dumps(summary, indent=1, allow_nan=False), encoding="utf-8"
+            )
             res.to_json(data / "work" / "replay_rows.jsonl", orient="records", lines=True)
             if args.keep:
                 print(f"firewall running at {proxy} (pid {server.pid}); Ctrl-C to stop")
-                signal.pause()
+                # Not signal.pause(): Windows has none. Returns if the server exits.
+                while server.poll() is None:
+                    time.sleep(1)
         finally:
             if not args.keep:
                 server.terminate()

@@ -303,20 +303,16 @@ class Scorer:
     """Scores scanner reports with the exported artifacts (reference implementation)."""
 
     def __init__(self, scheme: str = SCHEME):
-        self.gbdt = json.loads((work() / f"code_gbdt_{scheme}.json").read_text())
-        self.nn = json.loads((work() / f"code_nn_{scheme}.json").read_text())
-        self.ens = json.loads((work() / f"ensemble_{scheme}.json").read_text())
+        self.gbdt = json.loads((work() / f"code_gbdt_{scheme}.json").read_text(encoding="utf-8"))
+        self.nn = json.loads((work() / f"code_nn_{scheme}.json").read_text(encoding="utf-8"))
+        self.ens = json.loads((work() / f"ensemble_{scheme}.json").read_text(encoding="utf-8"))
 
     def score(self, reports: list[dict], name_logits: np.ndarray) -> np.ndarray:
         names_ = self.gbdt["feature_names"]
         X = np.array([[r["features"].get(n, np.nan) for n in names_] for r in reports])
         g = gbdt.predict_raw_exported(self.gbdt, X)
         c = np.array([cnn.numpy_forward(self.nn, r.get("tokens") or []) for r in reports])
-        w = self.ens["weights"]
-        b = self.ens.get("clip") or np.inf
-        g, c, n = (np.clip(x, -b, b) for x in (g, c, name_logits))
-        z = self.ens["bias"] + w["code_gbdt"] * g + w["code_nn"] * c + w["name"] * n
-        return gbdt.apply_calibration(self.ens["calibration"], 1 / (1 + np.exp(-z)))
+        return gbdt.stacked_risk(self.ens, {"code_gbdt": g, "code_nn": c, "name": name_logits})
 
 
 def _starjack(files: Files, eco: str, donors: dict[str, Files]) -> Files:
@@ -335,7 +331,7 @@ def run(n: int = 600, scheme: str = SCHEME, seed: int = 0, only: list[str] | Non
     saved report alone."""
     df = load_table()
     split = df[f"split_{scheme}"]
-    ens = json.loads((work() / f"ensemble_{scheme}.json").read_text())
+    ens = json.loads((work() / f"ensemble_{scheme}.json").read_text(encoding="utf-8"))
     t_block, t_warn = ens["thresholds"]["block"], ens["thresholds"]["warn"]
     mal = df[(split == "test") & (df.label == 1)]
     mal = mal.sample(min(n, len(mal)), random_state=seed)
@@ -402,5 +398,7 @@ def run(n: int = 600, scheme: str = SCHEME, seed: int = 0, only: list[str] | Non
         return results
     results["donor"] = {"name": donor_row["name"], "ecosystem": donor_row.ecosystem}
     results["seen_in_training"] = sorted(SEEN_IN_TRAINING)
-    (work() / f"robustness_{scheme}.json").write_text(json.dumps(results, indent=1))
+    (work() / f"robustness_{scheme}.json").write_text(
+        json.dumps(results, indent=1), encoding="utf-8"
+    )
     return results

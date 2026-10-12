@@ -15,11 +15,37 @@ MODELS_DIR = REPO_ROOT / "models"
 DOCS_DIR = REPO_ROOT / "docs"
 
 
+def repo_binary(name: str) -> Path:
+    """``target/release/<name>`` of this checkout (``.exe`` on Windows), under
+    ``$CARGO_TARGET_DIR`` instead of ``target`` when that is set, as cargo builds it."""
+    target = os.environ.get("CARGO_TARGET_DIR")
+    base = Path(target) if target else REPO_ROOT / "target"
+    return base / "release" / (name + (".exe" if os.name == "nt" else ""))
+
+
+def customs_bin() -> str:
+    """The ``customs`` binary: ``$CUSTOMS_BIN``, else ``repo_binary("customs")``."""
+    return os.environ.get("CUSTOMS_BIN") or str(repo_binary("customs"))
+
+
 def data_dir() -> Path:
     """``$CUSTOMS_DATA``, else ``customs-data`` in the system temp directory."""
     root = Path(os.environ.get("CUSTOMS_DATA") or Path(tempfile.gettempdir()) / "customs-data")
     root.mkdir(parents=True, exist_ok=True)
     return root
+
+
+def write_atomic(dest: Path, data: bytes) -> None:
+    """Write ``dest`` through a ``.part`` file, so an interrupted write never leaves a
+    truncated file that a later run would take for a finished one."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    part = dest.with_name(dest.name + ".part")
+    try:
+        part.write_bytes(data)
+        part.replace(dest)
+    except BaseException:
+        part.unlink(missing_ok=True)
+        raise
 
 
 def sub(*parts: str) -> Path:

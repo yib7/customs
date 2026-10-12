@@ -46,3 +46,22 @@ def test_export_score_matches_sklearn():
     ref = clf.decision_function(X)
     got = [nm.score_exported(model, "npm", n, pop) for n in names[:20]]
     np.testing.assert_allclose(got, ref, atol=1e-4)
+
+
+def test_normalize_matches_rust():
+    # Expected strings come from crates/customs-model/src/name.rs::normalize: str::trim
+    # (Unicode White_Space only), PyPI lowercases per character (no final-sigma rule),
+    # npm uses str::to_lowercase (with the final-sigma rule).
+    cases = [
+        ("pypi", "  ΟΔΟΣ  ", "οδοσ"),
+        ("pypi", "ΟΔΟΣ-ΟΔΟΣ", "οδοσ-οδοσ"),
+        ("pypi", "\u00a0Foo__Bar..baz\u3000", "foo-bar-baz"),
+        ("pypi", "\x1cAbc\x1f", "\x1cabc\x1f"),
+        ("pypi", "İx", "i\u0307x"),
+        ("npm", "  ΟΔΟΣ  ", "οδος"),
+        ("npm", "ΟΔΟΣ-ΟΔΟΣ", "οδος-οδος"),
+        ("npm", "\t@Scope/Foo_Bar\n", "@scope/foo_bar"),
+        ("npm", "\x1cAbc\x1f", "\x1cabc\x1f"),
+    ]
+    for eco, raw, want in cases:
+        assert nm.normalize(eco, raw) == want, (eco, raw)

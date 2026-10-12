@@ -17,6 +17,7 @@ Names come from ``models/popular_{pypi,npm}.txt`` (the name model's popularity l
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import urllib.error
 import urllib.request
@@ -24,8 +25,9 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from . import config
+
 DECISIONS = ("allow", "warn", "block")
-REPO = Path(__file__).resolve().parents[2]
 
 
 def record(eco: str, name: str, verdict: dict) -> dict:
@@ -59,8 +61,9 @@ def check(server: str, eco: str, name: str) -> dict:
         except ValueError:
             error = str(e.code)
         return {"eco": eco, "name": name, "error": error}
-    except (urllib.error.URLError, TimeoutError) as e:
-        return {"eco": eco, "name": name, "error": str(e)}
+    except (OSError, http.client.HTTPException, ValueError) as e:
+        # URLError, timeouts, resets, a dropped or garbled response: recorded per package.
+        return {"eco": eco, "name": name, "error": f"{type(e).__name__}: {e}"}
 
 
 def summarize(rows: list[dict]) -> dict:
@@ -85,8 +88,13 @@ def summarize(rows: list[dict]) -> dict:
 
 
 def names(eco: str, n: int) -> list[str]:
-    path = REPO / "models" / f"popular_{eco}.txt"
-    return [x.strip() for x in path.read_text().splitlines() if x.strip()][:n]
+    path = config.MODELS_DIR / f"popular_{eco}.txt"
+    return [x.strip() for x in path.read_text(encoding="utf-8").splitlines() if x.strip()][:n]
+
+
+def flagged_line(r: dict) -> str:
+    risk = "n/a" if r["risk"] is None else f"{r['risk']:.3f}"
+    return f"  model {r['model_decision']}: {r['name']} {r['version']} {risk} {r['top']}"
 
 
 def main() -> None:
@@ -101,15 +109,16 @@ def main() -> None:
         rows = list(ex.map(lambda j: check(args.server, *j), jobs))
     summary = summarize(rows)
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(json.dumps({"rows": rows, "summary": summary}, indent=1) + "\n")
+    args.out.write_text(
+        json.dumps({"rows": rows, "summary": summary}, indent=1) + "\n", encoding="utf-8"
+    )
     for eco, s in summary.items():
         print(
             f"{eco}: {s['checked']} checked, {s['errors']} errors; model {s['model']}; "
             f"with rules {s['final']}; rules {s['rules']}"
         )
         for r in s["model_flagged"]:
-            flag, risk = r["model_decision"], r["risk"]
-            print(f"  model {flag}: {r['name']} {r['version']} {risk:.3f} {r['top']}")
+            print(flagged_line(r))
 
 
 if __name__ == "__main__":

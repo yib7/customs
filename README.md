@@ -158,7 +158,9 @@ Code's settings, pointing pip or npm back at the public registry) come back to y
 confirmation. A server set up for a team takes policy changes only with its admin token
 (`CUSTOMS_ADMIN_TOKEN`). See [`deploy/hooks/README.md`](deploy/hooks/README.md).
 
-`scripts/demo.sh` runs the whole tour against the live registries.
+`scripts/demo.sh` runs the whole tour against the live registries. It and the
+`scripts/replay.py` and `scripts/loadtest.py` harnesses run `$CUSTOMS_BIN` when it is set,
+else `target/release/customs` (under `$CARGO_TARGET_DIR` when that is set).
 
 ### Beyond the proxy
 
@@ -238,6 +240,12 @@ sent held-out test packages through the proxy. `web/scripts/demo-gif.mjs` record
 | Never-seen campaigns (no near-duplicate in training), ROC AUC | 0.974 |
 | Benign false positives at block, popular packages | 0 of 2,064 (top and mid tiers) |
 | Registry-confirmed malware (the registry removed the version), blocked | 71.8% of 3,396, ROC AUC 0.979 |
+
+*Caveat:* the shipped models also trained on the MalRegistry dev half, which was
+de-duplicated against training malware but not against validation or test malware, so the
+in-domain test numbers here and in the table at the top may be inflated by an amount not
+yet measured (re-measuring needs the dataset and a retrain; see
+[`docs/EVALUATION.md`](docs/EVALUATION.md)).
 
 **Label check.** The malware labels come from a collector's analysis. npm and PyPI remove
 confirmed malware within days, and 704 of the 4,100 flagged test versions were still
@@ -397,7 +405,8 @@ cd python && uv sync --extra nn && source .venv/bin/activate
 git clone --depth 1 https://github.com/ossf/malicious-packages /tmp/ossf
 customs-ml ossf --repo /tmp/ossf
 customs-ml malicious && customs-ml benign && customs-ml names
-cargo build --release -p customs-scan       # the scanner the pipeline calls
+cargo build --release -p customs-scan -p customs   # the scanner, and the binary that scores MalRegistry
+python -m customs_ml.external fetch paths.txt     # optional: MalRegistry archive paths, one per line
 customs-ml train && customs-ml report       # trains, evaluates, red-teams, exports to models/
 ```
 

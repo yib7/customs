@@ -137,7 +137,7 @@ def run(projects: int = 5000, days: int = 365) -> dict:
         "projects_fired": len(hit_projects),
         "examples": hit_projects[:50],
     }
-    (work() / "pypi_provenance.json").write_text(json.dumps(res, indent=1))
+    (work() / "pypi_provenance.json").write_text(json.dumps(res, indent=1), encoding="utf-8")
     log(
         f"provenance_dropped on PyPI: {n_hit} of {n_rel} releases"
         f" ({res['fire_rate']:.2%}), {len(hit_projects)} of {fetched} projects"

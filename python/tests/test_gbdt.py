@@ -45,3 +45,28 @@ def test_isotonic_calibration_is_monotone():
     cal = gbdt.fit_isotonic(raw, y)
     p = gbdt.apply_calibration(cal, np.linspace(0, 1, 101))
     assert np.all(np.diff(p) >= 0)
+
+
+def test_stacked_risk_matches_the_inline_formulas():
+    rng = np.random.default_rng(3)
+    g, c, n = (rng.normal(0, 4, 500) for _ in range(3))
+    ens = {
+        "weights": {"code_gbdt": 0.7, "code_nn": 0.4, "name": 0.1},
+        "bias": -1.2,
+        "clip": 6.0,
+        "calibration": {"x": [0.0, 0.5, 1.0], "y": [0.0, 0.3, 1.0]},
+        "fallbacks": [
+            {"missing": ["name"], "weights": {"code_gbdt": 0.9, "code_nn": 0.5}, "bias": -1.0}
+        ],
+    }
+    w, b = ens["weights"], ens["clip"]
+    gc, cc, nc = (np.clip(x, -b, b) for x in (g, c, n))
+    z = ens["bias"] + w["code_gbdt"] * gc + w["code_nn"] * cc + w["name"] * nc
+    full = gbdt.apply_calibration(ens["calibration"], 1 / (1 + np.exp(-z)))
+    got = gbdt.stacked_risk(ens, {"code_gbdt": g, "code_nn": c, "name": n})
+    assert np.array_equal(got, full)
+    fb = ens["fallbacks"][0]
+    z = fb["bias"] + fb["weights"]["code_gbdt"] * gc + fb["weights"]["code_nn"] * cc
+    code_only = gbdt.apply_calibration(ens["calibration"], 1 / (1 + np.exp(-z)))
+    got = gbdt.stacked_risk(ens, {"code_gbdt": g, "code_nn": c}, fb["weights"], fb["bias"])
+    assert np.array_equal(got, code_only)

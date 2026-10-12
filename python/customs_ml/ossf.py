@@ -41,7 +41,26 @@ def parse_report(path: Path) -> list[dict]:
     return rows
 
 
+COLUMNS = [
+    "id",
+    "ecosystem",
+    "name",
+    "versions",
+    "all_versions",
+    "published",
+    "withdrawn",
+    "sources",
+    "summary",
+]
+
+
 def build_table(repo: Path) -> pd.DataFrame:
+    """Every npm and PyPI report under ``repo/osv/{malicious,withdrawn}/{npm,pypi}``."""
+    if not (repo / "osv" / "malicious").is_dir():
+        raise ValueError(
+            f"{repo} is not a clone of ossf/malicious-packages: expected "
+            f"{repo / 'osv' / 'malicious'} (with npm/ and pypi/ under it)"
+        )
     rows: list[dict] = []
     for sub in ("malicious", "withdrawn"):
         for eco_dir in ("npm", "pypi"):
@@ -54,6 +73,6 @@ def build_table(repo: Path) -> pd.DataFrame:
                 for r in parse_report(p):
                     r["withdrawn"] = r["withdrawn"] or sub == "withdrawn"
                     rows.append(r)
-    df = pd.DataFrame(rows)
+    df = pd.DataFrame(rows, columns=COLUMNS)
     df["published"] = pd.to_datetime(df["published"], utc=True, errors="coerce")
     return df

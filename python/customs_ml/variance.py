@@ -10,7 +10,10 @@ Nothing here writes models or touches ``dataset.parquet``: results go to
 models keep the pipeline's fixed seed.
 
     python -m customs_ml.variance 7 11 23 42 101
+    python -m customs_ml.variance bag 7 11 23 42 101
     python -m customs_ml.variance compare old=path/to/models new=path/to/models
+
+``bag`` averages the saved logits of every subset of those seeds (run the seeds first).
 
 ``compare`` scores exported model directories on the current features, which separates
 what a scanner change did to the test data from what retraining did to the model.
@@ -18,6 +21,8 @@ what a scanner change did to the test data from what retraining did to the model
 
 from __future__ import annotations
 
+import dataclasses
+import itertools
 import json
 import sys
 from pathlib import Path
@@ -28,6 +33,7 @@ import pandas as pd
 from . import gbdt, metrics, splits
 from . import nn as cnn
 from .pipeline import (
+    CNN_CONFIG,
     FPR_BLOCK,
     FPR_WARN,
     SCHEME,
@@ -43,13 +49,6 @@ from .pipeline import (
 DEFAULT_SEEDS = (7, 11, 23, 42, 101)
 
 
-def _roc_recall(y: np.ndarray, s: np.ndarray, fpr: float) -> float:
-    neg = np.sort(s[y == 0])[::-1]
-    k = int(np.floor(fpr * len(neg)))
-    t = neg[k] if k < len(neg) else -np.inf
-    return float(np.mean(s[y == 1] > t))
-
-
 def test_metrics(df: pd.DataFrame, risk: np.ndarray, thr: dict, scheme: str = SCHEME) -> dict:
     """Headline and slice numbers for one stacked score, at the validation thresholds."""
     split = df[f"split_{scheme}"]
@@ -61,8 +60,8 @@ def test_metrics(df: pd.DataFrame, risk: np.ndarray, thr: dict, scheme: str = SC
         "recall_warn": float(np.mean(s[y == 1] >= thr["warn"])),
         "fpr_block": float(np.mean(s[y == 0] >= thr["block"])),
         "fpr_warn": float(np.mean(s[y == 0] >= thr["warn"])),
-        "roc_recall_0_001": _roc_recall(y, s, FPR_BLOCK),
-        "roc_recall_0_01": _roc_recall(y, s, FPR_WARN),
+        "roc_recall_0_001": metrics.roc_recall_at_fpr(y, s, FPR_BLOCK),
+        "roc_recall_0_01": metrics.roc_recall_at_fpr(y, s, FPR_WARN),
     }
     T = df[te]
     slices = {
@@ -83,7 +82,7 @@ def run_seed(df: pd.DataFrame, seed: int, scheme: str = SCHEME) -> dict:
     cols = feature_cols(df)
     best, *_ = _fit_gbdt(df, split, cols, seed=seed)
     g = gbdt.predict_raw(best, df[cols].to_numpy(dtype=float))
-    cfg = cnn.Config(seed=seed, max_len=768, epochs=10, patience=3)
+    cfg = dataclasses.replace(CNN_CONFIG, seed=seed)
     _, _, c, _, _ = _fit_cnn(df, split, cfg)
     np.savez_compressed(work() / f"seed_logits_{seed}.npz", gbdt=g, cnn=c)
     d = df.copy(deep=False)
@@ -111,6 +110,19 @@ def bagged(df: pd.DataFrame, seeds: list[int], scheme: str = SCHEME) -> dict:
     return {"seeds": seeds, "test": test_metrics(d, risk, thr, scheme)}
 
 
+def bag(seeds: tuple[int, ...] = DEFAULT_SEEDS, scheme: str = SCHEME) -> dict:
+    """Seed bagging over every subset of ``seeds`` of each size, from the logits ``run``
+    saved; writes ``work/seed_bagging.json`` (the report's bagging table)."""
+    df = load_table()
+    out = {}
+    for k in range(1, len(seeds) + 1):
+        runs = [bagged(df, list(c), scheme) for c in itertools.combinations(seeds, k)]
+        out[str(k)] = {"n": len(runs), "spread": summarize_runs(runs)}
+        log(f"bagging {k} seeds: {len(runs)} subsets")
+    (work() / "seed_bagging.json").write_text(json.dumps(out, indent=1), encoding="utf-8")
+    return out
+
+
 def summarize_runs(runs: list[dict]) -> dict:
     keys = runs[0]["test"].keys()
     out = {}
@@ -136,23 +148,21 @@ def run(seeds: tuple[int, ...] = DEFAULT_SEEDS, scheme: str = SCHEME) -> dict:
         runs.append(r)
         res = {"scheme": scheme, "seeds": list(seeds), "runs": runs}
         res["spread"] = summarize_runs(runs)
-        path.write_text(json.dumps(res, indent=1))
+        path.write_text(json.dumps(res, indent=1), encoding="utf-8")
     return res
 
 
 def score_exported(df: pd.DataFrame, models: Path) -> tuple[np.ndarray, dict]:
     """Risk for every row from an exported model directory (gbdt, cnn, ensemble JSON)."""
-    g_m = json.loads((models / "code_gbdt.json").read_text())
-    n_m = json.loads((models / "code_nn.json").read_text())
-    ens = json.loads((models / "ensemble.json").read_text())
+    g_m = json.loads((models / "code_gbdt.json").read_text(encoding="utf-8"))
+    n_m = json.loads((models / "code_nn.json").read_text(encoding="utf-8"))
+    ens = json.loads((models / "ensemble.json").read_text(encoding="utf-8"))
     X = df[["f_" + n for n in g_m["feature_names"]]].to_numpy(dtype=float)
     g = gbdt.predict_raw_exported(g_m, X)
     c = np.array([cnn.numpy_forward(n_m, list(t)) for t in df.tokens])
-    w, b = ens["weights"], ens.get("clip") or np.inf
-    g, c, n = (np.clip(x, -b, b) for x in (g, c, df.name_logit.to_numpy()))
-    z = ens["bias"] + w["code_gbdt"] * g + w["code_nn"] * c + w["name"] * n
+    n = df.name_logit.to_numpy()
     thr = {"warn": ens["thresholds"]["warn"], "block": ens["thresholds"]["block"]}
-    return gbdt.apply_calibration(ens["calibration"], 1 / (1 + np.exp(-z))), thr
+    return gbdt.stacked_risk(ens, {"code_gbdt": g, "code_nn": c, "name": n}), thr
 
 
 def compare(models: dict[str, Path], scheme: str = SCHEME) -> dict:
@@ -165,13 +175,16 @@ def compare(models: dict[str, Path], scheme: str = SCHEME) -> dict:
         risk, thr = score_exported(df, path)
         out[label] = test_metrics(df, risk, thr, scheme)
         log("compare", label, {k: round(v, 4) for k, v in out[label].items()})
-    (work() / "model_compare.json").write_text(json.dumps(out, indent=1))
+    (work() / "model_compare.json").write_text(json.dumps(out, indent=1), encoding="utf-8")
     return out
 
 
 def main(argv: list[str]) -> None:
     if argv[:1] == ["compare"]:
         compare({a.split("=", 1)[0]: Path(a.split("=", 1)[1]) for a in argv[1:]})
+        return
+    if argv[:1] == ["bag"]:
+        bag(tuple(int(a) for a in argv[1:]) or DEFAULT_SEEDS)
         return
     seeds = tuple(int(a) for a in argv) or DEFAULT_SEEDS
     res = run(seeds)

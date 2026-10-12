@@ -38,6 +38,12 @@ def recall_at_threshold(y: np.ndarray, score: np.ndarray, t: float) -> float:
     return float(np.mean(pos >= t)) if len(pos) else float("nan")
 
 
+def roc_recall_at_fpr(y: np.ndarray, score: np.ndarray, fpr: float) -> float:
+    """Recall at the threshold-free operating point: the threshold this split's own
+    negatives give at ``fpr`` (no validation step)."""
+    return recall_at_threshold(y, score, threshold_at_fpr(y, score, fpr))
+
+
 def fpr_at_threshold(y: np.ndarray, score: np.ndarray, t: float) -> float:
     neg = score[y == 0]
     return float(np.mean(neg >= t)) if len(neg) else float("nan")
@@ -135,32 +141,10 @@ def cluster_bootstrap(
         if len(np.unique(yy)) < 2:
             continue
         vals.append(stat(yy, ss))
-    lo, hi = np.nanpercentile(vals, [100 * alpha / 2, 100 * (1 - alpha / 2)])
+    vals = np.asarray(vals, dtype=float)
+    vals = vals[~np.isnan(vals)]
+    if not len(vals):
+        # No resample had both classes (or the statistic was never defined): no interval.
+        return float(point), float("nan"), float("nan")
+    lo, hi = np.percentile(vals, [100 * alpha / 2, 100 * (1 - alpha / 2)])
     return float(point), float(lo), float(hi)
-
-
-def paired_bootstrap_diff(
-    y: np.ndarray,
-    score_a: np.ndarray,
-    score_b: np.ndarray,
-    clusters: np.ndarray,
-    stat,
-    n_boot: int = 1000,
-    seed: int = 0,
-) -> tuple[float, float, float, float]:
-    """Difference stat(a) - stat(b) with a cluster-bootstrap CI and a two-sided p-value."""
-    rng = np.random.default_rng(seed)
-    uniq, inv = np.unique(clusters, return_inverse=True)
-    members = [np.flatnonzero(inv == i) for i in range(len(uniq))]
-    point = stat(y, score_a) - stat(y, score_b)
-    diffs = []
-    for _ in range(n_boot):
-        pick = rng.integers(0, len(uniq), len(uniq))
-        idx = np.concatenate([members[i] for i in pick])
-        if len(np.unique(y[idx])) < 2:
-            continue
-        diffs.append(stat(y[idx], score_a[idx]) - stat(y[idx], score_b[idx]))
-    diffs = np.asarray(diffs)
-    lo, hi = np.percentile(diffs, [2.5, 97.5])
-    p = 2 * min(np.mean(diffs <= 0), np.mean(diffs >= 0))
-    return float(point), float(lo), float(hi), float(min(p, 1.0))

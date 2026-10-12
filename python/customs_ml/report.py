@@ -6,14 +6,15 @@ Run after `evaluate` and `robustness`:  python -m customs_ml.report
 from __future__ import annotations
 
 import json
+import math
 
-from . import config
+from . import config, splits
 from .pipeline import SCHEME, work
 
 
 def _load(name: str) -> dict | None:
     p = work() / name
-    return json.loads(p.read_text()) if p.exists() else None
+    return json.loads(p.read_text(encoding="utf-8")) if p.exists() else None
 
 
 def pct(x, digits: int = 1) -> str:
@@ -37,8 +38,38 @@ def num(x, digits: int = 3) -> str:
     return "n/a" if v is None else f"{v:.{digits}f}"
 
 
+def second_source_note(stage: dict | None) -> str:
+    """The Data bullet on MalRegistry training rows. ``stage`` is ``malregistry_stage.json``,
+    written by the ``malregistry`` stage once it checked the dev half against held-out
+    malware; without it the models were trained on an unchecked dev half."""
+    note = (
+        "* **Second source.** Training malware also includes the dev half of MalRegistry "
+        "(collected in 2022 and 2023, before the test period); its held-out half is a "
+        "separate test, below. The training counts include augmented copies."
+    )
+    if stage is None:
+        return note + (
+            " **Caveat:** the dev half was de-duplicated against training malware only, not "
+            "against validation or test malware, so any dev-half archive that near-duplicates "
+            "test malware was trained on. Every in-domain test number from models trained "
+            "with the dev half (the shipped models: headline, components, GuardDog, slices "
+            "including `novel_campaigns`, misses, the *after* columns, end to end, retrain "
+            "variance, calibration; and the *Plus MalRegistry dev half* in-domain columns) may "
+            "be inflated by an amount not yet measured; measuring it needs the dataset and a "
+            "retrain. The MalRegistry held-out numbers are not affected."
+        )
+    return note + (
+        f" Dev-half archives that near-duplicate validation or test malware are left out "
+        f"({stage['dropped_near_heldout']:,} of them)."
+    )
+
+
 def render(scheme: str = SCHEME) -> str:
     ev = _load(f"eval_{scheme}.json")
+    if ev is None:
+        raise FileNotFoundError(
+            f"{work() / f'eval_{scheme}.json'} not found: run the pipeline's evaluate stage first"
+        )
     base = _load(f"baseline_eval_{scheme}.json")
     rob = _load(f"robustness_{scheme}.json")
     base_rob = _load(f"baseline_robustness_{scheme}.json")
@@ -46,6 +77,10 @@ def render(scheme: str = SCHEME) -> str:
     base_abl = _load(f"baseline_ablation_{scheme}.json")
     names_rep = _load("name_report.json")
     ens = _load(f"ensemble_{scheme}.json")
+    ext = _load("external_malregistry.json")
+    ext_before = _load("external_malregistry_before_training.json")
+    # Older runs did not record it; then a before-training snapshot means it was trained on.
+    dev_in_training = bool(ext) and ext.get("dev_half_in_training", ext_before is not None)
     h = ev["headline"]
     c = ev["counts"]
     sm = ev["split_meta"]
@@ -55,7 +90,8 @@ def render(scheme: str = SCHEME) -> str:
     add("# Customs: evaluation report\n")
     add(
         f"Generated {ev['generated']} by `python -m customs_ml.report` from the artifacts of "
-        "`python -m customs_ml.pipeline`. Every number below is on held-out test data with "
+        "`python -m customs_ml.pipeline all` and the tools each section names. Every number "
+        "below is on held-out test data with "
         "thresholds frozen on the validation split, unless a row says otherwise.\n"
     )
 
@@ -69,12 +105,8 @@ def render(scheme: str = SCHEME) -> str:
         f"validation malware between {sm['val_cutoff']} and that date; training malware "
         "before. The model never saw a sample from the test period."
     )
-    if _load("external_malregistry_before_training.json"):
-        add(
-            "* **Second source.** Training malware also includes the dev half of MalRegistry "
-            "(collected in 2022 and 2023, before the test period); its held-out half is a "
-            "separate test, below. The training counts include augmented copies."
-        )
+    if dev_in_training:
+        add(second_source_note(_load("malregistry_stage.json")))
     add(
         "* **Benign packages** are split at random by near-duplicate cluster in the same "
         "proportions, sampled across three popularity tiers (top, mid, long tail) of PyPI "
@@ -380,10 +412,9 @@ def render(scheme: str = SCHEME) -> str:
         add(
             "The name model's job is the pre-download check (typosquats and names an agent "
             "hallucinated), before any archive exists to scan. Once the archive is scanned "
-            "it adds nothing: its stacking weight is near zero. An earlier run gave it a "
-            "clearly positive weight; that turned out to be a leak (the source dataset "
-            "spells scoped npm names `@scope@name`, a form no benign name has), found by "
-            "the end-to-end replay and fixed.\n"
+            "it adds nothing: its stacking weight is near zero. Scoped npm names are decoded "
+            "before training: the source dataset spells them `@scope@name`, a form no benign "
+            "name has, which would otherwise give the name model the label.\n"
         )
 
     rep = _load("replay.json")
@@ -451,11 +482,10 @@ def render(scheme: str = SCHEME) -> str:
             "in flight and the rest arrived after it finished and hit the cache.\n"
         )
 
-    ext = _load("external_malregistry.json")
     ext_base = _load("external_malregistry_baseline.json")
     adapt = _load("external_adapt_100.json")
     # Scanner-change comparison: the run before the dev half became training data.
-    ext_scan = _load("external_malregistry_before_training.json") or ext
+    ext_scan = (ext_before if dev_in_training else None) or ext
     if ext:
         add("## Independent dataset: MalRegistry\n")
         add(
@@ -475,7 +505,7 @@ def render(scheme: str = SCHEME) -> str:
         for label, k in (
             ("All archives", "all"),
             (
-                "Novel, dev half (in training)" if ext_scan is not ext else "Novel, dev half",
+                "Novel, dev half (in training)" if dev_in_training else "Novel, dev half",
                 "novel_dev",
             ),
             ("Novel, held-out half", "novel_heldout"),
@@ -495,10 +525,12 @@ def render(scheme: str = SCHEME) -> str:
                 "**Dev-half error analysis.** Most dev misses carried clear behavior "
                 "indicators, but none on the install surface: the payload sat in a module "
                 "that `setup.py` imports, or after a long run of blanks on one line, or in "
-                "decoded data executed on the line that decodes it. The scanner now follows "
+                "decoded data executed on the line that decodes it. The scanner follows "
                 "the package's own imports from setup-time files and has features for the "
-                "other two. (Following imports from `__init__.py` as well was tried and "
-                "made things worse: it pulls each benign library onto the install surface.)\n"
+                "other two. (Following imports from `__init__.py` as well lowers detection: "
+                "it pulls each benign library onto the install surface.) The *before* columns "
+                "are the same evaluation with the scanner as it was before these changes, kept "
+                "with `python -m customs_ml.external evaluate --save-as baseline`.\n"
             )
             add(
                 "| FPR | Dev, before | Dev, after | Held-out, before | Held-out, after |\n"
@@ -569,7 +601,7 @@ def render(scheme: str = SCHEME) -> str:
                     )
                     + "."
                 )
-            if ext_scan is not ext:
+            if dev_in_training:
                 add(
                     "\nThe shipped models include the dev half (pipeline stage `malregistry`). "
                     "Rerun through the binary, they score the held-out half at "
@@ -597,7 +629,7 @@ def render(scheme: str = SCHEME) -> str:
                             "jumps by that share whenever a retrain moves that score across a "
                             "threshold; per-archive numbers between runs are only comparable "
                             "when that campaign stays on the same side."
-                            if sizes
+                            if sizes.get("n")
                             else ""
                         )
                     )
@@ -629,11 +661,12 @@ def render(scheme: str = SCHEME) -> str:
         for f, r in rt["matched_fpr"].items():
             add(f"| {pct(float(f))} | {pct(r['base_recall'])} | {pct(r['combined_recall'])} |")
         ov = rt["overlap_at_fpr_0.005"]
+        lowest = ov.get("diff_only_releases") or []
+        examples = f" (lowest base score first: {', '.join(lowest[:3])})" if lowest else ""
         add(
             f"\nAt 0.5% FPR the two models disagree often: {ov['both']} releases are caught "
             f"by both, {ov['base_only']} only by the base model and {ov['diff_only']} only by "
-            "the diff model (among them litellm 1.82.7 and 1.82.8, which the base model "
-            "scores far below its warn threshold). The diff model misses releases whose "
+            f"the diff model{examples}. The diff model misses releases whose "
             "previous version was already compromised, since the payload is then not new.\n"
         )
         mf = rt["matched_fpr"]
@@ -887,23 +920,29 @@ def render(scheme: str = SCHEME) -> str:
                     f"| {label} | {v['mean']:.3f} | {v['std']:.3f} | {v['min']:.3f} | "
                     f"{v['max']:.3f} |"
                 )
+        counts = ev["counts"]
+        n_val, n_test = counts[splits.VAL]["benign"], counts[splits.TEST]["benign"]
+        lo, hi = math.floor(0.001 * n_val), math.ceil(0.001 * n_val)
+        top = str(lo) if lo == hi else f"{lo} or {hi}"
         add(
             "\nROC AUC and recall at warn barely move between seeds. Everything at 0.1% "
-            "FPR is a tail statistic: the block threshold rests on two or three of about "
-            "2,000 benign validation packages, and the threshold-free row on four of 4,217 "
-            "benign test packages, so both move several points between retrains: recall at "
+            f"FPR is a tail statistic: the block threshold rests on the top {top} of "
+            f"{n_val:,} benign validation packages, and the threshold-free row on about "
+            f"{round(0.001 * n_test)} of {n_test:,} benign test packages, so both move "
+            "several points between retrains: recall at "
             f"block spans {100 * (sp['recall_block']['max'] - sp['recall_block']['min']):.1f} "
             "points across these seeds, and a difference at the block rate between two runs "
             "needs to exceed that before it says anything about the model. Training is "
             "reproducible: the same seed in a fresh process (different string hash seed) "
-            "produces bit-identical tree and CNN outputs, after the CNN vocabulary stopped "
-            "breaking document-frequency ties by set order.\n"
+            "produces bit-identical tree and CNN outputs (the CNN vocabulary breaks "
+            "document-frequency ties by token, not by set order).\n"
         )
         bag = _load("seed_bagging.json")
         if bag:
             add(
                 "Averaging the tree and CNN logits of several seeds before stacking (seed "
-                "bagging), over every subset of the seeds of each size:\n"
+                "bagging, `python -m customs_ml.variance bag`), over every subset of the seeds "
+                "of each size:\n"
             )
             add(
                 "| Seeds averaged | Subsets | Recall at block (min to max) | FPR at block "
@@ -967,7 +1006,8 @@ def render(scheme: str = SCHEME) -> str:
     )
     add(
         "* **Benign label noise.** Long-tail benign packages could include undiscovered "
-        "malware. They were filtered against all 234K OSSF reports and required to be at "
+        "malware. They were filtered against every OSSF malicious-package report and "
+        "required to be at "
         "least 90 days old, which removes most of it but not all."
     )
     add(
@@ -987,7 +1027,7 @@ def render(scheme: str = SCHEME) -> str:
 
 def main() -> None:
     out = config.DOCS_DIR / "EVALUATION.md"
-    out.write_text(render())
+    out.write_text(render(), encoding="utf-8")
     print("wrote", out)
 
 

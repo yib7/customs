@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -28,9 +29,11 @@ def guarddog_bin() -> str:
 def scan_one(path: str, ecosystem: str, timeout: int = 180) -> dict:
     cmd = [guarddog_bin(), ecosystem, "scan", path, "--output-format", "json"]
     try:
-        out = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        out = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout, encoding="utf-8", errors="replace"
+        )
         d = json.loads(out.stdout)
-    except (subprocess.TimeoutExpired, json.JSONDecodeError) as e:
+    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError) as e:
         return {"path": path, "gd_error": type(e).__name__}
     rs = d.get("risk_score") or {}
     return {
@@ -48,7 +51,7 @@ def run(rows: pd.DataFrame, workers: int = 3) -> pd.DataFrame:
     cache = config.sub("work") / "guarddog.jsonl"
     done = {}
     if cache.exists():
-        for line in cache.read_text().splitlines():
+        for line in cache.read_text(encoding="utf-8").splitlines():
             r = json.loads(line)
             done[r["path"]] = r
     todo = [
@@ -56,7 +59,12 @@ def run(rows: pd.DataFrame, workers: int = 3) -> pd.DataFrame:
         for p, e in zip(rows.canonical_path, rows.ecosystem, strict=True)
         if p not in done and Path(p).exists()
     ]
-    with ThreadPoolExecutor(workers) as ex, cache.open("a") as fh:
+    if todo and shutil.which(guarddog_bin()) is None:
+        from .pipeline import log
+
+        log(f"GuardDog not found ({guarddog_bin()}; set GUARDDOG_BIN): comparison skipped")
+        return pd.DataFrame()
+    with ThreadPoolExecutor(workers) as ex, cache.open("a", encoding="utf-8") as fh:
         for r in ex.map(lambda pe: scan_one(*pe), todo):
             fh.write(json.dumps(r) + "\n")
             fh.flush()

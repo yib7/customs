@@ -52,7 +52,6 @@ INSPECTED = {
     "pyswyfter",
     "req-tools",
 }
-ROOT = Path(__file__).resolve().parents[2]
 
 
 def norm(name: str) -> str:
@@ -84,48 +83,67 @@ def _fetch_one(rel: str, out_dir: Path) -> dict:
     return {**row, "error": err}
 
 
+def manifest_path() -> Path:
+    return config.sub("external", "malregistry") / "manifest.jsonl"
+
+
+def fetched() -> bool:
+    """Whether ``fetch`` has written MalRegistry archives (``evaluate`` needs them)."""
+    return manifest_path().exists()
+
+
 def fetch(listing: Path, workers: int = 16) -> Path:
-    out_dir = config.sub("external") / "malregistry"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    manifest = out_dir / "manifest.jsonl"
+    """Download, canonicalize and record every archive in ``listing`` (one path of the
+    MalRegistry repository per line, ``<name>/<version>/<file>``); resumable."""
+    from .pipeline import log
+
+    manifest = manifest_path()
+    out_dir = manifest.parent
     done = set()
     if manifest.exists():
-        done = {json.loads(x)["source"] for x in manifest.read_text().splitlines()}
-    todo = [x for x in listing.read_text().splitlines() if x and x not in done]
-    with ThreadPoolExecutor(workers) as ex, manifest.open("a") as mf:
+        done = {json.loads(x)["source"] for x in manifest.read_text(encoding="utf-8").splitlines()}
+    todo = [x for x in listing.read_text(encoding="utf-8").splitlines() if x and x not in done]
+    with ThreadPoolExecutor(workers) as ex, manifest.open("a", encoding="utf-8") as mf:
         for n, row in enumerate(ex.map(lambda r: _fetch_one(r, out_dir), todo), 1):
             mf.write(json.dumps(row) + "\n")
             if n % 1000 == 0:
-                print(f"{n}/{len(todo)}", flush=True)
+                log(f"{n}/{len(todo)}")
     return manifest
 
 
 def score_with_binary(
     paths: list[str], names: list[str], jobs: int = 4, models: Path | None = None
 ) -> list[dict]:
-    """Verdicts from the shipped binary (`customs scan --json`), so this tests what ships."""
-    binary = str(ROOT / "target/release/customs")
-    models = models or ROOT / "models"
+    """Verdicts from the shipped binary (`customs scan --json`), so this tests what ships.
+
+    The binary is ``$CUSTOMS_BIN``, else this checkout's release build (``config.customs_bin``).
+    """
+    binary = config.customs_bin()
+    models = models or config.MODELS_DIR
 
     def one(args):
         path, name = args
-        p = subprocess.run(
-            [
-                binary,
-                "scan",
-                path,
-                "--ecosystem",
-                "pypi",
-                "--name",
-                name,
-                "--json",
-                "--models",
-                str(models),
-            ],
-            capture_output=True,
-            text=True,
-            timeout=300,
-        )
+        try:
+            p = subprocess.run(
+                [
+                    binary,
+                    "scan",
+                    path,
+                    "--ecosystem",
+                    "pypi",
+                    "--name",
+                    name,
+                    "--json",
+                    "--models",
+                    str(models),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=300,
+                encoding="utf-8",
+            )
+        except subprocess.TimeoutExpired:
+            return {"error": "timeout"}
         try:
             v = json.loads(p.stdout)
         except ValueError:
@@ -150,12 +168,12 @@ def code_only_models(out: Path) -> Path:
     name from scoring the sample is to leave the name model out.
     """
     out.mkdir(parents=True, exist_ok=True)
-    for f in (ROOT / "models").iterdir():
+    for f in config.MODELS_DIR.iterdir():
         if f.is_file():
             shutil.copy(f, out / f.name)
-    man = json.loads((out / "manifest.json").read_text())
+    man = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
     man["name_model"] = None
-    (out / "manifest.json").write_text(json.dumps(man, indent=1))
+    (out / "manifest.json").write_text(json.dumps(man, indent=1), encoding="utf-8")
     return out
 
 
@@ -164,13 +182,11 @@ def code_only_risk(df: pd.DataFrame, ens: dict, scheme: str = "temporal") -> np.
     from . import gbdt
 
     fb = next(f for f in ens["fallbacks"] if f["missing"] == ["name"])
-    b = ens.get("clip") or np.inf
-    z = (
-        fb["bias"]
-        + fb["weights"]["code_gbdt"] * np.clip(df[f"gbdt_logit_{scheme}"].to_numpy(), -b, b)
-        + fb["weights"]["code_nn"] * np.clip(df[f"cnn_logit_{scheme}"].to_numpy(), -b, b)
-    )
-    return gbdt.apply_calibration(ens["calibration"], 1 / (1 + np.exp(-z)))
+    logits = {
+        "code_gbdt": df[f"gbdt_logit_{scheme}"].to_numpy(),
+        "code_nn": df[f"cnn_logit_{scheme}"].to_numpy(),
+    }
+    return gbdt.stacked_risk(ens, logits, fb["weights"], fb["bias"])
 
 
 def _matched_fpr(df: pd.DataFrame, g: pd.DataFrame, col: str = "risk") -> dict:
@@ -194,6 +210,8 @@ def _matched_fpr(df: pd.DataFrame, g: pd.DataFrame, col: str = "risk") -> dict:
 
 
 def _largest_cluster(g: pd.DataFrame) -> dict:
+    if g.empty:
+        return {"n": 0, "share": None, "median_risk": None}
     sizes = g.cluster.value_counts()
     big = g[g.cluster == sizes.index[0]]
     return {
@@ -203,18 +221,36 @@ def _largest_cluster(g: pd.DataFrame) -> dict:
     }
 
 
-def evaluate() -> dict:
-    from .pipeline import load_table, work
+def _originals(t: pd.DataFrame) -> pd.DataFrame:
+    """Corpus rows that are not augmentation copies (tables built before augment have no
+    ``augmented`` column)."""
+    return t[t.augmented.isna()] if "augmented" in t else t
 
-    out_dir = config.sub("external") / "malregistry"
-    ext = pd.read_json(out_dir / "manifest.jsonl", lines=True)
-    ext = ext[ext.get("path").notna()].drop_duplicates("sha256").reset_index(drop=True)
+
+def evaluate(save_as: str | None = None) -> dict:
+    """Score MalRegistry with the exported models and write ``external_malregistry.json``.
+
+    While the training table holds no MalRegistry rows, the result is also kept as
+    ``external_malregistry_before_training.json`` (the report's comparison point for the
+    ``malregistry`` stage). ``save_as`` keeps another copy as
+    ``external_malregistry_<save_as>.json``: ``baseline`` is the report's run before the
+    dev-half scanner changes.
+    """
+    from .pipeline import load_table, log, work
+
+    ext = pd.read_json(manifest_path(), lines=True)
+    if "path" not in ext or ext.path.isna().all():
+        raise ValueError(f"no fetched archives in {manifest_path()}: run `fetch` first")
+    ext = ext[ext.path.notna()].drop_duplicates("sha256").reset_index(drop=True)
     df = load_table()
-    df = df[df.augmented.isna()] if "augmented" in df else df
+    dev_in_training = "source" in df and bool((df.source == "malregistry").any())
+    df = _originals(df)
     df = df[df.source.isna()] if "source" in df else df
     df = df.assign(
         ens_risk=df.ens_risk_temporal,
-        ens_risk_code=code_only_risk(df, json.loads((ROOT / "models/ensemble.json").read_text())),
+        ens_risk_code=code_only_risk(
+            df, json.loads((config.MODELS_DIR / "ensemble.json").read_text(encoding="utf-8"))
+        ),
     )
     train_mal = df[(df.label == 1) & (df.split_temporal == "train")]
     all_mal_names = set(df[df.label == 1].name.map(norm))
@@ -241,7 +277,9 @@ def evaluate() -> dict:
     ext["cnn"] = [(v.get("scores") or {}).get("code_nn") for v in verdicts]
     ext["name_score"] = [(v.get("scores") or {}).get("name") for v in verdicts]
 
-    ens = json.loads((ROOT / "models/ensemble.json").read_text())["thresholds"]
+    ens = json.loads((config.MODELS_DIR / "ensemble.json").read_text(encoding="utf-8"))[
+        "thresholds"
+    ]
 
     def rates(g: pd.DataFrame) -> dict:
         r = g.risk.dropna().to_numpy()
@@ -270,7 +308,7 @@ def evaluate() -> dict:
     # (after a scanner change or a retrain) is measured on exactly the same samples.
     frozen_path = work() / "external_malregistry_split.json"
     if frozen_path.exists():
-        frozen = json.loads(frozen_path.read_text())
+        frozen = json.loads(frozen_path.read_text(encoding="utf-8"))
         for col in ("half", "novel", "cluster"):
             ext[col] = [
                 frozen.get(h, {}).get(col, v) for h, v in zip(ext.sha256, ext[col], strict=True)
@@ -282,7 +320,8 @@ def evaluate() -> dict:
                     h: {"half": a, "novel": bool(n), "cluster": int(c)}
                     for h, a, n, c in zip(ext.sha256, ext.half, ext.novel, ext.cluster, strict=True)
                 }
-            )
+            ),
+            encoding="utf-8",
         )
     ext["novel"] = ext.novel.astype(bool)
     nv = ext[ext.novel]
@@ -301,12 +340,52 @@ def evaluate() -> dict:
         "heldout_largest_cluster": _largest_cluster(nv[nv.half == "heldout"]),
         "name_seen_in_training_data": int(ext.name_seen.sum()),
         "near_duplicate_of_training": int(ext.near_dup.sum()),
+        "dev_half_in_training": dev_in_training,
         "thresholds": ens,
     }
     ext.drop(columns=["tokens"]).to_parquet(work() / "external_malregistry.parquet")
-    (work() / "external_malregistry.json").write_text(json.dumps(summary, indent=1))
-    print(json.dumps(summary, indent=1))
+    text = json.dumps(summary, indent=1)
+    names = ["external_malregistry.json"]
+    if not dev_in_training:
+        names.append("external_malregistry_before_training.json")
+    if save_as:
+        names.append(f"external_malregistry_{save_as}.json")
+    for name in names:
+        (work() / name).write_text(text, encoding="utf-8")
+    log(f"malregistry: wrote {', '.join(names)}")
+    log(text)
     return summary
+
+
+def place_rows(corpus: pd.DataFrame, rows: pd.DataFrame) -> pd.DataFrame:
+    """Give MalRegistry rows corpus cluster ids, and drop training rows that would leak.
+
+    ``evaluate`` clusters MalRegistry archives against training malware only, and its
+    cluster ids are positions in that combined list, not corpus ids. Here the rows are
+    clustered against all corpus malware: a row that near-duplicates corpus malware takes
+    that sample's ``cluster`` (so ``novel_mask`` and the grouped split see one campaign),
+    other rows get fresh ids above every corpus id, and a row bound for training
+    (``split_temporal == "train"``) is dropped when its cluster holds corpus malware in
+    the validation or test split of either scheme, or a row that is not trained on.
+    """
+    mal = corpus[corpus.label == 1]
+    docs = list(mal.tokens) + list(rows.tokens)
+    labels = dedup.cluster(docs)
+    n = len(mal)
+    corpus_id: dict[int, int] = {}
+    protected: set[int] = set()
+    held_out = (mal.split_temporal != "train") | (mal.split_grouped != "train")
+    for lab, cid, h in zip(labels[:n], mal.cluster, held_out, strict=True):
+        corpus_id[lab] = min(corpus_id.get(lab, int(cid)), int(cid))
+        if h:
+            protected.add(lab)
+    ext_labels = labels[n:]
+    trains = (rows.split_temporal == "train").to_numpy()
+    protected |= {lab for lab, t in zip(ext_labels, trains, strict=True) if not t}
+    base = int(corpus.cluster.max()) + 1
+    out = rows.assign(cluster=[corpus_id.get(lab, base + int(lab)) for lab in ext_labels])
+    keep = [not (t and lab in protected) for lab, t in zip(ext_labels, trains, strict=True)]
+    return out[keep].reset_index(drop=True)
 
 
 def _corpus_rows(df: pd.DataFrame, sel: pd.DataFrame, work_dir: Path) -> pd.DataFrame:
@@ -315,8 +394,7 @@ def _corpus_rows(df: pd.DataFrame, sel: pd.DataFrame, work_dir: Path) -> pd.Data
 
     reports = features.scan_paths(list(sel.path), tokens=True)
     pop = name_model.Popular.from_list("pypi", names.popular("pypi"))
-    nm = json.loads((work_dir / "name_model.json").read_text())
-    base = int(df.cluster.max()) + 1
+    nm = json.loads((work_dir / "name_model.json").read_text(encoding="utf-8"))
     rows = []
     for r, rep in zip(sel.itertuples(), reports, strict=True):
         if "features" not in rep:
@@ -332,7 +410,7 @@ def _corpus_rows(df: pd.DataFrame, sel: pd.DataFrame, work_dir: Path) -> pd.Data
             "canonical_path": r.path,
             "scan_error": None,
             "tokens": rep.get("tokens") or [],
-            "cluster": base + int(r.cluster),
+            "cluster": -1,  # set by place_rows
             "split_temporal": r.split,
             "split_grouped": r.split,
             "name_logit": name_model.score_exported(nm, "pypi", r.name, pop),
@@ -341,7 +419,38 @@ def _corpus_rows(df: pd.DataFrame, sel: pd.DataFrame, work_dir: Path) -> pd.Data
         }
         row.update({f"f_{k}": v for k, v in rep["features"].items()})
         rows.append(row)
-    return pd.DataFrame(rows)
+    rows = pd.DataFrame(rows)
+    if rows.empty:
+        rows.attrs["dropped_near_heldout"] = 0
+        return rows
+    placed = place_rows(df, rows)
+    dropped = len(rows) - len(placed)
+    placed.attrs["dropped_near_heldout"] = dropped
+    if dropped:
+        from .pipeline import log
+
+        log(f"malregistry: {dropped} rows dropped, near-duplicates of validation or test malware")
+    return placed
+
+
+def _link_dir(src: Path, dst: Path) -> None:
+    """Make ``dst`` show ``src``: a symlink, or where symlinks are not allowed (Windows
+    without the privilege) a tree of hard links, copying files that cannot be linked."""
+    import os
+
+    try:
+        dst.symlink_to(src, target_is_directory=True)
+        return
+    except OSError:
+        pass
+
+    def link_or_copy(s: str, d: str) -> None:
+        try:
+            os.link(s, d)
+        except OSError:
+            shutil.copy2(s, d)
+
+    shutil.copytree(src, dst, copy_function=link_or_copy)
 
 
 def adapt(fraction: float = 1.0, seed: int = 0) -> dict:
@@ -352,12 +461,13 @@ def adapt(fraction: float = 1.0, seed: int = 0) -> dict:
     novel or not, or a random ``fraction`` of its clusters) joins the training split;
     novel held-out samples are added under split ``external`` so every stage scores them
     but none trains on them. Halves are drawn per near-duplicate cluster, so no held-out
-    sample has a relative in the added data. Scores are code-only (no name model), as in
-    ``evaluate``, and compared with the main models at matched benign test FPR.
+    sample has a relative in the added data, and ``place_rows`` drops any added row that
+    near-duplicates corpus validation or test malware or a scored held-out sample. Scores
+    are code-only (no name model), as in ``evaluate``, and compared with the main models at
+    matched benign test FPR.
     """
     import os
 
-    from . import nn as cnn
     from . import pipeline
 
     main = config.data_dir()
@@ -365,7 +475,7 @@ def adapt(fraction: float = 1.0, seed: int = 0) -> dict:
     (exp / "work").mkdir(parents=True, exist_ok=True)
     for d in ("benign", "benign_canonical", "malicious", "external", "names", "ossf"):
         if not (exp / d).exists():
-            (exp / d).symlink_to(main / d)
+            _link_dir(main / d, exp / d)
     for f in ("dataset.parquet", "split_meta.json", "name_model.json"):
         shutil.copy(main / "work" / f, exp / "work" / f)
     ext = pd.read_parquet(main / "work" / "external_malregistry.parquet")
@@ -387,21 +497,22 @@ def adapt(fraction: float = 1.0, seed: int = 0) -> dict:
         df.to_parquet(pipeline.work() / "dataset.parquet")
         pipeline.log(f"adapt: +{int((rows.split_temporal == 'train').sum())} training rows")
         pipeline.stage_gbdt()
-        pipeline.stage_cnn(cfg=cnn.Config(max_len=768, epochs=10, patience=3))
+        pipeline.stage_cnn()
         pipeline.stage_ensemble()
         df = pipeline.load_table()
-        ens = json.loads((pipeline.work() / "ensemble_temporal.json").read_text())
+        ens = json.loads((pipeline.work() / "ensemble_temporal.json").read_text(encoding="utf-8"))
     finally:
         if prev is None:
             os.environ.pop("CUSTOMS_DATA", None)
         else:
             os.environ["CUSTOMS_DATA"] = prev
 
-    main_ens = json.loads((ROOT / "models/ensemble.json").read_text())
-    control = control[control.augmented.isna()]
+    main_ens = json.loads((config.MODELS_DIR / "ensemble.json").read_text(encoding="utf-8"))
+    control = _originals(control)
     control = control.assign(ens_risk=control.ens_risk_temporal)
     control["ens_risk_code"] = code_only_risk(control, main_ens)
-    adapted = df[df.augmented.isna() & (df.split_temporal != "external")]
+    adapted = _originals(df)
+    adapted = adapted[adapted.split_temporal != "external"]
     adapted = adapted.assign(ens_risk=adapted.ens_risk_temporal)
     adapted["ens_risk_code"] = code_only_risk(adapted, ens)
     scored = df[df.split_temporal == "external"]
@@ -434,8 +545,8 @@ def adapt(fraction: float = 1.0, seed: int = 0) -> dict:
         },
     }
     dest = main / "work" / f"external_adapt_{int(round(fraction * 100))}.json"
-    dest.write_text(json.dumps(out, indent=1))
-    print(json.dumps(out, indent=1))
+    dest.write_text(json.dumps(out, indent=1), encoding="utf-8")
+    pipeline.log(json.dumps(out, indent=1))
     return out
 
 
@@ -443,8 +554,10 @@ def stage_train_rows() -> None:
     """Pipeline stage ``malregistry``: add the MalRegistry dev half to the training split.
 
     The held-out half stays out, so it remains a test of campaigns from a second source
-    that no model has seen. Rows are marked ``source = "malregistry"``; rerunning the stage
-    replaces them.
+    that no model has seen. ``evaluate`` de-duplicates MalRegistry against training malware
+    only, so ``place_rows`` re-clusters the dev half against all corpus malware and drops
+    dev-half rows that near-duplicate validation or test malware. Rows are marked
+    ``source = "malregistry"``; rerunning the stage replaces them.
     """
     from .pipeline import load_table, log, work
 
@@ -454,7 +567,37 @@ def stage_train_rows() -> None:
     ext = pd.read_parquet(work() / "external_malregistry.parquet")
     dev = ext[ext.half == "dev"].assign(split="train")
     rows = _corpus_rows(df, dev, work())
+    dropped = int(rows.attrs.get("dropped_near_heldout", 0))
     df["source"] = None
     out = pd.concat([df, rows], ignore_index=True)
     log(f"malregistry: {len(rows)} dev-half archives added to the training split")
     out.to_parquet(work() / "dataset.parquet")
+    # The report reads this to say whether the dev half was checked against held-out malware.
+    (work() / "malregistry_stage.json").write_text(
+        json.dumps({"added": int(len(rows)), "dropped_near_heldout": dropped}),
+        encoding="utf-8",
+    )
+
+
+def main(argv: list[str] | None = None) -> None:
+    import argparse
+
+    ap = argparse.ArgumentParser(prog="python -m customs_ml.external", description=__doc__)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    p = sub.add_parser("fetch", help="download and canonicalize MalRegistry archives")
+    p.add_argument("listing", type=Path, help="one <name>/<version>/<file> path per line")
+    p = sub.add_parser("evaluate", help="score MalRegistry with the exported models")
+    p.add_argument("--save-as", help="also keep the result as external_malregistry_<NAME>.json")
+    p = sub.add_parser("adapt", help="experiment: train on the dev half in a copy of the data")
+    p.add_argument("fraction", type=float, nargs="?", default=1.0)
+    args = ap.parse_args(argv)
+    if args.cmd == "fetch":
+        fetch(args.listing)
+    elif args.cmd == "evaluate":
+        evaluate(args.save_as)
+    else:
+        adapt(args.fraction)
+
+
+if __name__ == "__main__":
+    main()

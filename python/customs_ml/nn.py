@@ -91,7 +91,9 @@ def build_vocab(docs: Sequence[Sequence[str]], cfg: Config) -> dict[str, int]:
 
 
 def encode(docs: Sequence[Sequence[str]], vocab: dict[str, int], max_len: int) -> np.ndarray:
-    # Length is at least the widest kernel so an empty document still yields a valid conv.
+    # Rows are truncated or zero-padded to max_len. Training batches keep at least MIN_LEN
+    # columns (_trim) and single-document scoring pads to max(MIN_LEN, widest kernel)
+    # (numpy_forward), so an empty document still yields a valid convolution.
     out = np.zeros((len(docs), max_len), dtype=np.int64)
     for i, d in enumerate(docs):
         ids = [vocab.get(vocab_key(t), UNK) for t in d[:max_len]]
@@ -181,7 +183,11 @@ def train(
             bad += 1
             if bad >= cfg.patience:
                 break
-    model.load_state_dict(best_state)
+    if best_state is None:
+        # No epoch, or no epoch with a defined validation PR AUC (no validation positives).
+        log("no validation PR AUC to select an epoch by; keeping the last state")
+    else:
+        model.load_state_dict(best_state)
     return model, history
 
 
@@ -316,4 +322,4 @@ def parity_streams(exported: dict, n: int = 25, seed: int = 0) -> list[list[str]
 
 
 def save(exported: dict, path: Path) -> None:
-    path.write_text(json.dumps(exported, separators=(",", ":")))
+    path.write_text(json.dumps(exported, separators=(",", ":")), encoding="utf-8")

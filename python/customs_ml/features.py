@@ -19,15 +19,15 @@ import pandas as pd
 from . import config
 from .malicious import canonicalize_benign
 
-REPO_BIN = config.REPO_ROOT / "target" / "release" / "customs-scan"
-
 
 def scanner_bin() -> str:
+    """``$CUSTOMS_SCAN_BIN``, else this checkout's release build, else ``customs-scan`` on PATH."""
     env = os.environ.get("CUSTOMS_SCAN_BIN")
     if env:
         return env
-    if REPO_BIN.exists():
-        return str(REPO_BIN)
+    repo_bin = config.repo_binary("customs-scan")
+    if repo_bin.exists():
+        return str(repo_bin)
     found = shutil.which("customs-scan")
     if not found:
         raise FileNotFoundError(
@@ -56,7 +56,7 @@ def scan_paths(
     with tempfile.TemporaryDirectory() as td:
         inp = Path(td) / "paths.txt"
         out = Path(td) / "out.jsonl"
-        inp.write_text("\n".join(paths) + "\n")
+        inp.write_text("\n".join(paths) + "\n", encoding="utf-8")
         cmd = [scanner_bin(), "batch", "--input", str(inp), "--output", str(out)]
         if tokens:
             cmd.append("--tokens")
@@ -94,8 +94,7 @@ def canonicalize_benign_corpus(
             except Exception:  # noqa: BLE001 - malformed upstream archive, skip it
                 canon.append(None)
                 continue
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_bytes(blob)
+            config.write_atomic(dest, blob)
         if delete_original and Path(row.path).exists():
             Path(row.path).unlink()
         canon.append(str(dest))

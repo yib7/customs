@@ -1372,6 +1372,19 @@ the data directory gets the dev half (all of its clusters, or a random fraction)
 training malware, every model is retrained, and the held-out half is scored code-only.
 The pipeline stage `malregistry` does the same for the shipped models, after `augment`
 (augmentation draws only from the primary corpus). The held-out half never enters training.
+`python -m customs_ml.pipeline all` and `customs-ml train` run the stages in the order the
+shipped models were built with (`pipeline.plan`): a first pass on the primary corpus
+(kept as `baseline_*`), `augment` and a retrain, then, once `python -m customs_ml.external
+fetch` has downloaded MalRegistry, `external` (scores it with the exported models and keeps
+that result as `external_malregistry_before_training.json`), `malregistry`, a retrain and
+`external` again. `python -m customs_ml.external evaluate --save-as baseline` keeps a run
+for a later before-and-after comparison, as was done before the scanner changes above.
+Novelty and halves are decided against training malware only, so before dev-half rows
+join training they are clustered again against all corpus malware (`place_rows`): a row
+takes the corpus cluster id of the malware it near-duplicates, and a row whose cluster
+holds validation or test malware (either split scheme) or a scored held-out sample is
+dropped. The shipped models were trained before this check existed (see
+`docs/EVALUATION.md`).
 
 ### 10.2 Experiment: release diff model (`customs_ml/diff.py`, `customs-scan delta`)
 
@@ -1383,11 +1396,16 @@ Python and Rust build identical deltas (checked on real pairs). Training pairs: 
 release and its predecessor (negative), and the same pair with a training-split malware
 payload injected into the newer release (positive; npm: new postinstall file, appended to
 the entry point, or a shell install script; PyPI: appended to `setup.py`, appended to the
-top `__init__.py`, or a new imported module). Real compromised releases are test only.
-The diff model uses `all_` and structural features plus change-size features; `inst_`
+top `__init__.py`, or a new imported module); a benign pair with no training donor that
+has a payload gets no positive. Real compromised releases are test only.
+The diff model uses `all_` and structural features plus change-size features (computed in
+Python only; `customs-scan delta` reports the raw counts); `inst_`
 features are excluded because the install surface of a delta is not well defined.
 Thresholds come from benign validation pairs at FPR 0.5% and 0.1%. The comparison with the
 base model is made at matched false positive rates. It was not adopted (see the report).
+`python -m customs_ml.diff pairs` fetches previous releases and writes deltas (run
+`python -m customs_ml.diff sweep` beside it to scan and delete them as they appear), then
+`table` and `train`.
 
 ## 11. Lockfile audit (`customs audit`)
 

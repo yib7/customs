@@ -108,6 +108,24 @@ def apply_calibration(cal: dict, p: np.ndarray) -> np.ndarray:
     return np.interp(p, np.asarray(cal["x"]), np.asarray(cal["y"]))
 
 
+def stacked_risk(
+    ens: dict,
+    logits: dict[str, np.ndarray],
+    weights: dict[str, float] | None = None,
+    bias: float | None = None,
+) -> np.ndarray:
+    """Calibrated risk from an exported ensemble: clipped component logits, weighted sum,
+    sigmoid, calibration (what the binary computes). ``weights``/``bias`` default to the
+    full stack; pass a fallback's to score without a component (``logits`` then omits it).
+    """
+    w = ens["weights"] if weights is None else weights
+    z = ens["bias"] if bias is None else bias
+    b = ens.get("clip") or np.inf
+    for k, x in logits.items():
+        z = z + w[k] * np.clip(x, -b, b)
+    return apply_calibration(ens["calibration"], 1 / (1 + np.exp(-z)))
+
+
 # ---------------------------------------------------------------- export
 
 
@@ -186,4 +204,4 @@ def contributions_exported(model: dict, x: np.ndarray) -> tuple[float, np.ndarra
 
 
 def save(model: dict, path: Path) -> None:
-    path.write_text(json.dumps(model, separators=(",", ":")))
+    path.write_text(json.dumps(model, separators=(",", ":")), encoding="utf-8")

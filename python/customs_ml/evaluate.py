@@ -51,7 +51,7 @@ def _recall_fn(t):
 
 
 def _roc_recall_fn(fpr):
-    return lambda y, s: metrics.recall_at_threshold(y, s, metrics.threshold_at_fpr(y, s, fpr))
+    return lambda y, s: metrics.roc_recall_at_fpr(y, s, fpr)
 
 
 def _fpr_fn(t):
@@ -72,11 +72,11 @@ def run(scheme: str = SCHEME, with_guarddog: bool = True) -> dict:
     te = (split == splits.TEST).to_numpy()
     T = df[te].reset_index(drop=True)
     y, cl = T.label.to_numpy(), T.cluster.to_numpy()
-    ens = json.loads((work() / f"ensemble_{scheme}.json").read_text())
+    ens = json.loads((work() / f"ensemble_{scheme}.json").read_text(encoding="utf-8"))
     thr_ens = {"warn": ens["thresholds"]["warn"], "block": ens["thresholds"]["block"]}
     novel = splits.novel_mask(df, split).to_numpy()[te]
     res: dict = {"scheme": scheme, "generated": datetime.now(UTC).isoformat(timespec="seconds")}
-    res["split_meta"] = json.loads((work() / "split_meta.json").read_text())
+    res["split_meta"] = json.loads((work() / "split_meta.json").read_text(encoding="utf-8"))
     res["counts"] = {
         s: {
             "malicious": int(((split == s) & (df.label == 1)).sum()),
@@ -155,7 +155,9 @@ def run(scheme: str = SCHEME, with_guarddog: bool = True) -> dict:
         res["guarddog"] = _guarddog(T, y, cl, s)
 
     _figures(df, T, scheme, res)
-    (work() / f"eval_{scheme}.json").write_text(json.dumps(res, indent=1, default=float))
+    (work() / f"eval_{scheme}.json").write_text(
+        json.dumps(res, indent=1, default=float), encoding="utf-8"
+    )
     log("headline", {k: (v["value"] if isinstance(v, dict) else v) for k, v in head.items()})
     return res
 
@@ -175,6 +177,9 @@ def _guarddog(T: pd.DataFrame, y, cl, s) -> dict:
     m = T.merge(gd, left_on="canonical_path", right_on="path", how="left")
     ok = (m.gd_error == "").to_numpy()
     yy, cc, ss = y[ok], cl[ok], s[ok]
+    if yy.sum() == 0 or (yy == 0).sum() == 0:
+        log("GuardDog returned results for one class only: comparison skipped")
+        return {}
     g = m.gd_score.to_numpy()[ok]
     flagged = (g > 0).astype(float)
     gd_fpr = float(flagged[yy == 0].mean())
@@ -193,7 +198,7 @@ def _guarddog(T: pd.DataFrame, y, cl, s) -> dict:
         if lab.sum() == 0 or (lab == 0).sum() == 0:
             continue
         deltas.append(np.mean(a[lab == 1] >= t_match) - np.mean(b[lab == 1] > 0.5))
-    lo, hi = np.percentile(deltas, [2.5, 97.5])
+    lo, hi = np.percentile(deltas, [2.5, 97.5]) if deltas else (np.nan, np.nan)
     gd_high = (m.gd_label.to_numpy()[ok] == "high_risk").astype(float)
     high_fpr = float(gd_high[yy == 0].mean())
     t_high = metrics.threshold_at_fpr(yy, ss, high_fpr)
@@ -236,7 +241,7 @@ def _figures(df: pd.DataFrame, T: pd.DataFrame, scheme: str, res: dict) -> None:
     ax.set_xlim(1e-4, 1)
     ax.set_xlabel("False-positive rate (benign packages flagged), log scale")
     ax.set_ylabel("Detection rate (malicious packages caught)")
-    ax.set_title("Test set ROC, temporal split")
+    ax.set_title(f"Test set ROC, {scheme} split")
     ax.legend(loc="lower right", fontsize=8)
     ax.grid(alpha=0.3)
     fig.tight_layout()
@@ -280,10 +285,12 @@ def export(scheme: str = SCHEME) -> None:
     shutil.copy(work() / f"cnn_parity_{scheme}.json", out / "parity" / "code_nn.json")
     shutil.copy(work() / "name_parity.json", out / "parity" / "name_model.json")
     for eco in ("pypi", "npm"):
-        (out / f"popular_{eco}.txt").write_text("\n".join(names.popular(eco)) + "\n")
+        (out / f"popular_{eco}.txt").write_text(
+            "\n".join(names.popular(eco)) + "\n", encoding="utf-8"
+        )
     _gbdt_parity(scheme, out / "parity" / "code_gbdt.json")
-    ev = json.loads((work() / f"eval_{scheme}.json").read_text())
-    ens = json.loads((work() / f"ensemble_{scheme}.json").read_text())
+    ev = json.loads((work() / f"eval_{scheme}.json").read_text(encoding="utf-8"))
+    ens = json.loads((work() / f"ensemble_{scheme}.json").read_text(encoding="utf-8"))
     version = datetime.now(UTC).strftime("%Y.%m.%d")
     manifest = {
         "model_version": version,
@@ -295,7 +302,7 @@ def export(scheme: str = SCHEME) -> None:
         "popular_names": {"pypi": "popular_pypi.txt", "npm": "popular_npm.txt"},
         "metrics": "metrics.json",
     }
-    (out / "manifest.json").write_text(json.dumps(manifest, indent=1) + "\n")
+    (out / "manifest.json").write_text(json.dumps(manifest, indent=1) + "\n", encoding="utf-8")
     h = ev["headline"]
     gd = ev.get("guarddog") or {}
     m = {
@@ -323,7 +330,9 @@ def export(scheme: str = SCHEME) -> None:
             else {},
         },
     }
-    (out / "metrics.json").write_text(json.dumps(m, indent=1, default=float) + "\n")
+    (out / "metrics.json").write_text(
+        json.dumps(m, indent=1, default=float) + "\n", encoding="utf-8"
+    )
     log("exported to", out)
 
 
@@ -331,7 +340,7 @@ def _gbdt_parity(scheme: str, path: Path) -> None:
     from . import gbdt
 
     df = load_table()
-    model = json.loads((work() / f"code_gbdt_{scheme}.json").read_text())
+    model = json.loads((work() / f"code_gbdt_{scheme}.json").read_text(encoding="utf-8"))
     cols = ["f_" + n for n in model["feature_names"]]
     rows = df.sample(25, random_state=0)
     X = rows[cols].to_numpy(dtype=float)
@@ -354,4 +363,4 @@ def _gbdt_parity(scheme: str, path: Path) -> None:
                 )[:5],
             }
         )
-    path.write_text(json.dumps(fx, indent=1))
+    path.write_text(json.dumps(fx, indent=1), encoding="utf-8")
