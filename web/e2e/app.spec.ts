@@ -212,8 +212,9 @@ test('phone layout has no horizontal overflow', async ({ page }) => {
   for (const path of ['/', '/activity', '/verdicts/42', '/check', '/policy', '/model']) {
     await page.goto(path);
     await page.getByRole('heading', { level: 1 }).first().waitFor();
-    await page.waitForTimeout(200);
-    const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
-    expect(overflow, path).toBeLessThanOrEqual(0);
+    // Charts and fonts settle after the heading renders; poll instead of sleeping.
+    await expect
+      .poll(() => page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth), { message: path })
+      .toBeLessThanOrEqual(0);
   }
 });
