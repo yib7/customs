@@ -342,4 +342,5 @@ customs-ml train && customs-ml report       # trains, evaluates, red-teams, expo
 
 ## License
 
-MIT
+MIT, see [LICENSE](LICENSE). The datasets, package-name lists and third-party notices are credited in
+[docs/CREDITS.md](docs/CREDITS.md).
