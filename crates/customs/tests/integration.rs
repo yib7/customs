@@ -3346,3 +3346,20 @@ async fn a_policy_change_the_log_cannot_record_is_still_reported_as_applied() {
     );
     h.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn bad_query_and_path_parameters_get_json_errors() {
+    let h = Harness::start(|_| {}).await;
+    for path in [
+        "/api/events?limit=abc",
+        "/api/stats?days=x",
+        "/api/policy/changes?limit=-1",
+        "/api/verdicts/abc",
+    ] {
+        let r = h.get(path).await;
+        assert_eq!(r.status(), 400, "{path}");
+        let v: Value = r.json().await.unwrap();
+        assert!(v["error"].is_string(), "{path}: {v}");
+    }
+    h.stop().await;
+}

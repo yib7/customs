@@ -3,6 +3,7 @@
 use std::convert::Infallible;
 use std::time::Duration;
 
+use axum::extract::rejection::{PathRejection, QueryRejection};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
@@ -135,7 +136,7 @@ struct DiffQuery {
 
 async fn diff(
     State(state): State<AppState>,
-    q: Result<Query<DiffQuery>, axum::extract::rejection::QueryRejection>,
+    q: Result<Query<DiffQuery>, QueryRejection>,
 ) -> Response {
     let Query(q) = match q {
         Ok(q) => q,
@@ -179,7 +180,14 @@ struct EventsQuery {
     q: Option<String>,
 }
 
-async fn events(State(state): State<AppState>, Query(q): Query<EventsQuery>) -> Response {
+async fn events(
+    State(state): State<AppState>,
+    q: Result<Query<EventsQuery>, QueryRejection>,
+) -> Response {
+    let Query(q) = match q {
+        Ok(q) => q,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e.body_text()),
+    };
     let limit = q.limit.unwrap_or(50).clamp(1, 500);
     let nonempty = |s: Option<String>| s.map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
     let filter = EventFilter {
@@ -223,7 +231,14 @@ async fn events_stream(
     Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
 }
 
-async fn verdict(State(state): State<AppState>, Path(id): Path<i64>) -> Response {
+async fn verdict(
+    State(state): State<AppState>,
+    id: Result<Path<i64>, PathRejection>,
+) -> Response {
+    let Path(id) = match id {
+        Ok(id) => id,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e.body_text()),
+    };
     match state.engine.store.verdict(id) {
         Ok(Some(v)) => Json(v).into_response(),
         Ok(None) => api_error(StatusCode::NOT_FOUND, format!("no verdict {id}")),
@@ -236,7 +251,14 @@ struct StatsQuery {
     days: Option<u32>,
 }
 
-async fn stats(State(state): State<AppState>, Query(q): Query<StatsQuery>) -> Response {
+async fn stats(
+    State(state): State<AppState>,
+    q: Result<Query<StatsQuery>, QueryRejection>,
+) -> Response {
+    let Query(q) = match q {
+        Ok(q) => q,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e.body_text()),
+    };
     match state.engine.store.stats(q.days.unwrap_or(30)) {
         Ok(s) => Json(s).into_response(),
         Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
@@ -337,7 +359,14 @@ struct ChangesQuery {
 }
 
 /// `GET /api/policy/changes`: policy changes made through the API, newest first.
-async fn policy_changes(State(state): State<AppState>, Query(q): Query<ChangesQuery>) -> Response {
+async fn policy_changes(
+    State(state): State<AppState>,
+    q: Result<Query<ChangesQuery>, QueryRejection>,
+) -> Response {
+    let Query(q) = match q {
+        Ok(q) => q,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e.body_text()),
+    };
     match state
         .engine
         .store
