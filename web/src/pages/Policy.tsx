@@ -528,9 +528,18 @@ function PolicyForm({
           <SeverityField
             id="rule-unread_code"
             label="Code the scanner could not read"
-            description="The package ships code the scanner could not read: a code file or manifest over the 32 MiB per-file limit, an encrypted entry or one with an unsupported compression method, or an install hook in an archive above the scan size limit. The installer still runs it, and hiding a payload this way keeps it from every rule and the model. No benign package in the training corpus has any, so it blocks by default."
+            description="The package ships code the scanner could not read: a code file or manifest over the 32 MiB per-file limit, an encrypted entry or one with an unsupported compression method, or an install hook in an archive above the scan size limit. It also covers code pip or npm would install differently from what the scanner read: a path stored twice, a link or sparse entry at an install-time path, or a coding cookie that makes Python run other text. The installer still runs it, and hiding a payload this way keeps it from every rule and the model. No benign package in the training corpus has any, so it blocks by default."
             value={draft.unread_code}
             onChange={(v) => set('unread_code', v)}
+          />
+        </div>
+        <div className="border-t border-line">
+          <SeverityField
+            id="rule-hidden_code"
+            label="Code the interpreter reads differently from the scanner"
+            description="Install-time Python or JavaScript that Python or Node runs but the scanner's lexers read another way: code after a bare carriage return, inside an f-string field, or after a byte-order mark the scanner keeps and Python drops. The scanner reads such a file a second time the way the interpreter does and lists what launches, connects, downloads or reads secrets only in that reading. The model's inputs stay as they were, so the rule decides on its own; it blocks by default."
+            value={draft.hidden_code}
+            onChange={(v) => set('hidden_code', v)}
           />
         </div>
         <div className="border-t border-line">

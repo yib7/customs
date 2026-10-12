@@ -37,6 +37,47 @@ describe('MockServer matches the server contract', () => {
     expect(res.body).toMatchObject({ errors: [{ field: 'min_age_days' }] });
   });
 
+  it('refuses a policy PUT that leaves keys out, naming them, as the server does', () => {
+    const server = new MockServer(NOW);
+    const before = structuredClone(server.policy);
+    const put = (body: Record<string, unknown>) => server.handle('PUT', new URL('http://localhost/api/policy'), body);
+    const withoutHidden = { ...server.policy };
+    delete withoutHidden.hidden_code;
+    const one = put(withoutHidden);
+    expect(one.status).toBe(400);
+    expect(one.body).toMatchObject({ errors: [{ field: 'hidden_code' }] });
+    expect((one.body as { error: string }).error).toMatch(/hidden_code/);
+    const nested = put({ ...server.policy, established: { enabled: false } });
+    expect(nested.status).toBe(400);
+    const fields = (nested.body as { errors: { field: string }[] }).errors.map((e) => e.field);
+    expect(fields).toEqual(['established.top', 'established.min_age_days']);
+    expect((nested.body as { error: string }).error).toMatch(/the policy is missing established\.top, established\.min_age_days/);
+    expect(put({ mode: 'monitor' }).status).toBe(400);
+    expect(server.policy).toEqual(before);
+    expect(put({ ...server.policy, hidden_code: 'warn' }).status).toBe(200);
+    expect(server.policy.hidden_code).toBe('warn');
+  });
+
+  it('shows upstream credentials as *** and keeps them when *** comes back, as the server does', () => {
+    const server = new MockServer(NOW);
+    const upstream = server.policy.upstream as Record<string, string>;
+    upstream.pypi_simple = 'https://ci:s3cret@mirror.example/simple';
+    const got = get(server, '/api/policy').body as { upstream: Record<string, string> };
+    expect(got.upstream.pypi_simple).toBe('https://***@mirror.example/simple');
+    expect(JSON.stringify(got)).not.toContain('s3cret');
+    const put = (body: unknown) => server.handle('PUT', new URL('http://localhost/api/policy'), body);
+    const ok = put({ ...got, min_age_days: 5 });
+    expect(ok.status).toBe(200);
+    expect((ok.body as { upstream: Record<string, string> }).upstream.pypi_simple).toBe('https://***@mirror.example/simple');
+    expect((server.policy.upstream as Record<string, string>).pypi_simple).toBe('https://ci:s3cret@mirror.example/simple');
+    expect(server.policy.min_age_days).toBe(5);
+    // *** on another host has no stored credentials to keep.
+    const moved = put({ ...got, upstream: { ...got.upstream, pypi_simple: 'https://***@other.example/simple' } });
+    expect(moved.status).toBe(400);
+    expect(moved.body).toMatchObject({ errors: [{ field: 'upstream.pypi_simple' }] });
+    expect((server.policy.upstream as Record<string, string>).pypi_simple).toBe('https://ci:s3cret@mirror.example/simple');
+  });
+
   it('answers a nonexistent package with code and the verdict', () => {
     const res = new MockServer(NOW).handle('POST', new URL('http://localhost/api/check'), {
       ecosystem: 'pypi',

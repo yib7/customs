@@ -41,6 +41,49 @@ function isRec(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
+/** Dotted paths of the keys in `full` that `got` leaves out (config.rs `missing_keys`). */
+function missingKeys(full: Record<string, unknown>, got: Record<string, unknown>, prefix = ''): string[] {
+  const out: string[] = [];
+  for (const [k, fv] of Object.entries(full)) {
+    const path = prefix ? `${prefix}.${k}` : k;
+    if (!(k in got)) out.push(path);
+    else if (isRec(fv) && isRec(got[k])) out.push(...missingKeys(fv, got[k], path));
+  }
+  return out;
+}
+
+/** An upstream URL as the API shows it: credentials become `***` (config.rs `redact_upstream`). */
+function redactUpstream(url: string): string {
+  let u: URL;
+  try {
+    u = new URL(url);
+  } catch {
+    return url;
+  }
+  if (!u.username && !u.password) return url;
+  u.username = '***';
+  u.password = '';
+  return u.toString().replace(/\/$/, '');
+}
+
+function hasRedactedCredentials(url: string): boolean {
+  try {
+    const u = new URL(url);
+    return u.username === '***' && !u.password;
+  } catch {
+    return false;
+  }
+}
+
+/** The policy as GET and PUT /api/policy answer with it: upstream credentials shown as `***`. */
+function redactedPolicy(p: Record<string, unknown>): Record<string, unknown> {
+  if (!isRec(p.upstream)) return p;
+  const upstream = Object.fromEntries(
+    Object.entries(p.upstream).map(([k, v]) => [k, typeof v === 'string' ? redactUpstream(v) : v]),
+  );
+  return { ...p, upstream };
+}
+
 const ENTRY = /^(pypi|npm):(@[a-z0-9~-][a-z0-9._~-]*\/)?[a-z0-9~-][a-z0-9._~-]*(@[A-Za-z0-9.+!_-]+)?$/i;
 
 export class MockServer {
@@ -125,7 +168,7 @@ export class MockServer {
       return v ? json(200, v) : json(404, { error: `no verdict with id ${id}` });
     }
     if (method === 'GET' && path === '/api/stats') return json(200, this.stats());
-    if (method === 'GET' && path === '/api/policy') return json(200, this.policy);
+    if (method === 'GET' && path === '/api/policy') return json(200, redactedPolicy(this.policy));
     if (method === 'GET' && path === '/api/policy/changes') {
       const limit = Math.min(500, Math.max(1, Number(url.searchParams.get('limit') ?? 50) || 50));
       return json(200, { changes: this.policyChanges.slice(-limit).reverse() });
@@ -225,6 +268,16 @@ export class MockServer {
 
   private putPolicy(body: unknown, auth: 'token' | 'none' = 'none'): MockResponse {
     if (!isRec(body)) return json(400, { error: 'body must be a JSON object' });
+    // PUT replaces the whole policy, so a body that leaves a key out is refused (F104).
+    const missing = missingKeys(INITIAL_POLICY, body);
+    if (missing.length > 0) {
+      const message = 'missing: PUT replaces the whole policy, so send every key GET /api/policy returns';
+      const error =
+        missing.length === 1
+          ? `invalid value for \`${missing[0] ?? ''}\`: ${message}`
+          : `the policy is missing ${missing.join(', ')}: PUT replaces the whole policy, so send every key GET /api/policy returns`;
+      return json(400, { error, errors: missing.map((field) => ({ field, message })) });
+    }
     const errors: { field: string; message: string }[] = [];
     if (body.mode !== 'enforce' && body.mode !== 'monitor') errors.push({ field: 'mode', message: 'mode must be "enforce" or "monitor"' });
     for (const f of ['warn_threshold', 'block_threshold'] as const) {
@@ -252,6 +305,7 @@ export class MockServer {
       'unread_code',
       'startup_hook',
       'agent_bypass',
+      'hidden_code',
       'scan_error',
     ] as const) {
       const v = body[f];
@@ -289,15 +343,27 @@ export class MockServer {
         errors.push({ field: f, message: `${f} entries must look like "pypi:name" or "npm:name@version"` });
       }
     }
+    // `***` stands for the stored credentials of the same upstream URL.
+    const stored = isRec(this.policy.upstream) ? this.policy.upstream : {};
+    const upstream: Record<string, unknown> = isRec(body.upstream) ? { ...body.upstream } : {};
+    for (const [k, v] of Object.entries(upstream)) {
+      if (typeof v !== 'string' || !hasRedactedCredentials(v)) continue;
+      const old = stored[k];
+      if (typeof old === 'string' && redactUpstream(old) === redactUpstream(v)) {
+        upstream[k] = old;
+      } else {
+        errors.push({ field: `upstream.${k}`, message: `'${v}': \`***\` stands for the stored credentials, and the active upstream is '${typeof old === 'string' ? redactUpstream(old) : ''}'; send a new URL with its own credentials` });
+      }
+    }
     if (errors.length > 0) return json(400, { error: 'invalid policy', errors });
-    const next = { ...this.policy, ...body };
-    const changes = diffPolicies(this.policy, next);
+    const next = { ...this.policy, ...body, upstream };
+    const changes = diffPolicies(redactedPolicy(this.policy), redactedPolicy(next));
     if (changes.length > 0) {
       const id = (this.policyChanges.at(-1)?.id ?? 0) + 1;
       this.policyChanges.push({ id, ts: new Date().toISOString(), remote: '127.0.0.1', client: 'Mozilla/5.0', auth, changes });
     }
     this.policy = next;
-    return json(200, this.policy);
+    return json(200, redactedPolicy(this.policy));
   }
 
   /** GET /api/diff for the fixture verdicts: the release before `x.y.z` is `x.y.(z-1)`. */

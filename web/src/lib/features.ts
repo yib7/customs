@@ -86,6 +86,7 @@ const POLICY_RULES: Record<string, string> = {
   unread_code: 'Ships code the scanner could not read',
   startup_hook: 'Installs a .pth file that runs code at every Python start',
   agent_bypass: 'Install-time code runs an AI coding agent with its permission checks off',
+  hidden_code: 'Install-time code the interpreter reads differently from the scanner',
   scan_error: 'Archive could not be scanned',
   deny: 'Matches the deny list',
   allow: 'Matches the allow list',

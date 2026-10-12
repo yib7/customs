@@ -160,6 +160,7 @@ export interface Policy {
   unread_code: RuleSeverity;
   startup_hook: RuleSeverity;
   agent_bypass: RuleSeverity;
+  hidden_code: RuleSeverity;
   scan_error: RuleSeverity;
   allow: string[];
   deny: string[];

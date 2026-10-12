@@ -135,6 +135,38 @@ describe('Policy page', () => {
       established: { enabled: false, top: 5000, min_age_days: 60 },
     });
   });
+
+  it('edits the scanner rules, including hidden_code', async () => {
+    const user = userEvent.setup();
+    const mock = renderApp('/policy');
+    const hidden = await screen.findByRole('combobox', { name: 'Code the interpreter reads differently from the scanner' });
+    expect(hidden).toHaveValue('block');
+    expect(screen.getByRole('combobox', { name: 'Code the scanner could not read' })).toHaveValue('block');
+    await user.selectOptions(hidden, 'warn');
+    await user.click(screen.getByRole('button', { name: 'Save policy' }));
+    expect(await screen.findByTestId('policy-saved')).toBeInTheDocument();
+    expect(mock.server.policy).toMatchObject({ hidden_code: 'warn', unread_code: 'block' });
+  });
+
+  it('sends redacted upstream credentials back unchanged, so the server keeps them', async () => {
+    const user = userEvent.setup();
+    const mock = renderApp('/policy');
+    const upstream = mock.server.policy.upstream as Record<string, string>;
+    upstream.npm = 'https://ci:s3cret@npm.mirror.example';
+    const handle = vi.spyOn(mock.server, 'handle');
+    const age = await screen.findByRole('textbox', { name: 'Minimum age (days)' });
+    expect(await screen.findByText('https://***@npm.mirror.example')).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain('s3cret');
+    await user.clear(age);
+    await user.type(age, '5');
+    await user.click(screen.getByRole('button', { name: 'Save policy' }));
+    expect(await screen.findByTestId('policy-saved')).toBeInTheDocument();
+    const put = handle.mock.calls.find(([method]) => method === 'PUT');
+    expect((put?.[2] as { upstream: Record<string, string> }).upstream.npm).toBe('https://***@npm.mirror.example');
+    expect((mock.server.policy.upstream as Record<string, string>).npm).toBe('https://ci:s3cret@npm.mirror.example');
+    expect(mock.server.policy.min_age_days).toBe(5);
+    expect(screen.getByText('https://***@npm.mirror.example')).toBeInTheDocument();
+  });
 });
 
 describe('Check page', () => {

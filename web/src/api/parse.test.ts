@@ -179,6 +179,7 @@ describe('parsePolicy', () => {
       dormant_days: 730,
       startup_hook: 'warn',
       agent_bypass: 'warn',
+      hidden_code: 'warn',
       scan_error: 'warn',
       allow: ['pypi:requests', 5],
       deny: ['npm:event-stream@3.3.6'],
@@ -207,6 +208,7 @@ describe('parsePolicy', () => {
       unread_code: 'block',
       startup_hook: 'warn',
       agent_bypass: 'warn',
+      hidden_code: 'warn',
       scan_error: 'warn',
       allow: ['pypi:requests'],
       deny: ['npm:event-stream@3.3.6'],
@@ -230,6 +232,7 @@ describe('parsePolicy', () => {
     expect(p.unread_code).toBe('block');
     expect(p.startup_hook).toBe('block');
     expect(p.agent_bypass).toBe('block');
+    expect(p.hidden_code).toBe('block');
     expect(p.scan_error).toBe('block');
     expect(p.established).toEqual({ enabled: true, top: 5000, min_age_days: 30 });
   });

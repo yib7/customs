@@ -97,4 +97,16 @@ describe('VerdictView', () => {
     renderVerdict(BLOCKED_TYPOSQUAT);
     expect(screen.getByText(/The final decision \(block\) is the most severe of the model decision and every rule above/)).toBeInTheDocument();
   });
+
+  it('names every scanner rule, including hidden_code', () => {
+    const hits = [
+      { rule: 'unread_code', severity: 'block', detail: 'lib/big.py is over the per-file limit' },
+      { rule: 'hidden_code', severity: 'block', detail: 'setup.py:3: proc_exec (bare carriage return): install-time code the interpreter runs but the scanner model inputs leave out' },
+    ];
+    renderVerdict({ ...BLOCKED_TYPOSQUAT, policy_hits: hits });
+    const list = screen.getByRole('list', { name: 'Policy rules that matched' });
+    expect(within(list).getByText('Ships code the scanner could not read')).toBeInTheDocument();
+    expect(within(list).getByText('Install-time code the interpreter reads differently from the scanner')).toBeInTheDocument();
+    expect(within(list).queryByText('Hidden code')).toBeNull();
+  });
 });

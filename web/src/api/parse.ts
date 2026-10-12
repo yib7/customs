@@ -349,6 +349,7 @@ export function parsePolicy(v: unknown): Policy {
     unread_code: parseRuleSeverity(r.unread_code, 'block'),
     startup_hook: parseRuleSeverity(r.startup_hook, 'block'),
     agent_bypass: parseRuleSeverity(r.agent_bypass, 'block'),
+    hidden_code: parseRuleSeverity(r.hidden_code, 'block'),
     scan_error: parseRuleSeverity(r.scan_error, 'block'),
     allow: asStringArray(r.allow),
     deny: asStringArray(r.deny),

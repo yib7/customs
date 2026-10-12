@@ -45,6 +45,7 @@ export interface PolicyDraft {
   unread_code: RuleSeverity;
   startup_hook: RuleSeverity;
   agent_bypass: RuleSeverity;
+  hidden_code: RuleSeverity;
   scan_error: RuleSeverity;
   allow: string[];
   deny: string[];
@@ -96,6 +97,7 @@ export function policyToDraft(p: Policy): PolicyDraft {
     unread_code: p.unread_code,
     startup_hook: p.startup_hook,
     agent_bypass: p.agent_bypass,
+    hidden_code: p.hidden_code,
     scan_error: p.scan_error,
     allow: [...p.allow],
     deny: [...p.deny],
@@ -200,6 +202,7 @@ export function validateDraft(d: PolicyDraft): DraftResult {
       unread_code: d.unread_code,
       startup_hook: d.startup_hook,
       agent_bypass: d.agent_bypass,
+      hidden_code: d.hidden_code,
       scan_error: d.scan_error,
       allow: d.allow.map((e) => e.trim()),
       deny: d.deny.map((e) => e.trim()),
