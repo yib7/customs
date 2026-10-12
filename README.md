@@ -180,9 +180,9 @@ eval "$(./target/release/customs env)"   # route pip, uv, pipenv, PDM, npm, pnpm
 ```
 
 `python/scripts/demo.sh` runs the whole tour against the live registries and needs Python 3
-and curl. It starts its own server on port 7878, so stop the one from Step 3 first. It and the
-`python/scripts/replay.py` and `python/scripts/loadtest.py` harnesses run `$CUSTOMS_BIN` when it is set,
-else `target/release/customs` (under `$CARGO_TARGET_DIR` when that is set).
+and curl. It starts its own server on port 7878, so stop the one from Step 3 first. The demo
+and the `replay.py` and `loadtest.py` harnesses next to it use `$CUSTOMS_BIN` if you set it,
+else `target/release/customs` (under `$CARGO_TARGET_DIR` if that is set).
 
 ### Claude Code hook
 
@@ -296,8 +296,9 @@ Recorded against a live `customs serve`. The terminal panes are recorded shell s
 
 ## Limitations
 
-* This release has no retraining. The classifier over-scores some popular packages: the
-  `requests` 2.32.3 sdist scores 0.99. The fix is more benign popular releases in training.
+* The classifier over-scores some popular packages: the `requests` 2.32.3 sdist scores
+  0.99. The established-package prior below lets it install. The fix is a retrain with more
+  benign popular releases, which this release does not include.
 * The established-package prior trades a model check for fewer false positives. A release
   of one of the 5,000 most popular names per registry, 30 days old or more, is allowed
   over the model. That is why `requests` 2.34.2 shows Allowed with a model risk of 89%. A
