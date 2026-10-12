@@ -151,3 +151,31 @@ def test_parity_streams_are_synthetic_and_cover_lengths():
     }
     assert all(t in allowed or t.startswith("unseen_") for s in streams for t in s)
     assert streams == cnn.parity_streams({"vocab": vocab, "max_len": 32}, n=25, seed=0)
+
+
+def _tiny():
+    docs = [["import", "x", "exec"], ["import", "x"]] * 10
+    cfg = cnn.Config(max_len=16, emb_dim=4, channels=4, hidden=4, kernels=(3,), min_df=1, epochs=1)
+    vocab = cnn.build_vocab(docs, cfg)
+    X = cnn.encode(docs, vocab, cfg.max_len)
+    y = np.array([1, 0] * 10)
+    return X, y, cfg, len(vocab)
+
+
+def test_train_with_no_epochs_does_not_crash():
+    import dataclasses
+
+    X, y, cfg, v = _tiny()
+    cfg = dataclasses.replace(cfg, epochs=0)
+    model, hist = cnn.train(X, y, np.ones(len(y)), X, y, v, cfg, log=lambda *_: None)
+    assert hist == [] and isinstance(model, cnn.CodeCNN)
+
+
+def test_train_with_no_val_positives_does_not_crash(monkeypatch):
+    import sklearn.metrics
+
+    X, y, cfg, v = _tiny()
+    # No validation positives: average precision is undefined (NaN with some sklearn versions).
+    monkeypatch.setattr(sklearn.metrics, "average_precision_score", lambda *a, **k: float("nan"))
+    model, hist = cnn.train(X, y, np.ones(len(y)), X, np.zeros(len(y)), v, cfg, log=lambda *_: None)
+    assert len(hist) == 1 and isinstance(model, cnn.CodeCNN)
