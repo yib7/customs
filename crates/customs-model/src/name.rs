@@ -757,10 +757,6 @@ impl NameModel {
         self.n_buckets
     }
 
-    pub fn max_distance(&self) -> u32 {
-        self.max_distance
-    }
-
     /// Sum of n-gram weights over the distinct buckets of a normalized name.
     pub fn ngram_logit(&self, eco: Ecosystem, normalized: &str) -> f64 {
         let Some(em) = self.ecosystem(eco) else {
