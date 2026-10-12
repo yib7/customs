@@ -461,7 +461,7 @@ export function nonexistentEvent(
   };
 }
 
-/** The verdict attached to the 404 for a name the registry does not know. */
+/** The verdict for a name the registry does not know (a 200 from POST /api/check). */
 export function nonexistentVerdict(pkg: { ecosystem: 'pypi' | 'npm'; name: string }, id: number): RawVerdict {
   const registry = pkg.ecosystem === 'pypi' ? 'PyPI' : 'npm';
   return base({
@@ -558,7 +558,7 @@ export const MODEL_INFO = {
   feature_schema_version: 1,
   thresholds: MODEL_THRESHOLDS,
   metrics: {
-    split: 'temporal',
+    split: 'temporal (test: malware found from 2026-02-13)',
     roc_auc: { value: 0.9912, ci_low: 0.9881, ci_high: 0.9938 },
     pr_auc: { value: 0.9618, ci_low: 0.9534, ci_high: 0.9689 },
     recall_at_fpr_0_001: { value: 0.874, ci_low: 0.851, ci_high: 0.896 },

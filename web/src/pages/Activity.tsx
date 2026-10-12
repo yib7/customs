@@ -262,7 +262,7 @@ export function ActivityPage() {
               <tbody>
                 {rows.map((e) => (
                   <tr key={e.id} className={`border-b border-line last:border-b-0 hover:bg-surface-2 ${liveIds.has(e.id) ? 'feed-new' : ''}`} data-testid="event-row">
-                    <td className="max-w-0 px-4 py-2.5 sm:px-5" style={{ width: '45%' }}>
+                    <td className="w-full max-w-0 px-4 py-2.5 sm:px-5 md:w-[45%]">
                       <div className="flex min-w-0 items-center gap-2">
                         <EcosystemBadge ecosystem={e.ecosystem} />
                         {e.verdict_id ? (
@@ -285,7 +285,7 @@ export function ActivityPage() {
                         {e.client ? ` \u00B7 ${safeLabel(e.client, 24)}` : ''}
                       </div>
                     </td>
-                    <td className="px-3 py-2.5">
+                    <td className="px-3 py-2.5 whitespace-nowrap">
                       <DecisionBadge decision={e.decision} kind={e.kind} size="sm" />
                     </td>
                     <td className="hidden px-3 py-2.5 text-right text-ink-2 tabular md:table-cell">

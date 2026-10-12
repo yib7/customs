@@ -74,7 +74,7 @@ export function installMocks(opts: { latencyMs?: number; autoEmitMs?: number; fr
     const isText = typeof res.body === 'string';
     return new Response(isText ? (res.body as string) : JSON.stringify(res.body), {
       status: res.status,
-      headers: { 'Content-Type': res.contentType ?? (isText ? 'text/plain' : 'application/json') },
+      headers: { 'Content-Type': res.contentType ?? (isText ? 'text/plain' : 'application/json'), ...res.headers },
     });
   };
 

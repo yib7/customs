@@ -1,6 +1,6 @@
 import { useRef, useState, type FormEvent } from 'react';
 import { Link, useSearchParams } from 'react-router';
-import { ApiError, api } from '../api/client';
+import { api } from '../api/client';
 import type { KnownEcosystem, Verdict } from '../api/types';
 import { IconGhost, IconSearch } from '../components/Icons';
 import { VerdictView } from '../components/VerdictView';
@@ -16,15 +16,12 @@ type Result =
   | { kind: 'error'; error: unknown };
 
 /**
- * A package the registry does not know. With `block_nonexistent` on the server says so with
- * `code`; with it off, the 404 message is "'x' does not exist on PyPI". Other 404s (a
- * missing version or file, "not found upstream") are ordinary errors.
+ * The server's reason when the registry does not know the name: the verdict's
+ * `block_nonexistent` hit (a block, or a warn with the rule off). Errors, including 404s for
+ * a missing version or file, are not this.
  */
-function isNonexistent(e: unknown): e is ApiError {
-  return (
-    e instanceof ApiError &&
-    (e.code === 'nonexistent_package' || (e.status === 404 && /does not exist/i.test(e.message)))
-  );
+function nonexistentReason(v: Verdict): string | null {
+  return v.policy_hits.find((h) => h.rule === 'block_nonexistent')?.detail ?? null;
 }
 
 /** What `CheckRequest.version` takes: an exact version, a range (`>=1,<2`, `^1.2`) or a dist-tag. */
@@ -69,11 +66,11 @@ export function CheckPage() {
     setResult(null);
     try {
       const verdict = await api.check({ ecosystem, name: spec.name, version: ver || null }, ctrl.signal);
-      setResult({ kind: 'verdict', verdict });
+      const missing = nonexistentReason(verdict);
+      setResult(missing === null ? { kind: 'verdict', verdict } : { kind: 'nonexistent', ecosystem, name: spec.name, message: missing });
     } catch (err) {
       if (err instanceof DOMException && err.name === 'AbortError') return;
-      if (isNonexistent(err)) setResult({ kind: 'nonexistent', ecosystem, name: spec.name, message: err.message });
-      else setResult({ kind: 'error', error: err });
+      setResult({ kind: 'error', error: err });
     } finally {
       if (ctrlRef.current === ctrl) setPending(false);
     }

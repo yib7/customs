@@ -78,16 +78,31 @@ describe('MockServer matches the server contract', () => {
     expect((server.policy.upstream as Record<string, string>).pypi_simple).toBe('https://ci:s3cret@mirror.example/simple');
   });
 
-  it('answers a nonexistent package with code and the verdict', () => {
-    const res = new MockServer(NOW).handle('POST', new URL('http://localhost/api/check'), {
+  it('answers a nonexistent package with a 200 verdict, as api.rs does', () => {
+    const server = new MockServer(NOW);
+    const res = server.handle('POST', new URL('http://localhost/api/check'), {
       ecosystem: 'pypi',
       name: 'huggingface-cli',
     });
-    expect(res.status).toBe(404);
-    expect(res.body).toMatchObject({
-      code: 'nonexistent_package',
-      verdict: { name: 'huggingface-cli', decision: 'block', policy_hits: [{ rule: 'block_nonexistent' }] },
-    });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ name: 'huggingface-cli', decision: 'block', policy_hits: [{ rule: 'block_nonexistent' }] });
+    // The verdict the event links to can be opened.
+    const id = (res.body as { id: number }).id;
+    expect(server.handle('GET', new URL(`http://localhost/api/verdicts/${id}`), null).status).toBe(200);
+  });
+
+  it('says who may change the policy, as GET /api/policy does', () => {
+    const server = new MockServer(NOW);
+    const changes = () => server.handle('GET', new URL('http://localhost/api/policy'), null).headers?.['X-Customs-Policy-Changes'];
+    expect(changes()).toBe('open');
+    server.adminToken = 'team-token-0123456789';
+    expect(changes()).toBe('token');
+    server.adminToken = null;
+    server.changesDisabled = true;
+    expect(changes()).toBe('disabled');
+    const put = server.handle('PUT', new URL('http://localhost/api/policy'), server.policy);
+    expect(put.status).toBe(403);
+    expect(put.body).toMatchObject({ code: 'policy_changes_disabled' });
   });
 
   it('records the client a check names, and "api" when it names none', () => {

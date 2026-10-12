@@ -10,6 +10,8 @@ const STROKE = 14;
 // Thin outer band showing the allow / warn / block zones.
 const BAND_R = R + STROKE / 2 + 7;
 const BAND_W = 5;
+// Room beside the arc for a threshold label near either end ("block 0.99").
+const PAD_X = 28;
 
 function point(p: number, r: number = R): [number, number] {
   const theta = Math.PI * (1 - Math.min(1, Math.max(0, p)));
@@ -53,7 +55,13 @@ export function RiskGauge({ risk, thresholds }: { risk: number | null; threshold
 
   return (
     <figure className="flex flex-col items-center" data-testid="risk-gauge">
-      <svg viewBox={`0 0 ${W} ${H}`} width="100%" style={{ maxWidth: 340 }} role="img" aria-label={label}>
+      <svg
+        viewBox={`${-PAD_X} 0 ${W + 2 * PAD_X} ${H}`}
+        width="100%"
+        style={{ maxWidth: Math.round((340 * (W + 2 * PAD_X)) / W) }}
+        role="img"
+        aria-label={label}
+      >
         <path d={arc(0, 1)} stroke="var(--c-surface-3)" strokeWidth={STROKE} fill="none" />
         <path d={arc(0, Math.max(0.002, risk))} stroke={zoneColor} strokeWidth={STROKE} fill="none" />
         {thresholds ? (

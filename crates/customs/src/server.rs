@@ -106,6 +106,17 @@ impl PolicyAuth {
         }
     }
 
+    /// Who may change the policy, as `GET /api/policy` reports it in
+    /// `X-Customs-Policy-Changes`: `open`, `token`, or `disabled`. The dashboard asks for
+    /// the token, or says changes are off, before anyone edits the form.
+    pub fn changes(&self) -> &'static str {
+        match self {
+            PolicyAuth::Open => "open",
+            PolicyAuth::Token(_) => "token",
+            PolicyAuth::Disabled => "disabled",
+        }
+    }
+
     /// `None` when `headers` may change the policy, else the refusal.
     pub fn refuse(
         &self,

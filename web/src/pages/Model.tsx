@@ -75,8 +75,20 @@ const STEPS: { title: string; body: string }[] = [
   },
 ];
 
+/**
+ * The split name and its detail from metrics.json's `split`, for example
+ * `temporal (test: malware found from 2026-02-13)` -> `temporal`, `malware found from 2026-02-13`.
+ */
+function splitInfo(split: string | null | undefined): { name: string; detail: string | null } | null {
+  const m = /^\s*([^()]+?)\s*(?:\((.*)\))?\s*$/.exec(split ?? '');
+  if (!m?.[1]) return null;
+  const detail = m[2]?.replace(/^\s*test:\s*/i, '').trim();
+  return { name: safeLabel(m[1], 30), detail: detail ? safeLabel(detail, 80) : null };
+}
+
 function ModelBody({ m }: { m: ModelInfo }) {
   const metrics = m.metrics;
+  const split = splitInfo(metrics?.split);
   // The model's own thresholds; the policy may override them (see the Policy page).
   const t = m.model_thresholds;
   return (
@@ -124,11 +136,13 @@ function ModelBody({ m }: { m: ModelInfo }) {
       {metrics ? (
         <section aria-labelledby="metrics-heading">
           <h2 id="metrics-heading" className="mb-1 text-sm font-semibold text-ink">
-            Held-out evaluation{metrics.split ? ` (${safeLabel(metrics.split, 30)} split)` : ''}
+            Held-out evaluation{split ? ` (${split.name} split)` : ''}
           </h2>
           <p className="mb-3 text-xs text-muted">
-            {metrics.split === 'temporal'
-              ? 'Trained on packages first seen before a cutoff date and tested on packages seen after it, so these numbers reflect malware the model had never seen.'
+            {split?.name === 'temporal'
+              ? `Trained on packages first seen before a cutoff date and tested on packages seen after it, so these numbers reflect malware the model had never seen.${
+                  split.detail ? ` Test set: ${split.detail}.` : ''
+                }`
               : 'Measured on packages held out from training, grouped so no malware campaign appears in both sets.'}
           </p>
           <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">

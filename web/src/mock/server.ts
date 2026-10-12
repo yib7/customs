@@ -29,6 +29,7 @@ export interface MockResponse {
   status: number;
   body: unknown;
   contentType?: string;
+  headers?: Record<string, string>;
 }
 
 type Listener = (e: RawEvent) => void;
@@ -92,6 +93,8 @@ export class MockServer {
   policy: Record<string, unknown> = structuredClone(INITIAL_POLICY);
   /** When set, PUT /api/policy needs `Authorization: Bearer <adminToken>`, as with CUSTOMS_ADMIN_TOKEN. */
   adminToken: string | null = null;
+  /** A network-facing server without a token: PUT /api/policy is refused with 403. */
+  changesDisabled = false;
   /** Newest last, as GET /api/policy/changes reports them (newest first). */
   policyChanges: PolicyChange[] = [];
   private nextId: number;
@@ -168,12 +171,22 @@ export class MockServer {
       return v ? json(200, v) : json(404, { error: `no verdict with id ${id}` });
     }
     if (method === 'GET' && path === '/api/stats') return json(200, this.stats());
-    if (method === 'GET' && path === '/api/policy') return json(200, redactedPolicy(this.policy));
+    if (method === 'GET' && path === '/api/policy') {
+      const changes = this.adminToken !== null ? 'token' : this.changesDisabled ? 'disabled' : 'open';
+      return { ...json(200, redactedPolicy(this.policy)), headers: { 'X-Customs-Policy-Changes': changes } };
+    }
     if (method === 'GET' && path === '/api/policy/changes') {
       const limit = Math.min(500, Math.max(1, Number(url.searchParams.get('limit') ?? 50) || 50));
       return json(200, { changes: this.policyChanges.slice(-limit).reverse() });
     }
     if (method === 'PUT' && path === '/api/policy') {
+      if (this.adminToken === null && this.changesDisabled) {
+        return json(403, {
+          error:
+            'policy changes over the API are off on a server reachable from the network; start it with CUSTOMS_ADMIN_TOKEN (or --admin-token-file) to allow them with that token, or edit the policy file and restart',
+          code: 'policy_changes_disabled',
+        });
+      }
       if (this.adminToken !== null) {
         const auth = headers.get('Authorization');
         if (!auth) return json(401, { error: 'changing the policy needs the admin token (Authorization: Bearer <token>)', code: 'admin_token_required' });
@@ -418,12 +431,11 @@ export class MockServer {
     const missing =
       NONEXISTENT.some((n) => n.ecosystem === eco && n.name === name) || /(-pro|-utils-ai|hallucinated)$/.test(name);
     if (missing) {
-      this.record(strip(nonexistentEvent({ ecosystem: eco, name }, 0, new Date(), client)));
-      return json(404, {
-        error: `'${name}' does not exist on ${eco === 'pypi' ? 'PyPI' : 'npm'}`,
-        code: 'nonexistent_package',
-        verdict: nonexistentVerdict({ ecosystem: eco, name }, this.nextVerdictId++),
-      });
+      // A verdict like any other: the block_nonexistent hit says why (api.rs `check`).
+      const verdict = nonexistentVerdict({ ecosystem: eco, name }, this.nextVerdictId++);
+      this.verdicts.set(verdict.id, verdict);
+      this.record({ ...strip(nonexistentEvent({ ecosystem: eco, name }, 0, new Date(), client)), verdict_id: verdict.id });
+      return json(200, verdict);
     }
     // Unknown but plausible package: synthesize a clean verdict.
     const r = mulberry32(name.length * 7919 + name.charCodeAt(0));

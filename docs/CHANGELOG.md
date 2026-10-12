@@ -36,6 +36,12 @@ First public release. Not tagged yet.
 - `POST /api/check` reads both the sdist and the pure-Python wheel and returns the
   stricter verdict, dates each archive by its own upload time, and always reads sdists
   and npm tarballs whatever size the registry reports.
+- `POST /api/check` answers a name the registry does not know with a 200 verdict (its
+  `block_nonexistent` hit says why) instead of a 404 wrapping the verdict, so the
+  dashboard's most common block no longer logs a failed request in the browser console.
+- `GET /api/policy` reports who may change the policy (`X-Customs-Policy-Changes`:
+  `open`, `token` or `disabled`). The dashboard asks for the admin token before saving,
+  and says when changes are off, instead of learning it from a refused save.
 - `PUT /api/policy` refuses a body that leaves keys out, listing each one, instead of
   resetting them to defaults.
 - The scan cache is keyed on the scanner and summary versions; results from earlier

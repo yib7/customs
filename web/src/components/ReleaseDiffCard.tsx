@@ -168,7 +168,7 @@ export function ReleaseDiffCard({ verdict }: { verdict: Verdict }) {
         <label className="flex min-w-0 flex-col gap-1 text-xs text-ink-2">
           Earlier version
           <input
-            className={`${fieldCls} w-44 font-mono`}
+            className={`${fieldCls} w-56 font-mono`}
             value={from}
             onChange={(e) => setFrom(e.target.value)}
             placeholder="the previous release"

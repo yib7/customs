@@ -813,10 +813,10 @@ proxies `/api` with the browser's `Host`, so its dashboard is same-origin as wel
   64 MiB check limit is not scored by the models (judged on metadata and policy rules only), with a `warn` `not_scanned` hit;
   an sdist or npm tarball is always downloaded (up to the 2 GiB download limit) and read
   like the proxy reads it, since its install-time code runs (npm's `unpackedSize` is
-  written by the publisher and is not trusted). Errors: 400 bad input, 404
-  `{ "error", "code": "nonexistent_package", "verdict": {...} }` when the registry does not
-  know the name (the verdict carries the `block_nonexistent` decision), 422 no matching
-  version, 502 upstream failure; all as `{ "error": "..." }`. Optional `"resolve"`:
+  written by the publisher and is not trusted). A name the registry does not know is
+  still a 200 verdict: the check ran, and its `block_nonexistent` hit (block, or warn with
+  the rule off) says why. Errors: 400 bad input, 422 no matching version, 502 upstream
+  failure; all as `{ "error": "..." }`. Optional `"resolve"`:
   `"served"` (default) resolves against the versions the proxy serves, `"upstream"`
   against all of them (see "Resolving past young releases").
 - `GET /api/events?limit=&before=&decision=&ecosystem=&kind=&q=`: a JSON array of events,
@@ -835,7 +835,10 @@ proxies `/api` with the browser's `Host`, so its dashboard is same-origin as wel
   day of the window, zeros included; `top_reasons` counts policy rules and the top model
   reasons of warn and block verdicts.
 - `GET /api/policy`, `PUT /api/policy`: the active policy as JSON with the `customs.toml`
-  keys (thresholds are `"model"` or a number). `PUT` switches enforcement off when asked,
+  keys (thresholds are `"model"` or a number). `GET` says who may change it in the
+  `X-Customs-Policy-Changes` header: `open`, `token` (a `PUT` needs the admin token), or
+  `disabled` (a network-facing server without a token), so the dashboard asks for the
+  token, or says changes are off, before anyone edits the form. `PUT` switches enforcement off when asked,
   so it is accepted only with a `Host` that DNS rebinding cannot produce: an IP address,
   `localhost` or `*.localhost`, or a name in `--allowed-hosts`/`CUSTOMS_ALLOWED_HOSTS` (comma-separated;
   set it for a team server reached by name). A page that resolves its own host name to

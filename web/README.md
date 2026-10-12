@@ -51,6 +51,7 @@ DESIGN.md defines the Verdict, Event, and Policy shapes; the parsers in `src/api
 - `GET /api/policy` and `PUT /api/policy`: the `customs.toml` keys as JSON, with thresholds as `"model"` or a number. The PUT body is the full policy (unknown fields received from the server are sent back unchanged). Validation errors: status 400 or 422 with `{ error, errors: [{field, message}] }`.
 - `GET /api/events`: `before` is an event id (cursor). The client also sends `decision`, `ecosystem`, `kind`, and `q` and filters again on the client in case the server ignores them. Event ids may be numbers or strings; `ts` may be ISO 8601 or unix seconds.
 - `GET /api/verdicts/{id}` may include `id`. Verdicts may include `thresholds`; otherwise the gauge uses numeric policy thresholds, falling back to the model's.
-- `POST /api/check` for a name the registry does not know: status 404 with `{ error, code: "nonexistent_package" }`.
+- `POST /api/check` for a name the registry does not know: a 200 verdict with a `block_nonexistent` policy hit, which the Check page shows as "does not exist".
+- `GET /api/policy` sends `X-Customs-Policy-Changes: open | token | disabled`; the Policy page asks for the admin token up front for `token` and turns saving off for `disabled`. Without the header it behaves as `open` and learns from a 401 or 403.
 - The server answers unknown non-API paths with `index.html` so client-side routes such as `/verdicts/:id` load directly.
 - The CLI accepts `customs check ecosystem:name@version`, which the "How to proceed" box offers to copy.

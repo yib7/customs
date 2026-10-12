@@ -25,7 +25,7 @@ use crate::engine::EngineError;
 use crate::policy_log::{describe, PolicyChange};
 use crate::server::AppState;
 use crate::store::EventFilter;
-use crate::util::{parse_ecosystem, redact_urls, registry_name};
+use crate::util::{parse_ecosystem, redact_urls};
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -115,17 +115,8 @@ async fn check(
         .check_resolving(eco, name, req.version.as_deref(), client, as_served)
         .await
     {
-        // A name the registry does not know is a 404, with the verdict attached so the hook
-        // and CLI can show the policy decision and the nearest popular name.
-        Ok(v) if v.policy_hits.iter().any(|h| h.rule == "block_nonexistent") => (
-            StatusCode::NOT_FOUND,
-            Json(json!({
-                "error": format!("'{}' does not exist on {}", v.name, registry_name(v.ecosystem)),
-                "code": "nonexistent_package",
-                "verdict": v,
-            })),
-        )
-            .into_response(),
+        // A name the registry does not know is a verdict like any other: the check ran, and
+        // its `block_nonexistent` hit (a block, or a warn with the rule off) says why.
         Ok(v) => Json(v).into_response(),
         Err(e) => engine_error(e),
     }
@@ -271,7 +262,11 @@ async fn stats(
 }
 
 async fn get_policy(State(state): State<AppState>) -> Response {
-    Json(state.engine.policy().redacted()).into_response()
+    (
+        [("x-customs-policy-changes", state.policy_auth.changes())],
+        Json(state.engine.policy().redacted()),
+    )
+        .into_response()
 }
 
 async fn put_policy(

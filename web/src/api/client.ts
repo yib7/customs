@@ -95,7 +95,7 @@ async function readBody(res: Response): Promise<unknown> {
   return text;
 }
 
-async function request<T>(path: string, parse: (v: unknown) => T, init: RequestInit = {}): Promise<T> {
+async function request<T>(path: string, parse: (v: unknown, res: Response) => T, init: RequestInit = {}): Promise<T> {
   let res: Response;
   try {
     res = await fetch(path, {
@@ -115,7 +115,19 @@ async function request<T>(path: string, parse: (v: unknown) => T, init: RequestI
   // Every endpoint answers JSON. Anything else (an HTML page from a proxy, plain text) would
   // otherwise parse into a set of defaults that look like real data.
   if (typeof body !== 'object' || body === null) throw new ParseError(`expected JSON from ${path}`);
-  return parse(body);
+  return parse(body, res);
+}
+
+/**
+ * Who may change the policy, from `GET /api/policy`'s `X-Customs-Policy-Changes`: anyone
+ * (`open`), the admin token holder (`token`), or nobody over the API (`disabled`). `null`
+ * when the server does not say; the page then learns it from a refused save.
+ */
+export type PolicyChanges = 'open' | 'token' | 'disabled';
+
+function policyChanges(res: Response): PolicyChanges | null {
+  const v = res.headers.get('X-Customs-Policy-Changes')?.trim().toLowerCase();
+  return v === 'open' || v === 'token' || v === 'disabled' ? v : null;
 }
 
 function eventsPath(q: EventQuery = {}): string {
@@ -154,11 +166,16 @@ export const api = {
       ...(adminToken ? { headers: { Authorization: `Bearer ${adminToken}` } } : {}),
     });
   },
-  /** Fetches the policy along with the raw body (used as the merge base when saving). */
-  async policyWithRaw(signal?: AbortSignal): Promise<{ policy: Policy; raw: Record<string, unknown> }> {
+  /**
+   * Fetches the policy along with the raw body (used as the merge base when saving) and who
+   * may change it.
+   */
+  async policyWithRaw(
+    signal?: AbortSignal,
+  ): Promise<{ policy: Policy; raw: Record<string, unknown>; changes: PolicyChanges | null }> {
     return request(
       '/api/policy',
-      (v) => ({ policy: parsePolicy(v), raw: isRecord(v) ? v : {} }),
+      (v, res) => ({ policy: parsePolicy(v), raw: isRecord(v) ? v : {}, changes: policyChanges(res) }),
       { signal },
     );
   },

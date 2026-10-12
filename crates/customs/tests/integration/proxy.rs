@@ -534,15 +534,21 @@ async fn nonexistent_packages() {
     assert_eq!(ev[0]["kind"], "nonexistent_package");
     assert_eq!(ev[0]["decision"], "block");
 
+    // The check ran and decided, so it answers 200 with the verdict like any other check;
+    // the block_nonexistent hit says why.
     let (status, body) = h.check("pypi", "nope-not-here", None).await;
-    assert_eq!(status, 404);
-    assert_eq!(body["code"], "nonexistent_package");
-    assert!(body["error"]
+    assert_eq!(status, 200);
+    assert_eq!(body["decision"], "block");
+    assert!(body["id"].is_i64());
+    let hits = body["policy_hits"].as_array().unwrap();
+    let hit = hits
+        .iter()
+        .find(|h| h["rule"] == "block_nonexistent")
+        .unwrap();
+    assert!(hit["detail"]
         .as_str()
         .unwrap()
         .contains("does not exist on PyPI"));
-    assert_eq!(body["verdict"]["decision"], "block");
-    assert!(body["verdict"]["id"].is_i64());
     h.stop().await;
 }
 

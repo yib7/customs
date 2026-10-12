@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
-import { ApiError, api } from '../api/client';
+import { ApiError, api, type PolicyChanges } from '../api/client';
 import type { HistoryRule, ModelInfo, Policy, RuleSeverity } from '../api/types';
 import { ChipInput } from '../components/ChipInput';
 import { IconCheck } from '../components/Icons';
@@ -124,16 +124,19 @@ function SeverityField({
   onChange: (v: RuleSeverity) => void;
 }) {
   return (
-    <div className="flex items-start justify-between gap-4 py-3">
-      <span className="min-w-0">
-        <label htmlFor={id} className="block text-sm font-medium text-ink">
-          {label}
-        </label>
-        <span className="block text-xs text-muted">{description}</span>
+    // On a phone the description runs under both the label and the select instead of down
+    // a narrow column beside it; from sm up the select sits to the right of both.
+    <div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-x-4 gap-y-1 py-3">
+      <label htmlFor={id} className="self-center text-sm font-medium text-ink sm:self-start">
+        {label}
+      </label>
+      <span id={`${id}-desc`} className="col-span-2 text-xs text-muted sm:col-span-1">
+        {description}
       </span>
       <select
         id={id}
-        className={`${fieldCls} w-28 shrink-0 pr-8`}
+        aria-describedby={`${id}-desc`}
+        className={`${fieldCls} col-start-2 row-start-1 w-28 pr-8 sm:row-end-3`}
         value={value}
         onChange={(e) => {
           const v = e.target.value;
@@ -226,12 +229,15 @@ function ThresholdField({
 function PolicyForm({
   policy,
   raw,
+  changes,
   model,
   initiallySaved,
   onSaved,
 }: {
   policy: Policy;
   raw: Record<string, unknown>;
+  /** Who may change the policy, as GET /api/policy reported it (`null`: not reported). */
+  changes: PolicyChanges | null;
   model: ModelInfo | null;
   initiallySaved: boolean;
   onSaved: (p: Policy, raw: Record<string, unknown>) => void;
@@ -244,9 +250,12 @@ function PolicyForm({
   const [serverMessage, setServerMessage] = useState<string | null>(null);
   const [saved, setSaved] = useState(initiallySaved);
   const [adminToken, setAdminToken] = useState(readAdminToken);
-  const [needToken, setNeedToken] = useState(false);
+  const [needToken, setNeedToken] = useState(changes === 'token');
+  const [tokenError, setTokenError] = useState<string | null>(null);
   const [refused, setRefused] = useState(false);
   const statusRef = useRef<HTMLDivElement>(null);
+  const tokenRef = useRef<HTMLInputElement>(null);
+  const changesOff = changes === 'disabled';
 
   const { errors: clientErrors, policy: valid } = validateDraft(draft);
   const dirty = JSON.stringify(draft) !== JSON.stringify(initial);
@@ -290,6 +299,13 @@ function PolicyForm({
       });
       return;
     }
+    // The server said a token is needed: ask for it here rather than send a request it refuses.
+    if (needToken && !adminToken.trim()) {
+      setTokenError('Enter the admin token to save.');
+      requestAnimationFrame(() => tokenRef.current?.focus());
+      return;
+    }
+    setTokenError(null);
     setSaving(true);
     try {
       const next = await api.savePolicy({ ...valid, upstream: policy.upstream }, raw, adminToken.trim() || undefined);
@@ -345,311 +361,326 @@ function PolicyForm({
         ) : null}
       </div>
 
-      <Card id="mode" title="Mode">
-        <fieldset>
-          <legend className="sr-only">Enforcement mode</legend>
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-            {(
-              [
-                ['enforce', 'Enforce', 'Blocked packages are refused. Warned packages are allowed, and agents are asked to confirm.'],
-                ['monitor', 'Monitor', 'Every verdict is recorded but nothing is refused. Useful while tuning thresholds.'],
-              ] as const
-            ).map(([value, title, desc]) => (
-              <label
-                key={value}
-                className={`flex cursor-pointer gap-3 rounded-lg border p-3 has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-focus ${
-                  draft.mode === value ? 'border-accent bg-accent-soft' : 'border-line-strong hover:bg-surface-2'
-                }`}
-              >
-                <input
-                  type="radio"
-                  name="mode"
-                  value={value}
-                  checked={draft.mode === value}
-                  onChange={() => set('mode', value, 'mode')}
-                  className="mt-1 accent-[var(--c-accent)]"
-                />
-                <span>
-                  <span className="block text-sm font-medium text-ink">{title}</span>
-                  <span className="block text-xs text-ink-2">{desc}</span>
-                </span>
+      {changesOff ? (
+        <div role="note" className="rounded-lg border border-line-strong bg-surface-2 px-4 py-3 text-sm" data-testid="policy-changes-disabled">
+          <p className="font-medium text-ink">Policy changes are off on this server</p>
+          <p className="mt-0.5 text-ink-2">
+            It is reachable from the network and was started without an admin token, so nobody can change the policy from
+            here. Restart it with <code className="font-mono">CUSTOMS_ADMIN_TOKEN</code> (or{' '}
+            <code className="font-mono">--admin-token-file</code>) to allow changes with that token, or edit the policy
+            file and restart.
+          </p>
+        </div>
+      ) : null}
+
+      <fieldset disabled={changesOff} className="flex min-w-0 flex-col gap-4">
+        <Card id="mode" title="Mode">
+          <fieldset>
+            <legend className="sr-only">Enforcement mode</legend>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              {(
+                [
+                  ['enforce', 'Enforce', 'Blocked packages are refused. Warned packages are allowed, and agents are asked to confirm.'],
+                  ['monitor', 'Monitor', 'Every verdict is recorded but nothing is refused. Useful while tuning thresholds.'],
+                ] as const
+              ).map(([value, title, desc]) => (
+                <label
+                  key={value}
+                  className={`flex cursor-pointer gap-3 rounded-lg border p-3 has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-focus ${
+                    draft.mode === value ? 'border-accent bg-accent-soft' : 'border-line-strong hover:bg-surface-2'
+                  }`}
+                >
+                  <input
+                    type="radio"
+                    name="mode"
+                    value={value}
+                    checked={draft.mode === value}
+                    onChange={() => set('mode', value, 'mode')}
+                    className="mt-1 accent-[var(--c-accent)]"
+                  />
+                  <span>
+                    <span className="block text-sm font-medium text-ink">{title}</span>
+                    <span className="block text-xs text-ink-2">{desc}</span>
+                  </span>
+                </label>
+              ))}
+            </div>
+            <FieldError id="mode-error">{errors.mode}</FieldError>
+          </fieldset>
+        </Card>
+
+        <Card id="thresholds" title="Risk thresholds" description="Probabilities from the calibrated model. Packages at or above a threshold are warned or blocked.">
+          <div className="grid grid-cols-1 gap-6 sm:grid-cols-2">
+            <ThresholdField
+              name="warn"
+              label="Warn threshold"
+              modelValue={modelT?.warn ?? null}
+              useModel={draft.warnModel}
+              value={draft.warnValue}
+              onUseModel={(v) => set('warnModel', v, 'warn_threshold')}
+              onValue={(v) => set('warnValue', v, 'warn_threshold')}
+              error={errors.warn_threshold}
+            />
+            <ThresholdField
+              name="block"
+              label="Block threshold"
+              modelValue={modelT?.block ?? null}
+              useModel={draft.blockModel}
+              value={draft.blockValue}
+              onUseModel={(v) => set('blockModel', v, 'block_threshold')}
+              onValue={(v) => set('blockValue', v, 'block_threshold')}
+              error={errors.block_threshold}
+            />
+          </div>
+          {modelT?.target_fpr_block ? (
+            <p className="mt-3 text-xs text-muted">
+              The model's block threshold was chosen for a {(modelT.target_fpr_block * 100).toFixed(1)}% false positive rate on validation data.
+            </p>
+          ) : null}
+        </Card>
+
+        <Card id="registry-rules" title="Registry rules" description="Signals from registry metadata, applied before the model runs">
+          <div className="max-w-xs">
+            <label htmlFor="min-age" className="text-sm font-medium text-ink">
+              Minimum age (days)
+            </label>
+            <p className="text-xs text-muted">Block versions published more recently than this. 0 disables the rule.</p>
+            <input
+              id="min-age"
+              type="text"
+              inputMode="numeric"
+              className={`${fieldCls} mt-2 w-28 font-mono`}
+              value={draft.minAgeDays}
+              onChange={(e) => set('minAgeDays', e.target.value, 'min_age_days')}
+              aria-invalid={errors.min_age_days ? true : undefined}
+              aria-describedby={errors.min_age_days ? 'min-age-error' : undefined}
+            />
+            <FieldError id="min-age-error">{errors.min_age_days}</FieldError>
+          </div>
+          <div className="mt-3 divide-y divide-line border-t border-line">
+            <Switch
+              checked={draft.min_age_severity === 'block'}
+              onChange={(v) => set('min_age_severity', v ? 'block' : 'warn')}
+              label="Block versions younger than the minimum age"
+              description="Off: such versions are only warned about, and install scripts in them are still blocked if the next switch is on."
+            />
+            <Switch
+              checked={draft.hide_young_versions}
+              onChange={(v) => set('hide_young_versions', v)}
+              label="Resolve installs to versions old enough"
+              description="Hold blocked young versions back in the package lists the proxy serves (marked yanked on PyPI, left out on npm), so an install without a pinned version gets the newest version past the minimum age instead of failing. A pinned young version is still blocked."
+            />
+            <Switch
+              checked={draft.block_nonexistent}
+              onChange={(v) => set('block_nonexistent', v)}
+              label="Block nonexistent packages"
+              description="Deny agent installs of names the registry does not know. These are often hallucinated names (slopsquatting)."
+            />
+            <Switch
+              checked={draft.block_install_scripts_from_new}
+              onChange={(v) => set('block_install_scripts_from_new', v)}
+              label="Block install scripts from new packages"
+              description="Refuse npm packages with install scripts when they are younger than the minimum age."
+            />
+          </div>
+        </Card>
+
+        <Card
+          id="established"
+          title="Established packages"
+          description="A release of a top package that has been on the registry for weeks is allowed whatever the model scores it. The model still runs and its scores show in the verdict; the deny list and every other rule still apply."
+        >
+          <div className="divide-y divide-line">
+            <Switch
+              checked={draft.establishedEnabled}
+              onChange={(v) => set('establishedEnabled', v)}
+              label="Trust established releases of popular packages"
+              description="Hijacked releases are usually found and pulled within days, so the age below is the defence: a new release of a popular package still gets the model's verdict. Off: the model decides for every package."
+            />
+          </div>
+          <div className="mt-3 grid max-w-xl grid-cols-1 gap-4 border-t border-line pt-3 sm:grid-cols-2">
+            <div>
+              <label htmlFor="established-top" className="text-sm font-medium text-ink">
+                Popular packages counted
               </label>
+              <p className="text-xs text-muted">The most downloaded names of each registry; the lists hold 5,000.</p>
+              <input
+                id="established-top"
+                type="text"
+                inputMode="numeric"
+                className={`${fieldCls} mt-2 w-28 font-mono`}
+                value={draft.establishedTop}
+                onChange={(e) => set('establishedTop', e.target.value, 'established.top')}
+                aria-invalid={errors['established.top'] ? true : undefined}
+                aria-describedby={errors['established.top'] ? 'established-top-error' : undefined}
+              />
+              <FieldError id="established-top-error">{errors['established.top']}</FieldError>
+            </div>
+            <div>
+              <label htmlFor="established-age" className="text-sm font-medium text-ink">
+                Release age (days)
+              </label>
+              <p className="text-xs text-muted">Only releases published at least this long ago count.</p>
+              <input
+                id="established-age"
+                type="text"
+                inputMode="numeric"
+                className={`${fieldCls} mt-2 w-28 font-mono`}
+                value={draft.establishedMinAgeDays}
+                onChange={(e) => set('establishedMinAgeDays', e.target.value, 'established.min_age_days')}
+                aria-invalid={errors['established.min_age_days'] ? true : undefined}
+                aria-describedby={errors['established.min_age_days'] ? 'established-age-error' : undefined}
+              />
+              <FieldError id="established-age-error">{errors['established.min_age_days']}</FieldError>
+            </div>
+          </div>
+        </Card>
+
+        <Card id="scan-coverage" title="Scanner rules" description="Package contents that decide the verdict on their own, whatever the model says">
+          <SeverityField
+            id="rule-startup_hook"
+            label="Startup hook in a .pth file"
+            description="The package installs a .pth file that launches a process, opens a connection, downloads, or reads secrets. Python runs .pth import lines at every interpreter start, so the code runs in every later Python process, not only at install. No benign package in the training corpus has one, so it blocks by default."
+            value={draft.startup_hook}
+            onChange={(v) => set('startup_hook', v)}
+          />
+          <div className="border-t border-line">
+            <SeverityField
+              id="rule-agent_bypass"
+              label="AI coding agent run with its checks off at install"
+              description="Code that runs during install passes a flag such as --dangerously-skip-permissions, --yolo or --trust-all-tools to an AI coding CLI, so the agent on this machine follows the package's prompt without asking. The s1ngularity compromise of Nx did this to have developers' own agents search their disks for secrets. Packages that drive an agent when you run them are not affected: only install-time code counts."
+              value={draft.agent_bypass}
+              onChange={(v) => set('agent_bypass', v)}
+            />
+          </div>
+          <div className="border-t border-line">
+            <SeverityField
+              id="rule-unread_code"
+              label="Code the scanner could not read"
+              description="The package ships code the scanner could not read: a code file or manifest over the 32 MiB per-file limit, an encrypted entry or one with an unsupported compression method, or an install hook in an archive above the scan size limit. It also covers code pip or npm would install differently from what the scanner read: a path stored twice, a link or sparse entry at an install-time path, or a coding cookie that makes Python run other text. The installer still runs it, and hiding a payload this way keeps it from every rule and the model. No benign package in the training corpus has any, so it blocks by default."
+              value={draft.unread_code}
+              onChange={(v) => set('unread_code', v)}
+            />
+          </div>
+          <div className="border-t border-line">
+            <SeverityField
+              id="rule-hidden_code"
+              label="Code the interpreter reads differently from the scanner"
+              description="Install-time Python or JavaScript that Python or Node runs but the scanner's lexers read another way: code after a bare carriage return, inside an f-string field, or after a byte-order mark the scanner keeps and Python drops. The scanner reads such a file a second time the way the interpreter does and lists what launches, connects, downloads or reads secrets only in that reading. The model's inputs stay as they were, so the rule decides on its own; it blocks by default."
+              value={draft.hidden_code}
+              onChange={(v) => set('hidden_code', v)}
+            />
+          </div>
+          <div className="border-t border-line">
+            <SeverityField
+              id="rule-scan_error"
+              label="Archive could not be scanned"
+              description="The scanner rejected the archive: over 20,000 files or 256 MiB unpacked, an archive bomb, or a corrupt or unknown format. Making a package unscannable is cheap for an attacker, and no benign package in the training corpus is, so it blocks by default."
+              value={draft.scan_error}
+              onChange={(v) => set('scan_error', v)}
+            />
+          </div>
+        </Card>
+
+        <Card
+          id="release-history"
+          title="Release history"
+          description="Compare a version with the releases before it to catch compromised releases of established packages. These heuristics also fire on legitimate changes (new CI, new maintainers), so most warn by default and the model still judges the code. An added install script is rare in legitimate releases and blocks."
+        >
+          <div className="divide-y divide-line">
+            {HISTORY_RULES.map((rule) => (
+              <SeverityField
+                key={rule}
+                id={`rule-${rule}`}
+                label={HISTORY_RULE_TEXT[rule].label}
+                description={HISTORY_RULE_TEXT[rule].description}
+                value={draft.history[rule]}
+                onChange={(v) => set('history', { ...draft.history, [rule]: v })}
+              />
             ))}
           </div>
-          <FieldError id="mode-error">{errors.mode}</FieldError>
-        </fieldset>
-      </Card>
-
-      <Card id="thresholds" title="Risk thresholds" description="Probabilities from the calibrated model. Packages at or above a threshold are warned or blocked.">
-        <div className="grid grid-cols-1 gap-6 sm:grid-cols-2">
-          <ThresholdField
-            name="warn"
-            label="Warn threshold"
-            modelValue={modelT?.warn ?? null}
-            useModel={draft.warnModel}
-            value={draft.warnValue}
-            onUseModel={(v) => set('warnModel', v, 'warn_threshold')}
-            onValue={(v) => set('warnValue', v, 'warn_threshold')}
-            error={errors.warn_threshold}
-          />
-          <ThresholdField
-            name="block"
-            label="Block threshold"
-            modelValue={modelT?.block ?? null}
-            useModel={draft.blockModel}
-            value={draft.blockValue}
-            onUseModel={(v) => set('blockModel', v, 'block_threshold')}
-            onValue={(v) => set('blockValue', v, 'block_threshold')}
-            error={errors.block_threshold}
-          />
-        </div>
-        {modelT?.target_fpr_block ? (
-          <p className="mt-3 text-xs text-muted">
-            The model's block threshold was chosen for a {(modelT.target_fpr_block * 100).toFixed(1)}% false positive rate on validation data.
-          </p>
-        ) : null}
-      </Card>
-
-      <Card id="registry-rules" title="Registry rules" description="Signals from registry metadata, applied before the model runs">
-        <div className="max-w-xs">
-          <label htmlFor="min-age" className="text-sm font-medium text-ink">
-            Minimum age (days)
-          </label>
-          <p className="text-xs text-muted">Block versions published more recently than this. 0 disables the rule.</p>
-          <input
-            id="min-age"
-            type="text"
-            inputMode="numeric"
-            className={`${fieldCls} mt-2 w-28 font-mono`}
-            value={draft.minAgeDays}
-            onChange={(e) => set('minAgeDays', e.target.value, 'min_age_days')}
-            aria-invalid={errors.min_age_days ? true : undefined}
-            aria-describedby={errors.min_age_days ? 'min-age-error' : undefined}
-          />
-          <FieldError id="min-age-error">{errors.min_age_days}</FieldError>
-        </div>
-        <div className="mt-3 divide-y divide-line border-t border-line">
-          <Switch
-            checked={draft.min_age_severity === 'block'}
-            onChange={(v) => set('min_age_severity', v ? 'block' : 'warn')}
-            label="Block versions younger than the minimum age"
-            description="Off: such versions are only warned about, and install scripts in them are still blocked if the next switch is on."
-          />
-          <Switch
-            checked={draft.hide_young_versions}
-            onChange={(v) => set('hide_young_versions', v)}
-            label="Resolve installs to versions old enough"
-            description="Hold blocked young versions back in the package lists the proxy serves (marked yanked on PyPI, left out on npm), so an install without a pinned version gets the newest version past the minimum age instead of failing. A pinned young version is still blocked."
-          />
-          <Switch
-            checked={draft.block_nonexistent}
-            onChange={(v) => set('block_nonexistent', v)}
-            label="Block nonexistent packages"
-            description="Deny agent installs of names the registry does not know. These are often hallucinated names (slopsquatting)."
-          />
-          <Switch
-            checked={draft.block_install_scripts_from_new}
-            onChange={(v) => set('block_install_scripts_from_new', v)}
-            label="Block install scripts from new packages"
-            description="Refuse npm packages with install scripts when they are younger than the minimum age."
-          />
-        </div>
-      </Card>
-
-      <Card
-        id="established"
-        title="Established packages"
-        description="A release of a top package that has been on the registry for weeks is allowed whatever the model scores it. The model still runs and its scores show in the verdict; the deny list and every other rule still apply."
-      >
-        <div className="divide-y divide-line">
-          <Switch
-            checked={draft.establishedEnabled}
-            onChange={(v) => set('establishedEnabled', v)}
-            label="Trust established releases of popular packages"
-            description="Hijacked releases are usually found and pulled within days, so the age below is the defence: a new release of a popular package still gets the model's verdict. Off: the model decides for every package."
-          />
-        </div>
-        <div className="mt-3 grid max-w-xl grid-cols-1 gap-4 border-t border-line pt-3 sm:grid-cols-2">
-          <div>
-            <label htmlFor="established-top" className="text-sm font-medium text-ink">
-              Popular packages counted
+          <div className="mt-3 max-w-xs border-t border-line pt-3">
+            <label htmlFor="dormant-days" className="text-sm font-medium text-ink">
+              Dormancy period (days)
             </label>
-            <p className="text-xs text-muted">The most downloaded names of each registry; the lists hold 5,000.</p>
+            <p className="text-xs text-muted">A release this long after the previous one counts as a revival.</p>
             <input
-              id="established-top"
+              id="dormant-days"
               type="text"
               inputMode="numeric"
               className={`${fieldCls} mt-2 w-28 font-mono`}
-              value={draft.establishedTop}
-              onChange={(e) => set('establishedTop', e.target.value, 'established.top')}
-              aria-invalid={errors['established.top'] ? true : undefined}
-              aria-describedby={errors['established.top'] ? 'established-top-error' : undefined}
+              value={draft.dormantDays}
+              onChange={(e) => set('dormantDays', e.target.value, 'dormant_days')}
+              aria-invalid={errors.dormant_days ? true : undefined}
+              aria-describedby={errors.dormant_days ? 'dormant-days-error' : undefined}
             />
-            <FieldError id="established-top-error">{errors['established.top']}</FieldError>
+            <FieldError id="dormant-days-error">{errors.dormant_days}</FieldError>
           </div>
-          <div>
-            <label htmlFor="established-age" className="text-sm font-medium text-ink">
-              Release age (days)
+          <div className="mt-3 max-w-xs border-t border-line pt-3">
+            <label htmlFor="history-window-days" className="text-sm font-medium text-ink">
+              History window (days)
             </label>
-            <p className="text-xs text-muted">Only releases published at least this long ago count.</p>
+            <p className="text-xs text-muted">
+              Provenance, publisher, revival, version and new dependency rules apply to releases this recent. Install scripts
+              and git or URL dependencies are checked at any age. 0 applies all rules at any age.
+            </p>
             <input
-              id="established-age"
+              id="history-window-days"
               type="text"
               inputMode="numeric"
               className={`${fieldCls} mt-2 w-28 font-mono`}
-              value={draft.establishedMinAgeDays}
-              onChange={(e) => set('establishedMinAgeDays', e.target.value, 'established.min_age_days')}
-              aria-invalid={errors['established.min_age_days'] ? true : undefined}
-              aria-describedby={errors['established.min_age_days'] ? 'established-age-error' : undefined}
+              value={draft.historyWindowDays}
+              onChange={(e) => set('historyWindowDays', e.target.value, 'history_window_days')}
+              aria-invalid={errors.history_window_days ? true : undefined}
+              aria-describedby={errors.history_window_days ? 'history-window-days-error' : undefined}
             />
-            <FieldError id="established-age-error">{errors['established.min_age_days']}</FieldError>
+            <FieldError id="history-window-days-error">{errors.history_window_days}</FieldError>
           </div>
-        </div>
-      </Card>
-
-      <Card id="scan-coverage" title="Scanner rules" description="Package contents that decide the verdict on their own, whatever the model says">
-        <SeverityField
-          id="rule-startup_hook"
-          label="Startup hook in a .pth file"
-          description="The package installs a .pth file that launches a process, opens a connection, downloads, or reads secrets. Python runs .pth import lines at every interpreter start, so the code runs in every later Python process, not only at install. No benign package in the training corpus has one, so it blocks by default."
-          value={draft.startup_hook}
-          onChange={(v) => set('startup_hook', v)}
-        />
-        <div className="border-t border-line">
-          <SeverityField
-            id="rule-agent_bypass"
-            label="AI coding agent run with its checks off at install"
-            description="Code that runs during install passes a flag such as --dangerously-skip-permissions, --yolo or --trust-all-tools to an AI coding CLI, so the agent on this machine follows the package's prompt without asking. The s1ngularity compromise of Nx did this to have developers' own agents search their disks for secrets. Packages that drive an agent when you run them are not affected: only install-time code counts."
-            value={draft.agent_bypass}
-            onChange={(v) => set('agent_bypass', v)}
-          />
-        </div>
-        <div className="border-t border-line">
-          <SeverityField
-            id="rule-unread_code"
-            label="Code the scanner could not read"
-            description="The package ships code the scanner could not read: a code file or manifest over the 32 MiB per-file limit, an encrypted entry or one with an unsupported compression method, or an install hook in an archive above the scan size limit. It also covers code pip or npm would install differently from what the scanner read: a path stored twice, a link or sparse entry at an install-time path, or a coding cookie that makes Python run other text. The installer still runs it, and hiding a payload this way keeps it from every rule and the model. No benign package in the training corpus has any, so it blocks by default."
-            value={draft.unread_code}
-            onChange={(v) => set('unread_code', v)}
-          />
-        </div>
-        <div className="border-t border-line">
-          <SeverityField
-            id="rule-hidden_code"
-            label="Code the interpreter reads differently from the scanner"
-            description="Install-time Python or JavaScript that Python or Node runs but the scanner's lexers read another way: code after a bare carriage return, inside an f-string field, or after a byte-order mark the scanner keeps and Python drops. The scanner reads such a file a second time the way the interpreter does and lists what launches, connects, downloads or reads secrets only in that reading. The model's inputs stay as they were, so the rule decides on its own; it blocks by default."
-            value={draft.hidden_code}
-            onChange={(v) => set('hidden_code', v)}
-          />
-        </div>
-        <div className="border-t border-line">
-          <SeverityField
-            id="rule-scan_error"
-            label="Archive could not be scanned"
-            description="The scanner rejected the archive: over 20,000 files or 256 MiB unpacked, an archive bomb, or a corrupt or unknown format. Making a package unscannable is cheap for an attacker, and no benign package in the training corpus is, so it blocks by default."
-            value={draft.scan_error}
-            onChange={(v) => set('scan_error', v)}
-          />
-        </div>
-      </Card>
-
-      <Card
-        id="release-history"
-        title="Release history"
-        description="Compare a version with the releases before it to catch compromised releases of established packages. These heuristics also fire on legitimate changes (new CI, new maintainers), so most warn by default and the model still judges the code. An added install script is rare in legitimate releases and blocks."
-      >
-        <div className="divide-y divide-line">
-          {HISTORY_RULES.map((rule) => (
-            <SeverityField
-              key={rule}
-              id={`rule-${rule}`}
-              label={HISTORY_RULE_TEXT[rule].label}
-              description={HISTORY_RULE_TEXT[rule].description}
-              value={draft.history[rule]}
-              onChange={(v) => set('history', { ...draft.history, [rule]: v })}
+          <div className="mt-3 max-w-xs border-t border-line pt-3">
+            <label htmlFor="young-dependency-days" className="text-sm font-medium text-ink">
+              New dependency window (days)
+            </label>
+            <p className="text-xs text-muted">An added dependency first published this recently counts as brand-new.</p>
+            <input
+              id="young-dependency-days"
+              type="text"
+              inputMode="numeric"
+              className={`${fieldCls} mt-2 w-28 font-mono`}
+              value={draft.youngDependencyDays}
+              onChange={(e) => set('youngDependencyDays', e.target.value, 'young_dependency_days')}
+              aria-invalid={errors.young_dependency_days ? true : undefined}
+              aria-describedby={errors.young_dependency_days ? 'young-dependency-days-error' : undefined}
             />
-          ))}
-        </div>
-        <div className="mt-3 max-w-xs border-t border-line pt-3">
-          <label htmlFor="dormant-days" className="text-sm font-medium text-ink">
-            Dormancy period (days)
-          </label>
-          <p className="text-xs text-muted">A release this long after the previous one counts as a revival.</p>
-          <input
-            id="dormant-days"
-            type="text"
-            inputMode="numeric"
-            className={`${fieldCls} mt-2 w-28 font-mono`}
-            value={draft.dormantDays}
-            onChange={(e) => set('dormantDays', e.target.value, 'dormant_days')}
-            aria-invalid={errors.dormant_days ? true : undefined}
-            aria-describedby={errors.dormant_days ? 'dormant-days-error' : undefined}
-          />
-          <FieldError id="dormant-days-error">{errors.dormant_days}</FieldError>
-        </div>
-        <div className="mt-3 max-w-xs border-t border-line pt-3">
-          <label htmlFor="history-window-days" className="text-sm font-medium text-ink">
-            History window (days)
-          </label>
-          <p className="text-xs text-muted">
-            Provenance, publisher, revival, version and new dependency rules apply to releases this recent. Install scripts
-            and git or URL dependencies are checked at any age. 0 applies all rules at any age.
-          </p>
-          <input
-            id="history-window-days"
-            type="text"
-            inputMode="numeric"
-            className={`${fieldCls} mt-2 w-28 font-mono`}
-            value={draft.historyWindowDays}
-            onChange={(e) => set('historyWindowDays', e.target.value, 'history_window_days')}
-            aria-invalid={errors.history_window_days ? true : undefined}
-            aria-describedby={errors.history_window_days ? 'history-window-days-error' : undefined}
-          />
-          <FieldError id="history-window-days-error">{errors.history_window_days}</FieldError>
-        </div>
-        <div className="mt-3 max-w-xs border-t border-line pt-3">
-          <label htmlFor="young-dependency-days" className="text-sm font-medium text-ink">
-            New dependency window (days)
-          </label>
-          <p className="text-xs text-muted">An added dependency first published this recently counts as brand-new.</p>
-          <input
-            id="young-dependency-days"
-            type="text"
-            inputMode="numeric"
-            className={`${fieldCls} mt-2 w-28 font-mono`}
-            value={draft.youngDependencyDays}
-            onChange={(e) => set('youngDependencyDays', e.target.value, 'young_dependency_days')}
-            aria-invalid={errors.young_dependency_days ? true : undefined}
-            aria-describedby={errors.young_dependency_days ? 'young-dependency-days-error' : undefined}
-          />
-          <FieldError id="young-dependency-days-error">{errors.young_dependency_days}</FieldError>
-        </div>
-      </Card>
+            <FieldError id="young-dependency-days-error">{errors.young_dependency_days}</FieldError>
+          </div>
+        </Card>
 
-      <Card id="lists" title="Allow and deny lists" description="Exact package names, optionally pinned to a version. Lists override the model.">
-        <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-          <ChipInput
-            label="Always allow"
-            description="For example pypi:requests or npm:react@18.3.1"
-            values={draft.allow}
-            onChange={(v) => set('allow', v, 'allow')}
-            validate={validateListEntry}
-            placeholder="pypi:name"
-            error={errors.allow}
-            tone="allow"
-          />
-          <ChipInput
-            label="Always deny"
-            description="For example npm:event-stream@3.3.6"
-            values={draft.deny}
-            onChange={(v) => set('deny', v, 'deny')}
-            validate={validateListEntry}
-            placeholder="npm:name@version"
-            error={errors.deny}
-            tone="block"
-          />
-        </div>
-      </Card>
+        <Card id="lists" title="Allow and deny lists" description="Exact package names, optionally pinned to a version. Lists override the model.">
+          <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+            <ChipInput
+              label="Always allow"
+              description="For example pypi:requests or npm:react@18.3.1"
+              values={draft.allow}
+              onChange={(v) => set('allow', v, 'allow')}
+              validate={validateListEntry}
+              placeholder="pypi:name"
+              error={errors.allow}
+              tone="allow"
+            />
+            <ChipInput
+              label="Always deny"
+              description="For example npm:event-stream@3.3.6"
+              values={draft.deny}
+              onChange={(v) => set('deny', v, 'deny')}
+              validate={validateListEntry}
+              placeholder="npm:name@version"
+              error={errors.deny}
+              tone="block"
+            />
+          </div>
+        </Card>
+
+      </fieldset>
 
       {Object.keys(policy.upstream).length > 0 ? (
         <Card id="upstream" title="Upstream registries" description="Read-only here. Change these in customs.toml.">
@@ -671,14 +702,20 @@ function PolicyForm({
           <label className="block">
             <span className="mb-1 block text-sm font-medium text-ink">Admin token</span>
             <input
+              ref={tokenRef}
               type="password"
               autoComplete="current-password"
               className={inputCls}
               value={adminToken}
-              onChange={(e) => setAdminToken(e.target.value)}
-              aria-describedby="admin-token-help"
+              onChange={(e) => {
+                setAdminToken(e.target.value);
+                setTokenError(null);
+              }}
+              aria-invalid={tokenError ? true : undefined}
+              aria-describedby={tokenError ? 'admin-token-error admin-token-help' : 'admin-token-help'}
             />
           </label>
+          <FieldError id="admin-token-error">{tokenError}</FieldError>
           <p id="admin-token-help" className="mt-1 text-xs text-ink-2">
             This server was started with an admin token (<code className="font-mono">CUSTOMS_ADMIN_TOKEN</code>), and changing the policy needs it. It is kept for
             this browser tab only.
@@ -701,7 +738,7 @@ function PolicyForm({
         >
           Discard
         </button>
-        <button type="submit" className={btn.primary} disabled={saving || !dirty}>
+        <button type="submit" className={btn.primary} disabled={saving || !dirty || changesOff}>
           {saving ? 'Saving' : 'Save policy'}
         </button>
       </div>
@@ -750,7 +787,9 @@ function PolicyChanges({ version }: { version: number }) {
 
 export function PolicyPage() {
   useTitle('Policy');
-  const [state, setState] = useState<{ policy: Policy; raw: Record<string, unknown> } | null>(null);
+  const [state, setState] = useState<{ policy: Policy; raw: Record<string, unknown>; changes: PolicyChanges | null } | null>(
+    null,
+  );
   const [model, setModel] = useState<ModelInfo | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [version, setVersion] = useState(0);
@@ -784,10 +823,11 @@ export function PolicyPage() {
           key={version}
           policy={state.policy}
           raw={state.raw}
+          changes={state.changes}
           model={model}
           initiallySaved={version > 0}
           onSaved={(p, raw) => {
-            setState({ policy: p, raw });
+            setState((s) => ({ policy: p, raw, changes: s?.changes ?? null }));
             setVersion((v) => v + 1);
           }}
         />

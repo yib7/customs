@@ -369,7 +369,10 @@ async fn policy_changes_need_the_admin_token_when_one_is_set() {
         ..Default::default()
     };
     let h = Harness::start_serving(|_| {}, None, Limits::default(), "127.0.0.1:0", opts).await;
-    let mut p: Value = h.get("/api/policy").await.json().await.unwrap();
+    // The dashboard reads who may change the policy before it offers to save.
+    let r = h.get("/api/policy").await;
+    assert_eq!(r.headers()["x-customs-policy-changes"], "token");
+    let mut p: Value = r.json().await.unwrap();
     p["mode"] = json!("monitor");
     let put = |auth: Option<&str>| {
         let mut r = h.http.put(format!("{}/api/policy", h.base)).json(&p);
@@ -440,7 +443,14 @@ async fn a_network_facing_server_without_a_token_refuses_policy_changes() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move { axum::serve(listener, app).await });
-    let p: Value = h.get("/api/policy").await.json().await.unwrap();
+    let r = h
+        .http
+        .get(format!("{base}/api/policy"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.headers()["x-customs-policy-changes"], "disabled");
+    let p: Value = r.json().await.unwrap();
     let r = h
         .http
         .put(format!("{base}/api/policy"))
@@ -462,7 +472,11 @@ async fn a_network_facing_server_without_a_token_refuses_policy_changes() {
 #[tokio::test(flavor = "multi_thread")]
 async fn the_vite_dev_origin_cannot_change_the_policy() {
     let h = Harness::start(|_| {}).await;
-    let mut p: Value = h.get("/api/policy").await.json().await.unwrap();
+    let r = h.get("/api/policy").await;
+    // A loopback server without a token takes changes from any local page that passes the
+    // Host and Origin checks.
+    assert_eq!(r.headers()["x-customs-policy-changes"], "open");
+    let mut p: Value = r.json().await.unwrap();
     p["mode"] = json!("monitor");
     // Any page served on Vite's default port, from any project.
     let r = h
@@ -932,7 +946,10 @@ async fn repeated_wrong_admin_tokens_are_throttled() {
         ..Default::default()
     };
     let h = Harness::start_serving(|_| {}, None, Limits::default(), "127.0.0.1:0", opts).await;
-    let mut p: Value = h.get("/api/policy").await.json().await.unwrap();
+    // The dashboard reads who may change the policy before it offers to save.
+    let r = h.get("/api/policy").await;
+    assert_eq!(r.headers()["x-customs-policy-changes"], "token");
+    let mut p: Value = r.json().await.unwrap();
     p["mode"] = json!("monitor");
     let put = |auth: String| {
         h.http

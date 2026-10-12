@@ -47,19 +47,22 @@ describe('Policy page', () => {
   it('asks for the admin token when the server requires one', async () => {
     const mock = renderApp('/policy').server;
     mock.adminToken = 'team-token-0123456789';
+    const put = vi.spyOn(mock, 'handle');
     try {
       const user = userEvent.setup();
       const age = await screen.findByRole('textbox', { name: 'Minimum age (days)' });
+      // GET /api/policy said a token is needed, so the field is there before any save.
+      const token = screen.getByLabelText('Admin token');
       await user.clear(age);
       await user.type(age, '5');
       await user.click(screen.getByRole('button', { name: 'Save policy' }));
-      const refused = await screen.findByTestId('policy-server-error');
-      expect(refused).toHaveTextContent('The server refused the change');
+      // An empty token is caught here, not by a refused request.
+      expect(await screen.findByText('Enter the admin token to save.')).toBeInTheDocument();
+      await waitFor(() => expect(token).toHaveFocus());
+      expect(put.mock.calls.filter(([method]) => method === 'PUT')).toHaveLength(0);
       // After a save the page moves focus to the status message on the next frame; typing
       // before that lands in the message, not the field.
       const statusFocused = () => waitFor(() => expect(screen.getByTestId('policy-server-error').parentElement).toHaveFocus());
-      await statusFocused();
-      const token = screen.getByLabelText('Admin token');
       await user.type(token, 'wrong-token');
       await user.click(screen.getByRole('button', { name: 'Save policy' }));
       expect(await screen.findByText('the admin token is not valid')).toBeInTheDocument();
@@ -79,6 +82,14 @@ describe('Policy page', () => {
     } finally {
       sessionStorage.clear();
     }
+  });
+
+  it('says when policy changes are off on this server, and offers no save', async () => {
+    const mock = renderApp('/policy').server;
+    mock.changesDisabled = true;
+    expect(await screen.findByTestId('policy-changes-disabled')).toHaveTextContent('CUSTOMS_ADMIN_TOKEN');
+    expect(screen.getByRole('button', { name: 'Save policy' })).toBeDisabled();
+    expect(screen.getByRole('textbox', { name: 'Minimum age (days)' })).toBeDisabled();
   });
 
   it("labels the model default with the model's own threshold, not the override", async () => {
@@ -186,7 +197,10 @@ describe('Check page', () => {
     renderApp('/check');
     await user.type(screen.getByRole('textbox', { name: 'Package name' }), 'huggingface-cli');
     await user.click(screen.getByRole('button', { name: 'Check' }));
-    expect(await screen.findByTestId('nonexistent-result')).toHaveTextContent(/does not exist on PyPI/);
+    const card = await screen.findByTestId('nonexistent-result');
+    expect(card).toHaveTextContent(/does not exist on PyPI/);
+    // The server's own reason, from the verdict's block_nonexistent hit.
+    expect(card).toHaveTextContent(/possibly a hallucinated or mistyped name/);
   });
 
   it('shows other 404s as errors, not as a nonexistent package', async () => {
@@ -310,6 +324,14 @@ describe('Model page', () => {
     mock.server.policy.block_threshold = 0.9;
     expect(await screen.findByTestId('model-version')).toBeInTheDocument();
     expect(screen.getByTestId('model-block-threshold')).toHaveTextContent('0.80');
+  });
+
+  it('names a temporal split and its cutoff without nesting it in the heading', async () => {
+    renderApp('/model');
+    expect(await screen.findByRole('heading', { name: 'Held-out evaluation (temporal split)' })).toBeInTheDocument();
+    expect(screen.getByText(/Trained on packages first seen before a cutoff date/)).toHaveTextContent(
+      'Test set: malware found from 2026-02-13.',
+    );
   });
 });
 

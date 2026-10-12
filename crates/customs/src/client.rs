@@ -223,12 +223,6 @@ impl Checker {
                     });
                 }
                 let parsed = serde_json::from_str::<Value>(&body).ok();
-                // A nonexistent package is a 404 that still carries a verdict.
-                if let Some(v) = parsed.as_ref().and_then(|p| p.get("verdict")) {
-                    if let Ok(v) = serde_json::from_value::<Verdict>(v.clone()) {
-                        return Ok(v);
-                    }
-                }
                 let msg = parsed
                     .and_then(|v| v.get("error").and_then(Value::as_str).map(str::to_string))
                     .unwrap_or(body);
