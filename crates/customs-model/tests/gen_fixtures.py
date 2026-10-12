@@ -12,12 +12,14 @@ computation the Rust crate performs (DESIGN.md sections 4.5 and 5):
   the hashed character n-gram logistic regression (FNV-1a 32-bit over `^name$`, distinct
   buckets);
 - the `customs-code-cnn-v1` forward pass (embedding, valid 1D convolutions, ReLU, global
-  max pool, dense layers with per-layer activation, short inputs padded to 16);
-- `customs-ensemble-v1` logistic stacking with fallback weight sets selected by the set of
-  missing components (no risk for a set without one unless the file sets `partial`), then
-  isotonic calibration.
+  max pool, dense layers with per-layer activation, short inputs padded to 16), with
+  email-shaped tokens looked up by their hashed vocabulary key;
+- `customs-ensemble-v1` logistic stacking of clipped logits with fallback weight sets
+  selected by the set of missing components (no risk for a set without one unless the file
+  sets `partial`), then calibration.
 
-It writes a small model bundle to `fixtures/models/` plus `fixtures/expected_*.json`; the
+It writes a small model bundle to `fixtures/models/` plus `fixtures/expected_*.json`, and
+`fixtures/expected_shipped_ensemble.json` from the shipped `models/ensemble.json`; the
 Rust tests in `parity.rs` load both and require agreement within 1e-5. The training
 pipeline can reuse these functions as the specification of the serving math.
 
@@ -34,6 +36,7 @@ import numpy as np
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.join(HERE, "fixtures")
 MODELS = os.path.join(OUT, "models")
+SHIPPED_ENSEMBLE = os.path.join(HERE, "..", "..", "..", "models", "ensemble.json")
 COMPONENTS = ["code_gbdt", "code_nn", "name"]
 
 rng = np.random.default_rng(20261007)
@@ -308,12 +311,30 @@ NAME_CASES = [
 # ---------------------------------------------------------------- code CNN (customs-code-cnn-v1)
 
 MIN_LEN = 16
+# An email-shaped token: local part, one or more dotted domain labels, a letters-only TLD.
+EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}")
+
+
+def fnv1a64(data):
+    h = 0xCBF29CE484222325
+    for b in data:
+        h ^= b
+        h = (h * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+    return h
+
+
+def vocab_key(token):
+    """Email-shaped tokens are looked up (and stored) as `<email:{fnv1a64:016x}>`."""
+    if EMAIL.fullmatch(token):
+        return "<email:%016x>" % fnv1a64(token.encode("utf-8"))
+    return token
 
 
 def cnn_encode(model, tokens):
-    vocab = model["vocab"]
+    # Keys in the file may be plaintext or already hashed; both map to the same key.
+    vocab = {vocab_key(k): v for k, v in model["vocab"].items()}
     max_k = max(c["kernel"] for c in model["convs"])
-    ids = [vocab.get(t, 1) for t in tokens[: model["max_len"]]]
+    ids = [vocab.get(vocab_key(t), 1) for t in tokens[: model["max_len"]]]
     target = max(MIN_LEN, max_k)
     if len(ids) < target:
         ids = ids + [0] * (target - len(ids))
@@ -361,13 +382,33 @@ def ensemble_combine(ens, logits):
     else:
         # No weights were fitted for this set of inputs: no risk.
         return None
+    clip = ens.get("clip")
     z = bias
     for c in COMPONENTS:
         if logits.get(c) is not None:
-            z += w.get(c, 0.0) * logits[c]
+            v = logits[c]
+            if clip is not None:
+                v = min(max(v, -clip), clip)
+            z += w.get(c, 0.0) * v
     raw = sigmoid(z)
     risk = float(np.interp(raw, cal["x"], cal["y"])) if cal else raw
     return {"z": z, "raw": raw, "risk": risk, "weight_set": ws}
+
+
+def shipped_ensemble():
+    """Reference outputs of the shipped `models/ensemble.json` (read only): every subset of
+    components, logits inside and beyond its clip, sets without fitted weights (no risk)."""
+    with open(SHIPPED_ENSEMBLE) as f:
+        ens = json.load(f)
+    triples = [(-9.0, 11.0, -0.4), (0.7, -2.5, 6.0), (3.2, 0.0, -6.0), (11.0, -9.0, 0.7),
+               (-0.4, 3.2, 11.0), (6.5, 6.5, -9.0), (-1.3, -0.2, 2.1)]
+    cases = []
+    for mask in range(8):
+        for t in triples:
+            logits = {c: (t[i] if mask >> i & 1 else None) for i, c in enumerate(COMPONENTS)}
+            cases.append({"logits": logits, "out": ensemble_combine(ens, logits)})
+    dump(os.path.join(OUT, "expected_shipped_ensemble.json"),
+         {"source": "models/ensemble.json", "cases": cases})
 
 
 def main():
@@ -434,6 +475,10 @@ def main():
                     "Buffer", "from", "STR", "NUM", "ID", ",", ";", "{", "}", "def", "return"]
     vocab = {t: i for i, t in enumerate(vocab_tokens)}
     V, D = len(vocab_tokens), 8
+    # Email tokens reuse existing rows: one key stored in plaintext, one already hashed
+    # (as the exporter writes it), so lookups must key both the file and the token.
+    vocab["maintainer@example.com"] = vocab["STR"]
+    vocab[vocab_key("dev@example.org")] = vocab["http"]
     emb = rng.normal(0, 0.4, (V, D)).astype(np.float32)
     emb[0] = 0.0  # padding_idx=0 in PyTorch
     convs = []
@@ -464,6 +509,13 @@ def main():
         toks = [str(token_pool[j]) for j in rng.integers(0, len(token_pool), n)]
         ids, logit = cnn_forward(cnn, arrays, toks)
         ccases.append({"tokens": toks, "ids": ids, "logit": logit})
+    for toks in (
+        ["setup", "(", "author_email", "=", "maintainer@example.com", ")"],
+        ["dev@example.org", "Dev@Example.org", "other@example.org", "a@b", "x@y.c",
+         "user@host.co.uk", "dev@example.org."],
+    ):
+        ids, logit = cnn_forward(cnn, arrays, toks)
+        ccases.append({"tokens": toks, "ids": ids, "logit": logit})
     dump(os.path.join(OUT, "expected_cnn.json"), {"cases": ccases})
 
     # Ensemble.
@@ -481,6 +533,7 @@ def main():
         "calibration": isotonic(10),
         "thresholds": {"warn": 0.5, "block": 0.85, "target_fpr_warn": 0.01,
                        "target_fpr_block": 0.001},
+        "clip": 4.0,
     }
     dump(os.path.join(MODELS, "ensemble.json"), ens)
     ecases = []
@@ -491,6 +544,14 @@ def main():
                 logits[c] = float(np.round(rng.normal(0, 2.5), 6))
             else:
                 logits[c] = None
+        ecases.append({"logits": logits, "out": ensemble_combine(ens, logits)})
+    # Logits beyond the clip, and a name alone (no fallback fitted for it: no risk).
+    for logits in (
+        {"code_gbdt": 9.5, "code_nn": -12.0, "name": 0.3},
+        {"code_gbdt": -7.25, "code_nn": None, "name": 5.5},
+        {"code_gbdt": None, "code_nn": None, "name": 8.0},
+        {"code_gbdt": 4.0, "code_nn": None, "name": None},
+    ):
         ecases.append({"logits": logits, "out": ensemble_combine(ens, logits)})
     dump(os.path.join(OUT, "expected_ensemble.json"), {"cases": ecases})
 
@@ -543,6 +604,7 @@ def main():
                        "risk": out["risk"] if out else None,
                        "weight_set": out["weight_set"] if out else None})
     dump(os.path.join(OUT, "expected_assess.json"), {"cases": acases})
+    shipped_ensemble()
     print("wrote fixtures to", OUT)
 
 

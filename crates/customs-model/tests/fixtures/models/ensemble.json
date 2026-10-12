@@ -27,6 +27,7 @@
    0.9557027953893247
   ]
  },
+ "clip": 4.0,
  "components": [
   "code_gbdt",
   "code_nn",

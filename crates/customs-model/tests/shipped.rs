@@ -12,6 +12,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use customs_model::ensemble::Logits;
 use customs_model::{Decision, Models, ScoreInput};
 use customs_scan::Ecosystem;
 use serde_json::Value;
@@ -157,4 +158,94 @@ fn a_name_alone_gets_no_model_risk_but_keeps_the_nearest_popular_name() {
         .expect("nearest popular name reason");
     assert!(r.label.contains("'requests'"), "{}", r.label);
     assert!(r.contribution >= 0.0);
+}
+
+#[test]
+fn ensemble_matches_reference_on_shipped_weights() {
+    // Written by gen_fixtures.py's independent `ensemble_combine` from models/ensemble.json:
+    // clip, Platt calibration, each fallback, and the sets with no fitted weights.
+    let Some(models) = shipped() else {
+        return;
+    };
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/expected_shipped_ensemble.json");
+    let fixture: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let cases = fixture["cases"].as_array().unwrap();
+    assert_eq!(cases.len(), 56);
+    let mut sets = std::collections::BTreeSet::new();
+    for (i, c) in cases.iter().enumerate() {
+        let l = &c["logits"];
+        let logits = Logits {
+            code_gbdt: l["code_gbdt"].as_f64(),
+            code_nn: l["code_nn"].as_f64(),
+            name: l["name"].as_f64(),
+        };
+        let out = models.ensemble.combine(&logits);
+        let want = &c["out"];
+        match &out {
+            None => assert!(
+                want.is_null(),
+                "case {i}: rust has no risk, reference {want}"
+            ),
+            Some(o) => {
+                assert!(
+                    !want.is_null(),
+                    "case {i}: rust {o:?}, reference has no risk"
+                );
+                assert_eq!(
+                    o.weight_set,
+                    want["weight_set"].as_str().unwrap(),
+                    "case {i}"
+                );
+                for (got, key) in [(o.z, "z"), (o.risk, "risk")] {
+                    let w = want[key].as_f64().unwrap();
+                    assert!((got - w).abs() < 1e-9, "case {i} {key}: {got} vs {w}");
+                }
+                sets.insert(o.weight_set.clone());
+            }
+        }
+    }
+    assert_eq!(sets.len(), 4, "{sets:?}");
+}
+
+#[test]
+fn shipped_bundle_assesses_a_scanned_package() {
+    let (Some(models), Some(rows), Some(streams)) = (
+        shipped(),
+        fixture("code_gbdt.json"),
+        fixture("code_nn.json"),
+    ) else {
+        return;
+    };
+    let features: BTreeMap<String, f64> = rows[0]["features"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .map(|(k, v)| (k.clone(), v.as_f64().unwrap()))
+        .collect();
+    let tokens: Vec<String> = streams[2]["tokens"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t.as_str().unwrap().to_string())
+        .collect();
+    let a = models.assess(&ScoreInput {
+        ecosystem: Ecosystem::Pypi,
+        name: Some("requests"),
+        features: Some(&features),
+        tokens: Some(&tokens),
+    });
+    assert!((a.logits.code_gbdt.unwrap() - rows[0]["raw"].as_f64().unwrap()).abs() < 1e-6);
+    assert!((a.logits.code_nn.unwrap() - streams[2]["logit"].as_f64().unwrap()).abs() < 1e-3);
+    let e = a
+        .ensemble
+        .as_ref()
+        .expect("a fully scanned package has a risk");
+    assert_eq!(e.weight_set, "primary");
+    let risk = a.risk.unwrap();
+    assert!((0.0..=1.0).contains(&risk), "{risk}");
+    assert_eq!(
+        a.decision,
+        customs_model::ensemble::decide(risk, a.thresholds.warn, a.thresholds.block)
+    );
 }
