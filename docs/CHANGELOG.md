@@ -131,7 +131,7 @@ Never tagged; everything here ships in 1.0.0.
 
 - `customs serve` proxies PyPI (simple index, PEP 691 JSON) and npm, scans every archive
   in memory before handing it over, and answers allow, warn or block.
-- Malware classifier: gradient-boosted trees over 77 static features, a 1D CNN over the
+- Malware classifier: gradient-boosted trees over 78 static features, a 1D CNN over the
   install-time token stream, and a package-name model for typosquats, stacked and
   calibrated. Inference runs in Rust from JSON exports, with parity tests against the
   Python reference.

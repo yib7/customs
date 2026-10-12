@@ -38,8 +38,8 @@ sequenceDiagram
     PM->>P: GET /pypi/files/.../foo-1.0.tar.gz
     P->>R: download the archive
     P->>E: verdict for these bytes
-    E->>E: policy rules (deny/allow lists, age,<br/>nonexistent names, release history)
-    E->>E: scanner, then models, then thresholds
+    E->>E: scanner, then models: one risk score<br/>(cached by archive hash)
+    E->>E: policy: deny/allow lists, release age,<br/>release history, scanner rules,<br/>established-package prior, thresholds
     E-->>P: allow / warn / block, with reasons
     alt block
         P-->>PM: 403 with the reason
@@ -51,6 +51,9 @@ sequenceDiagram
 
 Verdicts are cached by archive hash, and concurrent requests for the same archive share
 one scan. In `monitor` mode the proxy records the verdict and serves the archive anyway.
+A name the registry does not know never gets this far: the index request comes back 404,
+the proxy records a `nonexistent_package` event, and `customs check` or the hook reports
+it as a block.
 
 ## What happens when an agent runs a command
 
@@ -107,6 +110,7 @@ executed or installed. [EVALUATION.md](EVALUATION.md) has the numbers.
 | `CUSTOMS_UI_DIR` | `./web/dist`, then paths next to the binary | Dashboard files |
 | `CUSTOMS_SERVER` | `http://127.0.0.1:7878` | Server the hook and CLI talk to |
 | `CUSTOMS_ADMIN_TOKEN` | unset | Required for policy changes when set |
+| `CUSTOMS_ALLOWED_HOSTS` | unset | Host names, besides IP addresses and `localhost`, that may change the policy (`--allowed-hosts`) |
 
 Every flag and variable is listed by `customs serve --help`, and every variable in
 [`deploy/.env.example`](../deploy/.env.example).

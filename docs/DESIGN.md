@@ -333,7 +333,7 @@ literal (shell: quoted strings and words). `hex_escape_count` counts `\xNN`, `\u
 `\u{...}` in the raw text. "High entropy" for identifiers means above 4.3 bits per byte.
 Ratios are 0 when the denominator is 0.
 
-Feature order (`feature_names()`, 77 names): the 14 `inst_<indicator>` in table order, the
+Feature order (`feature_names()`, 78 names): the 14 `inst_<indicator>` in table order, the
 14 `all_<indicator>`, then the 28 features above in the order listed, then
 `inst_hidden_ws_lines`, `all_hidden_ws_lines`, `inst_exec_decoded`, `all_exec_decoded`,
 `inst_max_file_kinds`, `all_max_file_kinds`, `all_top_file_share`, `inst_n_files`, `n_links`, `n_unsafe_paths`, then the 12 manifest features in the order
@@ -799,6 +799,11 @@ Registry proxy:
 
 API (JSON). No CORS headers: the built dashboard is same-origin, and the Vite dev server
 proxies `/api` with the browser's `Host`, so its dashboard is same-origin as well.
+Every response, API, proxy and dashboard alike, carries `Content-Security-Policy`
+(`default-src 'self'`, `frame-ancestors 'none'`),
+`X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff` and `Referrer-Policy:
+no-referrer`, so the Policy page cannot be framed and clickjacked into switching
+enforcement off.
 - `POST /api/check` `{ "ecosystem": "pypi", "name": "foo", "version": null, "client": "cli" }`:
   `version` is null (latest), an exact version, a range (`>=1,<2`, `~=1.4`, `^1.2`, npm
   ranges), or an npm dist-tag; it resolves to the newest matching non-yanked version. A
