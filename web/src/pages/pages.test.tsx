@@ -191,6 +191,48 @@ describe('Check page', () => {
   });
 });
 
+describe('Activity page', () => {
+  it('shows the search from the URL when navigation changes it', async () => {
+    const user = userEvent.setup();
+    renderApp('/activity?q=reqeusts');
+    const box = await screen.findByRole('searchbox', { name: 'Package name' });
+    expect(box).toHaveValue('reqeusts');
+    await user.click(screen.getAllByRole('link', { name: 'Activity' })[0] as HTMLElement);
+    await waitFor(() => expect(box).toHaveValue(''));
+    // The stale text must not be written back into the URL by the search debounce.
+    await new Promise((r) => setTimeout(r, 400));
+    expect(box).toHaveValue('');
+  });
+
+  it('keeps the page cursors across leaving and coming back', async () => {
+    const user = userEvent.setup();
+    const mock = renderApp('/activity');
+    const handle = vi.spyOn(mock.server, 'handle');
+    const cursors = () =>
+      handle.mock.calls
+        // The Activity page asks for 25 at a time; the live feed's own requests ask for 50.
+        .filter(([, url]) => url.pathname === '/api/events' && url.searchParams.get('limit') === '25')
+        .map(([, url]) => url.searchParams.get('before'));
+    const older = await screen.findByRole('button', { name: /Older/ });
+    await waitFor(() => expect(older).toBeEnabled());
+    await user.click(older);
+    await waitFor(() => expect(older).toBeEnabled());
+    await user.click(older);
+    await waitFor(() => expect(older).toBeEnabled());
+    const [first, second] = cursors().filter((c) => c !== null);
+    expect(first).toBeTruthy();
+    expect(second).toBeTruthy();
+    // Open a verdict from the third page and come back with the verdict page's Back button.
+    const row = screen.getAllByRole('link').find((a) => a.getAttribute('href')?.startsWith('/verdicts/'));
+    await user.click(row as HTMLElement);
+    await user.click(await screen.findByRole('button', { name: 'Back' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: /Newer/ })).toBeEnabled());
+    expect(cursors().at(-1)).toBe(second);
+    await user.click(screen.getByRole('button', { name: /Newer/ }));
+    await waitFor(() => expect(cursors().at(-1)).toBe(first));
+  });
+});
+
 describe('Verdict page', () => {
   it('treats a non-numeric id as a missing verdict without asking the server', async () => {
     const mock = renderApp('/verdicts/abc');
