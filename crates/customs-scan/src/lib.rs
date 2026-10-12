@@ -169,7 +169,7 @@ pub enum ScanError {
     UnsupportedFormat(String),
     #[error("archive rejected: {0}")]
     Rejected(String),
-    #[error("io error: {0}")]
+    #[error(transparent)]
     Io(#[from] std::io::Error),
 }
 
@@ -338,8 +338,8 @@ pub fn scan_delta(
         read_all: true,
         ..opts.clone()
     };
-    let prev_c = archive::read_archive(prev, &read)?;
-    let cur_c = archive::read_archive(cur, &read)?;
+    let prev_c = read_release(prev, &read, "previous release")?;
+    let cur_c = read_release(cur, &read, "current release")?;
     let (d, stats) = delta::delta(&prev_c, &cur_c);
     let sha256 = hex(&Sha256::digest(cur));
     let report = Scanner::new(&d, ecosystem, opts).run(filename, sha256);
@@ -353,9 +353,18 @@ pub fn diff_archives(prev: &[u8], cur: &[u8], opts: &ScanOptions) -> Result<File
         read_all: true,
         ..opts.clone()
     };
-    let prev_c = archive::read_archive(prev, &read)?;
-    let cur_c = archive::read_archive(cur, &read)?;
+    let prev_c = read_release(prev, &read, "previous release")?;
+    let cur_c = read_release(cur, &read, "current release")?;
     Ok(delta::file_diff(&prev_c, &cur_c))
+}
+
+/// Read one of the two releases of a delta, naming it in any error.
+fn read_release(bytes: &[u8], opts: &ScanOptions, which: &str) -> Result<Contents, ScanError> {
+    archive::read_archive(bytes, opts).map_err(|e| match e {
+        ScanError::UnsupportedFormat(m) => ScanError::UnsupportedFormat(format!("{which}: {m}")),
+        ScanError::Rejected(m) => ScanError::Rejected(format!("{which}: {m}")),
+        ScanError::Io(e) => ScanError::Io(std::io::Error::new(e.kind(), format!("{which}: {e}"))),
+    })
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -1468,6 +1477,37 @@ mod tests {
             ),
             3
         );
+    }
+
+    #[test]
+    fn io_errors_print_their_cause_once() {
+        let io = std::io::Error::new(std::io::ErrorKind::NotFound, "no such file");
+        let e = anyhow::Error::from(ScanError::from(io));
+        assert_eq!(format!("{e:#}"), "no such file");
+    }
+
+    #[test]
+    fn delta_errors_name_the_release() {
+        let opts = ScanOptions::default();
+        let good = {
+            let mut b = tar::Builder::new(Vec::new());
+            let mut h = tar::Header::new_gnu();
+            h.set_size(2);
+            h.set_mode(0o644);
+            b.append_data(&mut h, "package/index.js", &b"1;"[..])
+                .unwrap();
+            b.into_inner().unwrap()
+        };
+        let bad = b"not an archive".to_vec();
+        for (prev, cur, side) in [
+            (&bad, &good, "previous release"),
+            (&good, &bad, "current release"),
+        ] {
+            let e = scan_delta(prev, cur, "x.tgz", Ecosystem::Npm, &opts).unwrap_err();
+            assert!(e.to_string().contains(side), "{e}");
+            let e = diff_archives(prev, cur, &opts).unwrap_err();
+            assert!(e.to_string().contains(side), "{e}");
+        }
     }
 
     #[test]
