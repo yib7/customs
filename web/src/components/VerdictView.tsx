@@ -69,7 +69,7 @@ function HowToProceed({ v, level }: { v: Verdict; level: 2 | 3 }) {
           <div>
             <p className="mb-1.5 text-xs font-medium text-ink">
               Allowlist this exact version in <code className="font-mono">customs.toml</code> (or on the{' '}
-              <Link to="/policy" className="text-accent underline-offset-2 hover:underline">
+              <Link to="/policy" className="text-accent underline underline-offset-2">
                 Policy page
               </Link>
               )

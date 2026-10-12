@@ -52,7 +52,7 @@ export function VerdictPage() {
         verdict.error instanceof ApiError && (verdict.error.status === 404 || verdict.error.status === 400) ? (
           <EmptyState title="Verdict not found">
             It may have been pruned from the local database.{' '}
-            <Link to="/activity" className="text-accent hover:underline">
+            <Link to="/activity" className="text-accent underline underline-offset-2">
               Back to activity
             </Link>
           </EmptyState>

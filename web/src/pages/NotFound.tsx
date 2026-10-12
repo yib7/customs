@@ -8,7 +8,7 @@ export function NotFoundPage() {
     <>
       <PageHeader title="Page not found" />
       <EmptyState title="There is nothing at this address.">
-        <Link to="/" className="text-accent hover:underline">
+        <Link to="/" className="text-accent underline underline-offset-2">
           Go to the overview
         </Link>
       </EmptyState>
