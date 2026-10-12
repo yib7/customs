@@ -1,7 +1,7 @@
-node_modules
+# node_modules and .env files are ignored by the root .gitignore.
 dist
 dist-mock
+# Playwright output
 test-results
 playwright-report
 *.tsbuildinfo
-.env.local

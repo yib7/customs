@@ -17,6 +17,7 @@ pub mod history;
 pub mod hook;
 pub mod mcp;
 pub mod metrics;
+pub mod models;
 pub mod notify;
 pub mod policy;
 pub mod policy_log;

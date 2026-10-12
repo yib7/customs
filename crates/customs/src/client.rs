@@ -10,8 +10,9 @@ use serde_json::{json, Value};
 
 use crate::config::resolve_policy;
 use crate::diff::ReleaseDiff;
-use crate::engine::{default_scanner, load_models, Engine, EngineConfig, EngineError, Limits};
+use crate::engine::{default_scanner, Engine, EngineConfig, EngineError, Limits};
 use crate::metrics::Metrics;
+use crate::models::load_models;
 use crate::util::ecosystem_str;
 use crate::verdict::Verdict;
 
