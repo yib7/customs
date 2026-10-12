@@ -28,8 +28,8 @@ pub fn install_time_code(path: &Path, eco: Ecosystem, filename: &str) -> Vec<Str
     }
 }
 
-/// `.pth` files at the root of a wheel land in site-packages, where Python runs their
-/// import lines at every interpreter start.
+/// `.pth` files and `sitecustomize.py`/`usercustomize.py` at the root of a wheel land in
+/// site-packages, where Python runs them at every interpreter start.
 fn wheel_pth(path: &Path) -> Option<Vec<String>> {
     let zip = zip::ZipArchive::new(BufReader::new(File::open(path).ok()?)).ok()?;
     Some(
@@ -41,7 +41,11 @@ fn wheel_pth(path: &Path) -> Option<Vec<String>> {
                     .split_once(".data/purelib/")
                     .map_or(n.as_str(), |(_, r)| r);
                 let n = n.split_once(".data/platlib/").map_or(n, |(_, r)| r);
-                !n.contains('/') && n.to_ascii_lowercase().ends_with(".pth")
+                let lower = n.to_ascii_lowercase();
+                !n.contains('/')
+                    && (lower.ends_with(".pth")
+                        || lower == "sitecustomize.py"
+                        || lower == "usercustomize.py")
             })
             .collect(),
     )
@@ -365,6 +369,20 @@ mod tests {
         assert_eq!(
             install_time_code(&p, Ecosystem::Pypi, "a-1.0-py3-none-any.whl"),
             vec!["a-hook.pth", "a-1.0.data/purelib/b.pth"]
+        );
+        // Site customization hooks run at every interpreter start too; the same names
+        // inside a package do not.
+        let p = tmp(
+            "site.whl",
+            &whl(&[
+                "sitecustomize.py",
+                "a-1.0.data/platlib/usercustomize.py",
+                "a/sitecustomize.py",
+            ]),
+        );
+        assert_eq!(
+            install_time_code(&p, Ecosystem::Pypi, "a-1.0-py3-none-any.whl"),
+            vec!["sitecustomize.py", "a-1.0.data/platlib/usercustomize.py"]
         );
     }
 }

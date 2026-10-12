@@ -112,6 +112,8 @@ struct Lexer<'a> {
     fstring_fields: bool,
     /// Open f-string replacement fields.
     fdepth: u32,
+    /// The last JavaScript regex try that failed, see [`RegexMemo`].
+    regex_memo: RegexMemo,
 }
 
 impl<'a> Lexer<'a> {
@@ -124,6 +126,7 @@ impl<'a> Lexer<'a> {
             out: Vec::with_capacity(src.len() / 4),
             fstring_fields: false,
             fdepth: 0,
+            regex_memo: RegexMemo::default(),
         }
     }
 
@@ -441,22 +444,9 @@ impl<'a> Lexer<'a> {
     /// ends before the closing slash, in which case the caller treats `/` as division.
     fn js_regex(&mut self) -> bool {
         let start = self.i + 1;
-        let mut j = start;
-        let mut in_class = false;
-        while j < self.b.len() {
-            match self.b[j] {
-                b'\\' => j += 1,
-                b'\n' => return false,
-                b'[' => in_class = true,
-                b']' => in_class = false,
-                b'/' if !in_class => break,
-                _ => {}
-            }
-            j += 1;
-        }
-        if j >= self.b.len() {
+        let Some(mut j) = regex_close(self.b, start, &mut self.regex_memo) else {
             return false;
-        }
+        };
         self.push(TokKind::Regex, start, j, self.line);
         j += 1;
         while j < self.b.len() && self.b[j].is_ascii_alphabetic() {
@@ -1262,6 +1252,80 @@ fn is_value_end(t: &Token<'_>) -> bool {
     }
 }
 
+/// Where a JavaScript regex literal whose body starts at `start` closes: the index of the
+/// closing `/`, or `None` when the line ends first. Escapes skip a byte; `/` inside a
+/// character class does not close.
+#[cfg(test)]
+fn regex_close_naive(b: &[u8], start: usize) -> Option<usize> {
+    let mut j = start;
+    let mut in_class = false;
+    while j < b.len() {
+        match b[j] {
+            b'\\' => j += 1,
+            b'\n' => return None,
+            b'[' => in_class = true,
+            b']' => in_class = false,
+            b'/' if !in_class => return Some(j),
+            _ => {}
+        }
+        j += 1;
+    }
+    None
+}
+
+/// The states of the last regex try that ran to the end of its line, by position: a later
+/// try that reaches one of those positions in the same state reads the rest of the line
+/// the same way, so it fails too. Without this a line of unclosed tries (`([/x([/x...`)
+/// rescans to the end of the line at every `/`, which is quadratic in the line length.
+#[derive(Default)]
+struct RegexMemo {
+    /// First position the states cover.
+    from: usize,
+    /// Per position from `from` up to the line end: `in_class | skipped << 1`.
+    states: Vec<u8>,
+}
+
+impl RegexMemo {
+    fn state_at(&self, j: usize) -> Option<u8> {
+        j.checked_sub(self.from)
+            .and_then(|k| self.states.get(k))
+            .copied()
+    }
+}
+
+/// [`regex_close_naive`], using and updating `memo`.
+fn regex_close(b: &[u8], start: usize, memo: &mut RegexMemo) -> Option<usize> {
+    let mut j = start;
+    let mut in_class = false;
+    let mut skipped = false;
+    let mut states = Vec::new();
+    while j < b.len() {
+        let state = u8::from(in_class) | (u8::from(skipped) << 1);
+        if memo.state_at(j) == Some(state) {
+            return None;
+        }
+        states.push(state);
+        if skipped {
+            skipped = false;
+        } else {
+            match b[j] {
+                b'\\' => skipped = true,
+                b'\n' => break,
+                b'[' => in_class = true,
+                b']' => in_class = false,
+                b'/' if !in_class => return Some(j),
+                _ => {}
+            }
+        }
+        j += 1;
+    }
+    *memo = RegexMemo {
+        from: start,
+        states,
+    };
+    None
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -1491,6 +1555,53 @@ mod tests {
     }
 
     use super::*;
+
+    /// A long line of `/` that never closes as a regex (each try runs to the end of the
+    /// line) lexes in linear time.
+    #[test]
+    fn unclosed_regex_tries_stay_linear() {
+        let line = "([/xx".repeat(100_000);
+        let started = std::time::Instant::now();
+        let toks = lex(&line, Lang::Js);
+        let took = started.elapsed();
+        assert!(took < std::time::Duration::from_secs(3), "{took:?}");
+        assert!(toks.iter().all(|t| t.kind != TokKind::Regex));
+        assert_eq!(toks.iter().filter(|t| t.text == "/").count(), 100_000);
+    }
+
+    /// The remembered tries change no answer: on random lines over the bytes that matter,
+    /// trying every `/` in order (or a random subset, as the lexer does) gives what a fresh
+    /// scan gives.
+    #[test]
+    fn remembered_regex_tries_match_fresh_scans() {
+        let alphabet = b"/[]\\\nab ";
+        let mut seed: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for _ in 0..20_000 {
+            let len = (next() % 40) as usize;
+            let b: Vec<u8> = (0..len)
+                .map(|_| alphabet[(next() % alphabet.len() as u64) as usize])
+                .collect();
+            let mut memo = RegexMemo::default();
+            let subset = next();
+            for (i, _) in b.iter().enumerate().filter(|(_, &c)| c == b'/') {
+                if subset >> (i % 64) & 1 == 0 {
+                    continue;
+                }
+                assert_eq!(
+                    regex_close(&b, i + 1, &mut memo),
+                    regex_close_naive(&b, i + 1),
+                    "{:?} at {i}",
+                    String::from_utf8_lossy(&b)
+                );
+            }
+        }
+    }
 
     fn kinds<'a>(toks: &[Token<'a>]) -> Vec<(TokKind, &'a str)> {
         toks.iter()

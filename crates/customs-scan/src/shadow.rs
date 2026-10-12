@@ -121,7 +121,7 @@ pub(crate) fn view(text: &str, lang: Lang) -> Option<View> {
             .collect();
         let outside = text
             .match_indices(['\u{2028}', '\u{2029}'])
-            .any(|(i, _)| !keep.iter().any(|&(s, e)| s <= i && i < e));
+            .any(|(i, _)| !inside(&keep, i));
         if outside {
             why.push(Why::LineSeparator);
         }
@@ -144,6 +144,12 @@ pub(crate) fn view(text: &str, lang: Lang) -> Option<View> {
     })
 }
 
+/// Whether byte `i` lies in one of the `keep` spans, which are in order and do not overlap.
+fn inside(keep: &[(usize, usize)], i: usize) -> bool {
+    let after = keep.partition_point(|&(s, _)| s <= i);
+    after > 0 && i < keep[after - 1].1
+}
+
 /// `text` with the byte-order mark dropped and every line end written as `\n`: `\r\n`,
 /// a bare `\r` and, in JavaScript, U+2028 and U+2029 outside the `keep` literal spans.
 fn interpreter_text(text: &str, lang: Lang, keep: &[(usize, usize)]) -> String {
@@ -154,11 +160,7 @@ fn interpreter_text(text: &str, lang: Lang, keep: &[(usize, usize)]) -> String {
             '\u{feff}' if i == 0 => {}
             '\r' if chars.peek().is_some_and(|&(_, n)| n == '\n') => {}
             '\r' => out.push('\n'),
-            '\u{2028}' | '\u{2029}'
-                if lang == Lang::Js && !keep.iter().any(|&(s, e)| s <= i && i < e) =>
-            {
-                out.push('\n')
-            }
+            '\u{2028}' | '\u{2029}' if lang == Lang::Js && !inside(keep, i) => out.push('\n'),
             _ => out.push(c),
         }
     }
@@ -300,6 +302,20 @@ pub(crate) fn ascii_transparent(codec: &str, data: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Many line separators inside many string literals: finding the literal around each
+    /// separator is a search, not a walk over every literal.
+    #[test]
+    fn many_line_separators_in_strings_stay_linear() {
+        let text = format!("\u{feff}{}", "'\u{2028}xx',".repeat(300_000));
+        let started = std::time::Instant::now();
+        let v = view(&text, Lang::Js).expect("the BOM needs a rewrite");
+        let took = started.elapsed();
+        assert!(took < std::time::Duration::from_secs(5), "{took:?}");
+        assert_eq!(v.why, vec![Why::Bom]);
+        // Inside literals, separators are kept; only the BOM goes.
+        assert_eq!(v.text.as_deref(), Some(&text[3..]));
+    }
 
     #[test]
     fn plain_files_need_no_second_look() {

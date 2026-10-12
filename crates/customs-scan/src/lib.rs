@@ -34,7 +34,7 @@ pub use large::install_time_code;
 /// Version of the feature schema emitted by this crate.
 pub const FEATURE_SCHEMA_VERSION: u32 = 1;
 /// Bump whenever scanner output for the same archive can change outside the feature schema.
-pub const SCAN_RULES_VERSION: u32 = 3;
+pub const SCAN_RULES_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -1090,18 +1090,22 @@ impl<'a> Scanner<'a> {
             };
             // Follow on from there in each file's own interpreter reading, up to the
             // surface's own hop limit.
+            let mut unread = 0usize;
             for _ in 0..3 {
                 let mut next = Vec::new();
                 for i in frontier {
                     let on_surface = self.entry_unit.get(&i).is_some_and(|&w| self.units[w].inst);
                     let e = &self.c.entries[i];
-                    if on_surface
-                        || !e.full
-                        || followed.len() >= MAX_FOLLOWED
-                        || !followed.insert(i)
-                    {
+                    if on_surface || !e.full || followed.contains(&i) {
                         continue;
                     }
+                    // Past the cap a file is counted, not read: padding with harmless
+                    // hidden imports must not push a payload out of reach unnoticed.
+                    if followed.len() >= MAX_FOLLOWED {
+                        unread += 1;
+                        continue;
+                    }
+                    followed.insert(i);
                     let raw = String::from_utf8_lossy(&e.data);
                     let lang = unit.lang;
                     let view = shadow::view(&raw, lang);
@@ -1126,6 +1130,11 @@ impl<'a> Scanner<'a> {
                     }
                 }
                 frontier = next;
+            }
+            if unread > 0 {
+                out.push(format!(
+                    "{path}: {unread} more files imported only in the interpreter's reading were not read (follow limit {MAX_FOLLOWED})"
+                ));
             }
         }
         out
