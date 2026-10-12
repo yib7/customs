@@ -157,6 +157,31 @@ describe('Check page', () => {
     expect(await screen.findByTestId('nonexistent-result')).toHaveTextContent(/does not exist on PyPI/);
   });
 
+  it('shows other 404s as errors, not as a nonexistent package', async () => {
+    const user = userEvent.setup();
+    const mock = renderApp('/check');
+    // EngineError::NotFound for a missing file or version, not a missing package.
+    vi.spyOn(mock.server, 'handle').mockReturnValue({ status: 404, body: { error: 'not found upstream' } });
+    await user.type(screen.getByRole('textbox', { name: 'Package name' }), 'requests');
+    await user.click(screen.getByRole('button', { name: 'Check' }));
+    expect(await screen.findByText('The check failed')).toBeInTheDocument();
+    expect(screen.getByText('not found upstream')).toBeInTheDocument();
+    expect(screen.queryByTestId('nonexistent-result')).toBeNull();
+  });
+
+  it('accepts version ranges and tags the check as coming from the dashboard', async () => {
+    const user = userEvent.setup();
+    const mock = renderApp('/check');
+    const handle = vi.spyOn(mock.server, 'handle');
+    await user.type(screen.getByRole('textbox', { name: 'Package name' }), 'requests');
+    await user.type(screen.getByRole('textbox', { name: /Version/ }), '>=1,<2');
+    await user.click(screen.getByRole('button', { name: 'Check' }));
+    expect(await screen.findByTestId('verdict')).toBeInTheDocument();
+    expect(screen.queryByText(/Not a valid version/)).toBeNull();
+    const call = handle.mock.calls.find(([method, url]) => method === 'POST' && url.pathname === '/api/check');
+    expect(call?.[2]).toMatchObject({ ecosystem: 'pypi', name: 'requests', version: '>=1,<2', client: 'dashboard' });
+  });
+
   it('validates the package name before sending', async () => {
     const user = userEvent.setup();
     renderApp('/check');

@@ -179,7 +179,8 @@ export const api = {
   check(req: CheckRequest, signal?: AbortSignal): Promise<Verdict> {
     return request('/api/check', parseVerdict, {
       method: 'POST',
-      body: JSON.stringify(req),
+      // Recorded on the event; without it the server records "api".
+      body: JSON.stringify({ ...req, client: 'dashboard' }),
       signal,
     });
   },
