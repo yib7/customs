@@ -160,14 +160,14 @@ fn claude_hook(inputs: &Inputs, out: &mut Vec<Finding>) {
                 Level::Warn,
                 &subject,
                 "the Customs hook is registered, but its matcher does not include Bash, so it checks no install".into(),
-                "set the matcher to Bash|Edit|Write|MultiEdit|NotebookEdit (deploy/hooks/claude-code-settings.json)",
+                "set the matcher to Bash|PowerShell|Edit|Write|MultiEdit|NotebookEdit (deploy/hooks/claude-code-settings.json)",
             ));
         } else if !(sees("Edit") && sees("Write")) {
             out.push(finding(
                 Level::Warn,
                 &subject,
                 "the Customs hook sees only shell commands: an Edit or Write call can remove it from these settings or repoint .npmrc without confirmation".into(),
-                "set the matcher to Bash|Edit|Write|MultiEdit|NotebookEdit (deploy/hooks/claude-code-settings.json)",
+                "set the matcher to Bash|PowerShell|Edit|Write|MultiEdit|NotebookEdit (deploy/hooks/claude-code-settings.json)",
             ));
         } else {
             out.push(finding(
@@ -1092,7 +1092,7 @@ mod tests {
         assert_eq!(f.len(), 1);
         assert_eq!(f[0].0, Level::Warn);
         assert!(f[0].1.contains("only shell commands"), "{}", f[0].1);
-        write("Bash|Edit|Write|MultiEdit|NotebookEdit");
+        write("Bash|PowerShell|Edit|Write|MultiEdit|NotebookEdit");
         assert_eq!(hook(run_with(d.path(), None, full_env()))[0].0, Level::Ok);
         write("*");
         assert_eq!(hook(run_with(d.path(), None, full_env()))[0].0, Level::Ok);

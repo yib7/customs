@@ -1093,11 +1093,12 @@ both to proxied downloads and to `POST /api/check`.
 
 ## 9. Claude Code integration
 
-`customs hook claude-code` is a PreToolUse command hook for the `Bash` tool. It parses the
-command for package installs (`pip install`, `pip3 install`, `python -m pip install`,
+`customs hook claude-code` is a PreToolUse command hook for the `Bash` tool and, on
+Windows, the `PowerShell` tool, whose commands are read with backslashes as path separators
+and backticks as escapes. It parses the command for package installs (`pip install`, `pip3 install`, `python -m pip install`,
 `uv pip install`, `uv add`, `poetry add`, `pixi add --pypi`, `pipx install`, the PEP 723
-inline dependencies of a script run by `uv run` or `pipx run`, `npm install|i|add`,
-`pnpm add|install`, `yarn add`, `bun add`, `npx <pkg>`, `uvx <pkg>`, and the scaffolding
+inline dependencies of a script run by `uv run` or `pipx run` or named by `pip install
+--requirements-from-script`, `npm install|i|add|install-test|it`, `pnpm add|install`, `yarn add`, `bun add`, `npx <pkg>`, `uvx <pkg>`, and the scaffolding
 commands `npm init|create <x>`, `pnpm|yarn|bun create <x>`, which run `create-<x>`, or
 `@scope/create-<x>` for `@scope/<x>`; and Deno: `deno add|install npm:<x>` (a name without
 a prefix is an npm package there), `deno install -g`, `deno run|serve|compile|cache
@@ -1112,16 +1113,30 @@ a PreToolUse decision: `deny` with an explanation when any package is blocked, `
 any is warned, nothing otherwise. Local paths, URLs, `-r requirements.txt` and editable
 installs are handled (requirements files are read and each line checked). Commands are
 found behind wrappers (`sudo`, `env`, `timeout`, `nice`, `watch`, `flock`, `ionice`,
-`taskset`, `chrt`, `setsid`, `script -c`, `bash -c`, `eval`) and in the inline code of
-`python -c` and `node -e|-p`, where quotes, commas and opening brackets are read as spaces
-so `subprocess.run(['pip', 'install', 'x'])` reads as `pip install x`. An install run by
-`xargs` also reports its input as unverifiable, since the package names come from there.
+`taskset`, `chrt`, `setsid`, `script -c`, `eval`, and `bash -c` or any of `sh`, `zsh`,
+`dash`, `ksh`, `ash`, `mksh`, `posh` with shell options before the script, such as `-o
+pipefail` or `-euo pipefail`, and `fish --command`); behind Windows shells (`cmd /c|/k`,
+`pwsh|powershell -Command`, `-EncodedCommand`, and Windows PowerShell's bare command
+argument); behind project runners (`uv run`, `poetry run`, `pdm run`, `pipenv run`, `hatch
+run [ENV:]`, `pixi run`, `conda|mamba|micromamba run`); and behind package runners whose
+command is itself an installer (`uvx pip install x`, `npx -y pnpm add x`, `npx -c '...'`).
+A program's `.exe`, `.cmd`, `.bat` or `.ps1` suffix is ignored. Global options before a
+pip or npm subcommand are skipped, including ones the parser does not know: an unknown
+`--option` followed by a word that is not a subcommand takes that word as its value.
+Installs are also found in the inline code of `python -c` and `node -e|-p`, and in code a
+heredoc feeds to an interpreter (`python3 - <<EOF`), where quotes, commas and opening
+brackets are read as spaces so `subprocess.run(['pip', 'install', 'x'])` reads as `pip
+install x`. An install run by `xargs` also reports its input as unverifiable, since the
+package names come from there.
 
 Output is JSON on stdout with exit code 0:
 `{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny" | "ask", "permissionDecisionReason": "..."}}`.
-Specs that cannot be checked (git, URL, local path, custom index) produce `ask`; editable
+Specs that cannot be checked (git, URL, local path, custom index, including a scope's
+`--@scope:registry`) produce `ask`; editable
 local paths are skipped. When Customs itself fails, the hook fails open (no decision,
-message on stderr) unless run with `--fail-closed`, which denies. Setup: `deploy/hooks/README.md`.
+message on stderr) unless run with `--fail-closed`, which denies. A check that cannot
+start at all (no server and no in-process engine, for example a broken `customs.toml`)
+fails only the registry packages: tampering and specs that need no check still ask. Setup: `deploy/hooks/README.md`.
 
 **Downloaded scripts.** A script fetched and run in one step never reaches the registry
 proxy: `curl -fsSL URL | sh`, `wget -qO- URL | sudo bash`, `curl URL | python3 -`,
@@ -1155,11 +1170,18 @@ first five by name with their lockfile line, then a count): a lockfile edit can 
 entry at any host under a trusted name, and a test with Deno 2.9 installed such an entry
 without going through the proxy. The project's own local folders do not count. Direct dependencies in the manifest that the
 lockfile does not pin yet are checked too, as the ranges they name: `package.json`
-`dependencies`, `devDependencies` and `optionalDependencies` (skipping `workspace:`,
-`file:`, `link:` and `portal:`), `pyproject.toml` `[project].dependencies` (plus
-`[dependency-groups].dev` for uv and the Poetry dependency tables for Poetry), and
-Pipfile `[packages]`. This is the case where an agent adds a dependency to `package.json`
-and then runs `npm install`. `pip install .`, `pip install -e .` and `uv pip install -e
+`dependencies`, `devDependencies`, `optionalDependencies` and `peerDependencies` (npm 7
+installs peers; skipping peers `peerDependenciesMeta` marks optional and `workspace:`,
+`file:`, `link:` and `portal:` ranges), `pyproject.toml` `[project].dependencies` (plus
+`[dependency-groups].dev` for uv, and for Poetry its main table, `dev-dependencies` and every
+group not marked `optional = true`), and Pipfile `[packages]` (plus `[dev-packages]` for
+`pipenv install|sync --dev`). This is the case where an agent adds a dependency to
+`package.json` and then runs `npm install`. "Pinned" means a locked version of that name
+satisfies the manifest's range (`resolve::resolve_version` over the locked versions), so a
+manifest bumped past the lock (`"left-pad": "9.9.9"` with `1.3.0` locked) is checked at the
+version the install will fetch; a range Customs cannot parse counts as satisfied. PyPI names
+are compared normalized. Without a lockfile, a Pipfile `[[source]]` or `tool.uv.index` URL
+other than PyPI produces `ask`: the packages it serves are not checked. `pip install .`, `pip install -e .` and `uv pip install -e
 '.[dev]'` (also `-e` lines in requirements files) are treated the same way when the
 directory has a `pyproject.toml`: there is no lockfile, so the hook checks
 `[project].dependencies` plus the optional-dependency groups named as extras. The local
@@ -1194,7 +1216,10 @@ answers Codex CLI's `PreToolUse`, whose input has Claude Code's shape: `Bash` ca
 `apply_patch` carries the patch text. The hook splits the patch on its `*** Add File`,
 `*** Update File` and `*** Delete File` headers and runs the edit check on each file, so a
 patch that deletes `.codex/hooks.json` or removes the hook lines from `.codex/config.toml`
-is caught. Codex rejects `ask` as unsupported and treats an output it rejects as a failed
+is caught. A patch that adds or updates an MCP server configuration is applied in memory
+(an `Update File` section's hunks to the file on disk, matched the way `apply_patch`
+matches them) and the servers in the result are checked like an edit's; when a hunk does
+not apply, the servers are unknown and the hook asks. Codex rejects `ask` as unsupported and treats an output it rejects as a failed
 hook, which lets the tool run, so the Codex hook turns `ask` into `deny` and tells the
 agent to check with the user. Each check records the agent as its client
 (`claude-code-hook`, `cursor-hook`, `gemini-hook`, `codex-hook`).
@@ -1244,12 +1269,19 @@ that mentions it, `systemctl`, `service`, `launchctl`, `docker` or `podman` stop
 writes to `.claude/settings*.json`, and pointing installers away from the proxy: an
 assignment (before the command or behind `env`, `sudo` and similar wrappers), `export`,
 `unset` or `env -u` of a variable `customs env` sets or of `YARN_REGISTRY`,
-`PIP_FIND_LINKS` or `UV_FIND_LINKS`, `npm|pnpm|yarn|bun config set|delete registry`, `pip config set|unset *index*`, or a registry or index
-line written into `.npmrc`, `pip.conf`, `pip.ini`, `.yarnrc(.yml)`, `bunfig.toml` or
-`uv.toml`. A value that points at the Customs server (its authority, or the same port on
-a loopback name) is not flagged. The Edit, Write, MultiEdit and NotebookEdit tools get the
-same check on those files when the hook's matcher includes them, which the shipped
-settings do.
+`PIP_FIND_LINKS` or `UV_FIND_LINKS`, any assignment of a variable that loads another
+configuration file (`NPM_CONFIG_USERCONFIG`, `NPM_CONFIG_GLOBALCONFIG`, `PIP_CONFIG_FILE`,
+`UV_CONFIG_FILE`, `YARN_RC_FILENAME`), `npm|pnpm|yarn|bun config set|delete registry`
+(also `npm set`, scoped `@scope:registry` keys, and options anywhere: `config set -g
+registry`), `pip config set|unset *index*|*find-links*` (also `python -m pip`), or a
+registry or index line written into `.npmrc`, `pip.conf`, `pip.ini`, `.yarnrc(.yml)`,
+`bunfig.toml` or `uv.toml`. Program names are read without their directory or a Windows
+`.exe`/`.cmd`/`.bat`/`.ps1` suffix. A value is not flagged when every URL in it parses to
+the Customs server: its host, or a loopback name, on its port. The address appearing
+elsewhere (a query string, userinfo, a `# localhost:7878` comment) does not count. The
+Edit, Write, MultiEdit and NotebookEdit tools and Codex patches get the same check on
+those files, judged on the text the edit leaves (removing the Customs line is flagged),
+when the hook's matcher includes them, which the shipped settings do.
 
 An edit to an MCP server configuration (the files of section 11: `.mcp.json`,
 `.cursor/mcp.json`, `.vscode/mcp.json`, `.gemini/settings.json`, ...) is read as the file

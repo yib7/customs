@@ -2847,3 +2847,74 @@ fn cli_audit_lists_what_it_can_read_past_a_broken_config() {
     assert!(stdout.contains("requirements.txt:1  flask>=2"), "{stdout}");
     assert!(stdout.contains("launcher not recognised"), "{stdout}");
 }
+
+// ---- Phase 3A: HOOK ----
+
+/// A config whose upstreams refuse connections, so no package can be checked.
+fn dead_upstreams(dir: &std::path::Path) -> String {
+    let cfg = dir.join("customs.toml");
+    std::fs::write(
+        &cfg,
+        "[upstream]\npypi_simple = \"http://127.0.0.1:9/simple\"\npypi_files = \"http://127.0.0.1:9/f\"\npypi_json = \"http://127.0.0.1:9/pypi\"\nnpm = \"http://127.0.0.1:9/npm\"\n",
+    )
+    .unwrap();
+    cfg.display().to_string()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn hook_fails_closed_on_input_that_once_panicked() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dead_upstreams(dir.path());
+    let cwd = dir.path().to_path_buf();
+    let (stdout, stderr, code) = tokio::task::spawn_blocking(move || {
+        run_hook(
+            "http://127.0.0.1:9",
+            "pip install -\u{e9}x; pip install zzevil",
+            &cwd,
+            &["--config", &cfg, "--fail-closed"],
+        )
+    })
+    .await
+    .unwrap();
+    assert_eq!(code, 0, "{stderr}");
+    let d: Value =
+        serde_json::from_str(stdout.trim()).unwrap_or_else(|_| panic!("{stdout} {stderr}"));
+    assert_eq!(d["hookSpecificOutput"]["permissionDecision"], "deny", "{d}");
+    let reason = d["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .unwrap();
+    assert!(reason.contains("zzevil"), "{reason}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn hook_checks_installs_that_runners_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dead_upstreams(dir.path());
+    let cwd = dir.path().to_path_buf();
+    for command in [
+        "uv run pip install zzevil",
+        "npx -y pnpm add zzevil",
+        "bash -euo pipefail -c 'pip install zzevil'",
+        "cmd /c npx -y zzevil",
+    ] {
+        let (cwd, cfg) = (cwd.clone(), cfg.clone());
+        let (stdout, stderr, code) = tokio::task::spawn_blocking(move || {
+            run_hook(
+                "http://127.0.0.1:9",
+                command,
+                &cwd,
+                &["--config", &cfg, "--fail-closed"],
+            )
+        })
+        .await
+        .unwrap();
+        assert_eq!(code, 0, "{stderr}");
+        let d: Value = serde_json::from_str(stdout.trim())
+            .unwrap_or_else(|_| panic!("{command}: {stdout} {stderr}"));
+        assert_eq!(d["hookSpecificOutput"]["permissionDecision"], "deny", "{d}");
+        let reason = d["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .unwrap();
+        assert!(reason.contains("zzevil"), "{command}: {reason}");
+    }
+}

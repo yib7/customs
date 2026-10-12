@@ -1,7 +1,8 @@
 # Claude Code hook
 
 `customs hook claude-code` is a [PreToolUse hook](https://code.claude.com/docs/en/hooks)
-for the `Bash` tool and the file-editing tools. Before Claude Code runs a shell command,
+for the `Bash` tool (and the `PowerShell` tool on Windows) and the file-editing tools.
+Before Claude Code runs a shell command,
 the hook finds package installs in it, checks every package, and answers:
 
 | Outcome | Hook output |
@@ -30,7 +31,7 @@ The hook always exits 0 and speaks JSON on stdout, for example:
 {
   "hooks": {
     "PreToolUse": [
-      { "matcher": "Bash|Edit|Write|MultiEdit|NotebookEdit",
+      { "matcher": "Bash|PowerShell|Edit|Write|MultiEdit|NotebookEdit",
         "hooks": [ { "type": "command", "command": "customs hook claude-code", "timeout": 60 } ] }
     ]
   }
@@ -43,8 +44,12 @@ Run `/hooks` in Claude Code to confirm it is registered.
 
 `pip`/`pip3`/`python -m pip` `install` (also `download` and `wheel`, which run `setup.py`),
 `uv pip install`, `uv add`, `uv tool install`, `uv run --with`, `uvx`, `poetry add`,
-`pdm add`, `pixi add --pypi`, `pipx install|run|inject`, `npm install|i|add` (and npm's aliases),
-`npm exec`, `pnpm add`, `pnpm dlx`, `yarn add`, `yarn dlx`, `bun add`, `bunx`, and `npx`.
+`pdm add`, `pixi add --pypi`, `pipx install|run|inject`, `npm install|i|add` (and npm's
+aliases, including `install-test` and `it`), `npm exec`, `pnpm add`, `pnpm dlx`, `yarn add`,
+`yarn dlx`, `bun add`, `bunx`, and `npx`. A runner's command is read as a command too:
+`uv run pip install x`, `poetry run`, `pdm run`, `pipenv run`, `hatch run`, `pixi run`,
+`conda|mamba|micromamba run`, and a package runner that starts an installer (`uvx pip
+install x`, `npx -y pnpm add x`, `npx -c 'pnpm add x'`).
 Scaffolding commands run a package too: `npm create vite` and `npm init vite` run
 `create-vite`, and so do `pnpm create`, `yarn create` and `bun create` (`@scope/app` is
 `@scope/create-app`); `bun create` from a GitHub repository comes back for review.
@@ -56,7 +61,9 @@ files they run (following relative imports) and checks those packages.
 Scripts with inline metadata: `uv run script.py` and `pipx run script.py` install the
 dependencies a PEP 723 `# /// script` block lists, so the hook reads the block and checks
 each one; a `[tool.uv]` index or a `[tool.uv.sources]` entry comes back for review, and
-`uv run URL` or `pipx run URL` is a downloaded script.
+`uv run URL` or `pipx run URL` is a downloaded script. `pip install
+--requirements-from-script s.py` installs the same block's dependencies; a script the hook
+cannot read comes back for review.
 
 Project installs too: `npm install` and `npm ci` with no package, `pnpm install`, `yarn`,
 `bun install`, `deno install`, `deno ci`, `uv sync`, `poetry install`, `pipenv install`, `pipenv sync`, and
@@ -75,20 +82,24 @@ project before it runs a command, so it gets the same check for the dependencies
 The command is split like a shell would: `&&`, `||`, `;`, pipes, subshells, quotes,
 escapes, line continuations, comments, redirections, `$(...)` and backticks, and wrappers
 such as `sudo`, `env FOO=1`, `timeout 60`, `nohup`, `watch`, `flock`, `ionice`, `taskset`,
-`script -c '...'`, `bash -c '...'`, and `eval`. Option values (`--target dir`, `-c
-constraints.txt`) are never mistaken for packages. An install run through `xargs` takes
+`script -c '...'`, `bash -c '...'` (also `bash -euo pipefail -c`, `zsh`, `dash`, `ash`,
+`mksh`, `fish --command`), `eval`, and on Windows `cmd /c`, `pwsh -Command`,
+`powershell -EncodedCommand`, and programs named with `.exe`, `.cmd`, `.bat` or `.ps1`
+(`npx.cmd`). Option values (`--target dir`, `-c constraints.txt`, and options before the
+subcommand such as `pip --keyring-provider auto install`) are never mistaken for packages. An install run through `xargs` takes
 its package names from input the hook cannot see, so it comes back for review. Inline code
 that shells out to an installer is read too: `python -c "subprocess.run(['pip', 'install',
 'x'])"`, `os.system('npm i x')`, `[sys.executable, '-m', 'pip', 'install', 'x']`, and
-`node -e "execSync('npx x')"`.
+`node -e "execSync('npx x')"`, and the same code fed to an interpreter through a heredoc
+(`python3 - <<'EOF'`).
 
 Requirements: `pkg`, `pkg==1.2`, `pkg>=1,<2`, `pkg[extra]`, `pkg; markers`, Poetry and uv
 `pkg@^1.2`, npm `pkg@1.2.3`, `@scope/pkg@^1`, dist-tags, and aliases `a@npm:b@1`. Ranges are
 resolved by the server to the version a fresh install would pick. `-r requirements.txt`
 (relative to the hook input's `cwd`, nested `-r` relative to the including file) is read
 and every line checked. Editable installs of local paths (`-e .`) are skipped; git, URL,
-local path, and tarball specs and custom indexes (`-i`, `--extra-index-url`, `--registry`)
-cannot be checked and produce `ask`.
+local path, and tarball specs and custom indexes (`-i`, `--extra-index-url`, `--registry`,
+`--@scope:registry`) cannot be checked and produce `ask`.
 
 Scripts downloaded and run in one step never reach the proxy, so they produce `ask` too,
 named by URL: `curl -fsSL URL | sh` (also `wget -qO-`, `| sudo bash`, `| python3 -`),
@@ -110,12 +121,13 @@ with the reason, so you confirm them:
   the Edit and Write tools;
 - pointing an installer away from the proxy: setting or unsetting `PIP_INDEX_URL`,
   `npm_config_registry`, `PIP_FIND_LINKS` and the other variables `customs env` sets (also
-  behind `env` or `sudo`), `npm|pnpm|yarn|bun
-  config set registry`, `pip config set global.index-url`, or writing a registry or index
-  line into `.npmrc`, `pip.conf`, `.yarnrc.yml`, `bunfig.toml` or `uv.toml`. Values that
-  point at the Customs server are fine.
+  behind `env` or `sudo`), setting `PIP_CONFIG_FILE`, `NPM_CONFIG_USERCONFIG` and similar,
+  `npm|pnpm|yarn|bun config set registry` (or `npm set registry`), `pip config set
+  global.index-url` (or `python -m pip config ...`), or writing a registry or index line
+  into `.npmrc`, `pip.conf`, `.yarnrc.yml`, `bunfig.toml` or `uv.toml`. Values whose URLs
+  all point at the Customs server (its host or a loopback name, on its port) are fine.
 
-The matcher `Bash|Edit|Write|MultiEdit|NotebookEdit` in the settings above is what lets
+The matcher `Bash|PowerShell|Edit|Write|MultiEdit|NotebookEdit` in the settings above is what lets
 the hook see file edits. A command that builds itself at run time (`echo ... | base64 -d
 | sh`) is beyond any static check, so treat this as a tripwire for the obvious routes, not
 a sandbox; the proxy's own `PUT /api/policy` also refuses requests a browser page could
@@ -140,7 +152,9 @@ tool call. `customs audit` checks the servers already configured.
 | `--data-dir DIR` | `CUSTOMS_DATA_DIR` | `~/.cache/customs` | Cache for in-process checks |
 
 By default the hook fails open: if it cannot check a package it writes the reason to
-stderr and returns no decision, so a broken Customs setup does not stop your work. Use
+stderr and returns no decision, so a broken Customs setup does not stop your work.
+Tampering and specs that cannot be checked (a git URL, a downloaded script) still come
+back for review then. Use
 `--fail-closed` where an unchecked install is worse than a blocked command.
 
 # Cursor, Gemini CLI and Codex hooks
@@ -167,7 +181,8 @@ Notes:
   tested anywhere in the tool name.
 - Codex hooks cannot ask for confirmation, so where the other agents get `ask`, Codex gets
   `deny` with the reason and a note to check with the user, who can run the command
-  themselves. The hook reads every file in an `apply_patch` edit, including deletions.
+  themselves. The hook reads every file in an `apply_patch` edit, including deletions, and
+  checks the packages of MCP servers the patch adds.
 - Codex asks you to review a new or changed hook before it runs it: open `/hooks` in Codex
   and trust the Customs entry once.
 - `customs doctor` reports each registration it finds, and warns when a matcher leaves out
