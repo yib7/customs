@@ -3,9 +3,92 @@
 Versions follow [semantic versioning](https://semver.org). Each release title names what
 shipped in it.
 
-## v0.9.0: registry firewall, agent hooks and lockfile audit
+## v1.0.0: audit fixes across the firewall, hooks, dashboard and training tools
 
 First public release. Not tagged yet.
+
+### Added
+
+- `hidden_code` policy rule (block by default): install-time code that Python or Node
+  runs but the scanner's model inputs leave out (code after a bare CR, U+2028/2029 or a
+  backslash-CRLF continuation, behind a byte-order mark, or in f-string fields). The
+  dashboard's Policy page has a toggle for it.
+- `serve --allowed-hosts` (env `CUSTOMS_ALLOWED_HOSTS`) for host names allowed to change
+  the policy.
+- Hooks check Claude Code's PowerShell tool, installs behind runners and Windows shells,
+  MCP servers a Codex patch adds, and manifest versions the lockfile does not satisfy.
+- `customs audit` reads JSONC MCP configs, yarn berry resolutions, deno.lock v2, pip index
+  options and uv.lock download URLs; lists MCP servers whose launcher it does not
+  recognise; writes SARIF metadata for every policy rule and notes for entries that fetch
+  code Customs did not check.
+
+### Changed
+
+- Packages that were not scanned (nonexistent, too large, or rejected by the scanner) get
+  no model risk instead of a made-up 0.70 to 0.78. The verdict still names the popular
+  package a lookalike imitates.
+- `unread_code` also covers code pip or npm would install differently from what the
+  scanner read: a path stored twice, links and sparse entries at install-time paths,
+  absolute paths, entries node-tar extracts after an end-of-archive block, Python coding
+  cookies that change what runs, and an empty npm install script beside `binding.gyp`.
+- `startup_hook` also covers `sitecustomize.py` and `usercustomize.py`, including wheel
+  `.data` copies.
+- `POST /api/check` reads both the sdist and the pure-Python wheel and returns the
+  stricter verdict, dates each archive by its own upload time, and always reads sdists
+  and npm tarballs whatever size the registry reports.
+- `PUT /api/policy` refuses a body that leaves keys out, listing each one, instead of
+  resetting them to defaults.
+- The scan cache is keyed on the scanner and summary versions; results from earlier
+  builds are dropped at startup. The database schema is versioned.
+- Boolean environment variables accept 1/0/yes/no. The client never takes the policy or
+  models from the working directory. On Windows without `HOME` the client cache lives in
+  `%LOCALAPPDATA%\customs`.
+
+### Fixed
+
+- Upstream requests have overall time limits (10 minutes for an archive, 2 minutes for
+  pages and metadata); a slow upstream gets a 502 instead of hanging. A cut-off npm
+  passthrough body is a 502, not an empty 200. Truncated cached archives are downloaded
+  again, and partial downloads left by a crash are removed at startup.
+- PyPI pins match by PEP 440 equality, caret bounds never overflow, npm aliases are
+  compared by the package they install, and bare local paths count as non-registry
+  dependencies.
+- The hook never panics on unusual input (non-ASCII short options), keeps tampering
+  findings when no checker starts, and matches the Customs address by parsed host and
+  port.
+- MCP: unknown tool arguments are rejected, at most 16 requests run at once, lockfile
+  reads no longer block the server, and `audit_lockfile` never answers allow when checks
+  failed.
+- Model loading rejects non-finite weights, calibrations that are not a non-decreasing
+  probability and GBDT features the scanner does not produce; a non-finite risk blocks.
+  A corrupt `metrics.json` is logged and ignored instead of stopping startup.
+- Webhooks count failed deliveries in the next message, and policy alerts no longer wait
+  behind verdict retries.
+- Dashboard: refuses non-JSON success responses instead of showing a default policy,
+  recovers the live feed after a late server start and catches up on lagged events, keeps
+  Activity search and paging in the URL, handles bad verdict ids, accepts version ranges
+  on the Check page, and says what monitor mode and checks did with a blocked package.
+- Clearer startup errors: an empty admin token, a missing dashboard directory, an
+  unwritable data directory, an unreadable `CUSTOMS_CA_FILE`, and no models found (the
+  warning lists where it looked).
+- Training tools: UTF-8 for all text I/O, and a missing GuardDog, an empty held-out half,
+  a timed-out parity check or a CNN run without a usable validation PR AUC give a clear
+  error or a recorded result instead of a crash. MalRegistry dev-half rows that
+  near-duplicate validation or test malware are dropped.
+
+### Security
+
+- Upstream credentials are shown as `***` in the API, change log, webhook and logs;
+  sending `***` back for the same URL keeps the stored credentials. Upstream URLs with a
+  query or fragment are rejected. `customs doctor` never prints index URL credentials.
+- The Vite dev origin is gone from CORS and the Origin check.
+- `customs audit` trusts a loopback registry only at the Customs server's port.
+- More registry rewrites are flagged by the hook (`npm set registry`, `python -m pip
+  config`, `PIP_CONFIG_FILE`, Windows `npm.cmd`).
+
+## v0.9.0: registry firewall, agent hooks and lockfile audit
+
+Never tagged; everything here ships in 1.0.0.
 
 ### Firewall
 
