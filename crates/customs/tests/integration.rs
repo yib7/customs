@@ -1570,7 +1570,18 @@ async fn events_filters_stats_model_metrics_health() {
     assert_eq!(s["by_ecosystem"]["pypi"]["allow"], 1);
     assert_eq!(s["by_kind"]["install"], 3);
     assert_eq!(s["blocks_per_day"].as_array().unwrap().len(), 30);
-    assert_eq!(s["blocks_per_day"][29]["count"], 1);
+    // Find the day by date: the block may have landed just before UTC midnight.
+    let ev = h.events().await;
+    let block = ev.iter().find(|e| e["decision"] == "block").unwrap();
+    let day = &block["ts"].as_str().unwrap()[..10];
+    let blocks: Vec<(&str, u64)> = s["blocks_per_day"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| (d["date"].as_str().unwrap(), d["count"].as_u64().unwrap()))
+        .filter(|(_, n)| *n > 0)
+        .collect();
+    assert_eq!(blocks, [(day, 1)]);
     assert_eq!(s["top_reasons"][0]["feature"], "inst_download_exec");
 
     let m: Value = h.get("/api/model").await.json().await.unwrap();
@@ -2479,9 +2490,48 @@ fn mcp_send(stdin: &mut std::process::ChildStdin, msg: Value) {
     stdin.flush().unwrap();
 }
 
-fn mcp_recv(stdout: &mut impl std::io::BufRead) -> Value {
-    let mut line = String::new();
-    stdout.read_line(&mut line).unwrap();
+/// How long the MCP test waits for any one reply.
+const MCP_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The lines a child writes to stdout, read on a helper thread, so a child that stops
+/// answering fails the test instead of hanging the suite.
+struct McpOut(std::sync::mpsc::Receiver<String>);
+
+impl McpOut {
+    fn new(mut r: impl std::io::BufRead + Send + 'static) -> Self {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || loop {
+            let mut line = String::new();
+            match r.read_line(&mut line) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {
+                    if tx.send(line).is_err() {
+                        break;
+                    }
+                }
+            }
+        });
+        Self(rx)
+    }
+
+    /// Everything the child writes before closing stdout.
+    fn rest(&mut self) -> String {
+        let mut out = String::new();
+        loop {
+            match self.0.recv_timeout(MCP_TIMEOUT) {
+                Ok(line) => out.push_str(&line),
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return out,
+                Err(e) => panic!("the MCP server did not close stdout within {MCP_TIMEOUT:?}: {e}"),
+            }
+        }
+    }
+}
+
+fn mcp_recv(stdout: &mut McpOut) -> Value {
+    let line = stdout
+        .0
+        .recv_timeout(MCP_TIMEOUT)
+        .unwrap_or_else(|e| panic!("no reply from the MCP server within {MCP_TIMEOUT:?}: {e}"));
     serde_json::from_str(&line).unwrap_or_else(|e| panic!("{e}: {line:?}"))
 }
 
@@ -2516,7 +2566,7 @@ fn mcp_server_over_stdio() {
         .spawn()
         .unwrap();
     let mut stdin = child.stdin.take().unwrap();
-    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let mut stdout = McpOut::new(BufReader::new(child.stdout.take().unwrap()));
 
     mcp_send(
         &mut stdin,
@@ -2594,11 +2644,15 @@ fn mcp_server_over_stdio() {
 
     // End of input ends the server cleanly; stdout carried nothing but replies.
     drop(stdin);
-    let mut rest = String::new();
-    stdout.read_to_string(&mut rest).unwrap();
-    assert_eq!(rest, "");
-    let out = child.wait_with_output().unwrap();
-    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(stdout.rest(), "");
+    let mut err = String::new();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut err)
+        .unwrap();
+    assert_eq!(child.wait().unwrap().code(), Some(0), "{err}");
 }
 
 /// Live registries. Run with `cargo test -p customs -- --ignored`.
@@ -2686,7 +2740,8 @@ async fn blocks_are_posted_to_the_webhook_once() {
     while received.lock().unwrap().is_empty() && std::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // The second block was seen and held back as a repeat, not merely late.
+    wait_for_metric(&h, "customs_notifications_total{outcome=\"repeat\"} 1").await;
     let got = received.lock().unwrap().clone();
     assert_eq!(got.len(), 1, "{got:?}");
     let text = got[0]["text"].as_str().unwrap();
