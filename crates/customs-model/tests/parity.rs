@@ -314,6 +314,7 @@ fn nearest_popular_reason_survives_a_negative_name_weight() {
 }
 
 #[test]
+#[ignore = "timing benchmark: cargo test --release -p customs-model -- --ignored"]
 fn name_search_is_fast() {
     // About 5,000 synthetic popular names; scoring one query must take well under a
     // millisecond in release builds. Debug builds are much slower, so the assertion here
