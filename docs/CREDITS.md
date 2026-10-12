@@ -10,10 +10,16 @@ package-name lists and aggregate metrics, never a malware sample.
 |---|---|---|---|
 | [Datadog malicious-software-packages-dataset](https://github.com/DataDog/malicious-software-packages-dataset) | Apache-2.0 | Malicious npm and PyPI archives for training and testing | Model weights trained on it, aggregate metrics |
 | [OpenSSF malicious-packages](https://github.com/ossf/malicious-packages) | Apache-2.0 | Names of reported malware, used to keep them out of the benign set and to measure takedowns | Aggregate metrics |
-| [MalRegistry](https://github.com/lxyeternal/pypi_malregistry) (Guo et al., ASE 2023) | No license file published | Second, independent PyPI malware collection for evaluation and for training on its dev half | Model weights trained on part of it, aggregate metrics |
-| [top-pypi-packages](https://github.com/hugovk/top-pypi-packages) by Hugo van Kemenade | No license file published | Popular PyPI names for benign sampling and the name model | `models/popular_pypi.txt` (package names only) |
+| [MalRegistry](https://github.com/lxyeternal/pypi_malregistry) (Guo et al., ASE 2023) | No license file; the authors ask for the citation below | Second, independent PyPI malware collection for evaluation and for training on its dev half | Model weights trained on part of it, aggregate metrics. No sample is redistributed |
+| [top-pypi-packages](https://github.com/hugovk/top-pypi-packages) by Hugo van Kemenade et al. ([Zenodo](https://doi.org/10.5281/zenodo.3719394)) | [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) (the Zenodo release) | Popular PyPI names for benign sampling and the name model | `models/popular_pypi.txt`: the top 5,000 names, with the download counts removed |
 | [npm-high-impact](https://github.com/wooorm/npm-high-impact) by Titus Wormer | MIT | Popular npm names for benign sampling and the name model | `models/popular_npm.txt` (package names only) |
 | PyPI and the npm registry | Each package's own license | Benign archives for training and testing, downloaded at build time | Model weights and metrics only |
+
+MalRegistry is the dataset of:
+
+> Wenbo Guo, Zhengzi Xu, Chengwei Liu, Cheng Huang, Yong Fang and Yang Liu. "An Empirical
+> Study of Malicious Code In PyPI Ecosystem." 38th IEEE/ACM International Conference on
+> Automated Software Engineering (ASE 2023), pages 166-177.
 
 ## Tools compared against
 
