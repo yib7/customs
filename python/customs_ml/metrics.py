@@ -38,6 +38,12 @@ def recall_at_threshold(y: np.ndarray, score: np.ndarray, t: float) -> float:
     return float(np.mean(pos >= t)) if len(pos) else float("nan")
 
 
+def roc_recall_at_fpr(y: np.ndarray, score: np.ndarray, fpr: float) -> float:
+    """Recall at the threshold-free operating point: the threshold this split's own
+    negatives give at ``fpr`` (no validation step)."""
+    return recall_at_threshold(y, score, threshold_at_fpr(y, score, fpr))
+
+
 def fpr_at_threshold(y: np.ndarray, score: np.ndarray, t: float) -> float:
     neg = score[y == 0]
     return float(np.mean(neg >= t)) if len(neg) else float("nan")

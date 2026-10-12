@@ -49,6 +49,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from . import config
 from .pipeline import SCHEME, load_table, log, work
 
 RULES = (
@@ -782,5 +783,4 @@ if __name__ == "__main__":
     args = ap.parse_args()
     print(json.dumps(run(args.benign, args.years), indent=1))
     if args.parity:
-        root = Path(__file__).resolve().parents[2]
-        print(json.dumps(parity(Path(args.parity), root / "models"), indent=1))
+        print(json.dumps(parity(Path(args.parity), config.MODELS_DIR), indent=1))

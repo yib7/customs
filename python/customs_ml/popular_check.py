@@ -25,8 +25,9 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from . import config
+
 DECISIONS = ("allow", "warn", "block")
-REPO = Path(__file__).resolve().parents[2]
 
 
 def record(eco: str, name: str, verdict: dict) -> dict:
@@ -87,7 +88,7 @@ def summarize(rows: list[dict]) -> dict:
 
 
 def names(eco: str, n: int) -> list[str]:
-    path = REPO / "models" / f"popular_{eco}.txt"
+    path = config.MODELS_DIR / f"popular_{eco}.txt"
     return [x.strip() for x in path.read_text(encoding="utf-8").splitlines() if x.strip()][:n]
 
 

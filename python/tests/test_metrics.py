@@ -49,3 +49,15 @@ def test_cluster_bootstrap_single_class_returns_nan_bounds():
         warnings.simplefilter("error")
         point, lo, hi = metrics.cluster_bootstrap(y, s, np.arange(3), lambda a, b: 0.5)
     assert point == 0.5 and np.isnan(lo) and np.isnan(hi)
+
+
+def test_roc_recall_at_fpr_matches_the_strict_tail_rule():
+    rng = np.random.default_rng(4)
+    for _ in range(50):
+        y = rng.integers(0, 2, 400)
+        s = np.round(rng.normal(0, 1, 400), 2)  # ties included
+        for fpr in (0.001, 0.01, 0.1):
+            neg = np.sort(s[y == 0])[::-1]
+            k = int(np.floor(fpr * len(neg)))
+            old = float(np.mean(s[y == 1] > neg[k]))
+            assert metrics.roc_recall_at_fpr(y, s, fpr) == old

@@ -701,9 +701,9 @@ def stage_train() -> dict:
         "warn": metrics.threshold_at_fpr(yva, rva, DIFF_FPR_WARN),
         "block": metrics.threshold_at_fpr(yva, rva, DIFF_FPR_BLOCK),
     }
-    ens = json.loads(
-        (Path(__file__).resolve().parents[2] / "models/ensemble.json").read_text(encoding="utf-8")
-    )["thresholds"]
+    ens = json.loads((config.MODELS_DIR / "ensemble.json").read_text(encoding="utf-8"))[
+        "thresholds"
+    ]
     ens = {k: ens[k] for k in ("warn", "block")}
     val_benign = table[(table.label == 0) & (table.split == "val")]
 

@@ -312,11 +312,7 @@ class Scorer:
         X = np.array([[r["features"].get(n, np.nan) for n in names_] for r in reports])
         g = gbdt.predict_raw_exported(self.gbdt, X)
         c = np.array([cnn.numpy_forward(self.nn, r.get("tokens") or []) for r in reports])
-        w = self.ens["weights"]
-        b = self.ens.get("clip") or np.inf
-        g, c, n = (np.clip(x, -b, b) for x in (g, c, name_logits))
-        z = self.ens["bias"] + w["code_gbdt"] * g + w["code_nn"] * c + w["name"] * n
-        return gbdt.apply_calibration(self.ens["calibration"], 1 / (1 + np.exp(-z)))
+        return gbdt.stacked_risk(self.ens, {"code_gbdt": g, "code_nn": c, "name": name_logits})
 
 
 def _starjack(files: Files, eco: str, donors: dict[str, Files]) -> Files:

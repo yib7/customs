@@ -49,13 +49,6 @@ from .pipeline import (
 DEFAULT_SEEDS = (7, 11, 23, 42, 101)
 
 
-def _roc_recall(y: np.ndarray, s: np.ndarray, fpr: float) -> float:
-    neg = np.sort(s[y == 0])[::-1]
-    k = int(np.floor(fpr * len(neg)))
-    t = neg[k] if k < len(neg) else -np.inf
-    return float(np.mean(s[y == 1] > t))
-
-
 def test_metrics(df: pd.DataFrame, risk: np.ndarray, thr: dict, scheme: str = SCHEME) -> dict:
     """Headline and slice numbers for one stacked score, at the validation thresholds."""
     split = df[f"split_{scheme}"]
@@ -67,8 +60,8 @@ def test_metrics(df: pd.DataFrame, risk: np.ndarray, thr: dict, scheme: str = SC
         "recall_warn": float(np.mean(s[y == 1] >= thr["warn"])),
         "fpr_block": float(np.mean(s[y == 0] >= thr["block"])),
         "fpr_warn": float(np.mean(s[y == 0] >= thr["warn"])),
-        "roc_recall_0_001": _roc_recall(y, s, FPR_BLOCK),
-        "roc_recall_0_01": _roc_recall(y, s, FPR_WARN),
+        "roc_recall_0_001": metrics.roc_recall_at_fpr(y, s, FPR_BLOCK),
+        "roc_recall_0_01": metrics.roc_recall_at_fpr(y, s, FPR_WARN),
     }
     T = df[te]
     slices = {
@@ -167,11 +160,9 @@ def score_exported(df: pd.DataFrame, models: Path) -> tuple[np.ndarray, dict]:
     X = df[["f_" + n for n in g_m["feature_names"]]].to_numpy(dtype=float)
     g = gbdt.predict_raw_exported(g_m, X)
     c = np.array([cnn.numpy_forward(n_m, list(t)) for t in df.tokens])
-    w, b = ens["weights"], ens.get("clip") or np.inf
-    g, c, n = (np.clip(x, -b, b) for x in (g, c, df.name_logit.to_numpy()))
-    z = ens["bias"] + w["code_gbdt"] * g + w["code_nn"] * c + w["name"] * n
+    n = df.name_logit.to_numpy()
     thr = {"warn": ens["thresholds"]["warn"], "block": ens["thresholds"]["block"]}
-    return gbdt.apply_calibration(ens["calibration"], 1 / (1 + np.exp(-z))), thr
+    return gbdt.stacked_risk(ens, {"code_gbdt": g, "code_nn": c, "name": n}), thr
 
 
 def compare(models: dict[str, Path], scheme: str = SCHEME) -> dict:

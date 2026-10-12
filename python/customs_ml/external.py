@@ -52,7 +52,6 @@ INSPECTED = {
     "pyswyfter",
     "req-tools",
 }
-ROOT = Path(__file__).resolve().parents[2]
 
 
 def norm(name: str) -> str:
@@ -120,7 +119,7 @@ def score_with_binary(
     The binary is ``$CUSTOMS_BIN``, else this checkout's release build (``config.customs_bin``).
     """
     binary = config.customs_bin()
-    models = models or ROOT / "models"
+    models = models or config.MODELS_DIR
 
     def one(args):
         path, name = args
@@ -169,7 +168,7 @@ def code_only_models(out: Path) -> Path:
     name from scoring the sample is to leave the name model out.
     """
     out.mkdir(parents=True, exist_ok=True)
-    for f in (ROOT / "models").iterdir():
+    for f in config.MODELS_DIR.iterdir():
         if f.is_file():
             shutil.copy(f, out / f.name)
     man = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
@@ -183,13 +182,11 @@ def code_only_risk(df: pd.DataFrame, ens: dict, scheme: str = "temporal") -> np.
     from . import gbdt
 
     fb = next(f for f in ens["fallbacks"] if f["missing"] == ["name"])
-    b = ens.get("clip") or np.inf
-    z = (
-        fb["bias"]
-        + fb["weights"]["code_gbdt"] * np.clip(df[f"gbdt_logit_{scheme}"].to_numpy(), -b, b)
-        + fb["weights"]["code_nn"] * np.clip(df[f"cnn_logit_{scheme}"].to_numpy(), -b, b)
-    )
-    return gbdt.apply_calibration(ens["calibration"], 1 / (1 + np.exp(-z)))
+    logits = {
+        "code_gbdt": df[f"gbdt_logit_{scheme}"].to_numpy(),
+        "code_nn": df[f"cnn_logit_{scheme}"].to_numpy(),
+    }
+    return gbdt.stacked_risk(ens, logits, fb["weights"], fb["bias"])
 
 
 def _matched_fpr(df: pd.DataFrame, g: pd.DataFrame, col: str = "risk") -> dict:
@@ -252,7 +249,7 @@ def evaluate(save_as: str | None = None) -> dict:
     df = df.assign(
         ens_risk=df.ens_risk_temporal,
         ens_risk_code=code_only_risk(
-            df, json.loads((ROOT / "models/ensemble.json").read_text(encoding="utf-8"))
+            df, json.loads((config.MODELS_DIR / "ensemble.json").read_text(encoding="utf-8"))
         ),
     )
     train_mal = df[(df.label == 1) & (df.split_temporal == "train")]
@@ -280,7 +277,9 @@ def evaluate(save_as: str | None = None) -> dict:
     ext["cnn"] = [(v.get("scores") or {}).get("code_nn") for v in verdicts]
     ext["name_score"] = [(v.get("scores") or {}).get("name") for v in verdicts]
 
-    ens = json.loads((ROOT / "models/ensemble.json").read_text(encoding="utf-8"))["thresholds"]
+    ens = json.loads((config.MODELS_DIR / "ensemble.json").read_text(encoding="utf-8"))[
+        "thresholds"
+    ]
 
     def rates(g: pd.DataFrame) -> dict:
         r = g.risk.dropna().to_numpy()
@@ -508,7 +507,7 @@ def adapt(fraction: float = 1.0, seed: int = 0) -> dict:
         else:
             os.environ["CUSTOMS_DATA"] = prev
 
-    main_ens = json.loads((ROOT / "models/ensemble.json").read_text(encoding="utf-8"))
+    main_ens = json.loads((config.MODELS_DIR / "ensemble.json").read_text(encoding="utf-8"))
     control = _originals(control)
     control = control.assign(ens_risk=control.ens_risk_temporal)
     control["ens_risk_code"] = code_only_risk(control, main_ens)

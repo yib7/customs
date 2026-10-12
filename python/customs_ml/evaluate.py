@@ -51,7 +51,7 @@ def _recall_fn(t):
 
 
 def _roc_recall_fn(fpr):
-    return lambda y, s: metrics.recall_at_threshold(y, s, metrics.threshold_at_fpr(y, s, fpr))
+    return lambda y, s: metrics.roc_recall_at_fpr(y, s, fpr)
 
 
 def _fpr_fn(t):
