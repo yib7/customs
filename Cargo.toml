@@ -43,6 +43,7 @@ hex = "0.4"
 url = "2"
 percent-encoding = "2"
 semver = "1"
+libc = "0.2"
 tempfile = "3"
 
 [profile.release]

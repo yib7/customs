@@ -4,6 +4,7 @@ use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::extract::{MatchedPath, Request, State};
 use axum::http::{header, Method, StatusCode};
@@ -352,6 +353,7 @@ pub async fn serve_with(
     let policy_auth = policy_auth_for(addr.ip(), &opts)?;
     let allowed_hosts = normalize_hosts(&opts.allowed_hosts);
     let (tx, rx) = watch::channel(false);
+    tokio::spawn(maintain(engine.clone(), rx.clone()));
     let state = AppState {
         engine,
         shutdown: rx,
@@ -375,6 +377,25 @@ pub async fn serve_with(
     })
     .await?;
     Ok(())
+}
+
+/// How often a running server drops expired package documents and returns freed memory.
+const MAINTAIN_EVERY: Duration = Duration::from_secs(10);
+
+/// Background upkeep until shutdown: without it, the resident size after a large install
+/// stays at its peak for as long as the server runs (see [`crate::util::release_free_memory`]).
+async fn maintain(engine: Arc<Engine>, mut shutdown: watch::Receiver<bool>) {
+    let mut tick = tokio::time::interval(MAINTAIN_EVERY);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            _ = tick.tick() => {}
+            // The only change ever sent is shutdown; a closed channel means the server is gone.
+            _ = shutdown.changed() => return,
+        }
+        engine.registry.purge_expired_meta();
+        let _ = tokio::task::spawn_blocking(crate::util::release_free_memory).await;
+    }
 }
 
 /// Resolves on Ctrl-C or SIGTERM.

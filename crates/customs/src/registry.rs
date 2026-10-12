@@ -167,7 +167,7 @@ struct MetaEntry {
 /// expired ones are dropped, and past [`META_HARD_CAP`] the oldest quarter goes too.
 fn insert_meta(map: &mut HashMap<String, MetaEntry>, key: String, entry: MetaEntry, now: Instant) {
     if map.len() >= META_SOFT_CAP {
-        map.retain(|_, e| now.saturating_duration_since(e.fetched) < META_TTL);
+        drop_expired_meta(map, now);
     }
     map.insert(key, entry);
     if map.len() > META_HARD_CAP {
@@ -178,6 +178,13 @@ fn insert_meta(map: &mut HashMap<String, MetaEntry>, key: String, entry: MetaEnt
             map.remove(&k);
         }
     }
+}
+
+/// Drop the documents older than [`META_TTL`]; returns how many went.
+fn drop_expired_meta(map: &mut HashMap<String, MetaEntry>, now: Instant) -> usize {
+    let before = map.len();
+    map.retain(|_, e| now.saturating_duration_since(e.fetched) < META_TTL);
+    before - map.len()
 }
 
 fn parse_time(v: &Value) -> Option<DateTime<Utc>> {
@@ -270,6 +277,16 @@ impl Registry {
 
     pub fn client(&self) -> &reqwest::Client {
         &self.client
+    }
+
+    /// Drop expired package documents now rather than at the next insert past the soft
+    /// cap, so an idle server does not hold the last burst's packuments. Returns how many
+    /// went.
+    pub fn purge_expired_meta(&self) -> usize {
+        drop_expired_meta(
+            &mut self.meta.lock().unwrap_or_else(|e| e.into_inner()),
+            Instant::now(),
+        )
     }
 
     /// GET a page; any status is returned (the caller decides what a 404 means).
@@ -781,6 +798,36 @@ mod tests {
         let last = format!("k{}", META_HARD_CAP + 9);
         assert!(map.contains_key(&last));
         assert!(!map.contains_key("k0"));
+    }
+
+    #[test]
+    fn expired_metadata_is_dropped_without_waiting_for_an_insert() {
+        let meta = Arc::new(PackageMeta {
+            ecosystem: Ecosystem::Npm,
+            name: "x".into(),
+            latest: None,
+            dist_tags: BTreeMap::new(),
+            versions: vec![],
+            created: None,
+            people: vec![],
+        });
+        let entry = |fetched: Instant| MetaEntry {
+            fetched,
+            meta: meta.clone(),
+            refreshed: false,
+        };
+        let t0 = Instant::now();
+        let mut map = HashMap::new();
+        // Below the soft cap, inserts never sweep, so an idle server would keep these.
+        for i in 0..10 {
+            insert_meta(&mut map, format!("old{i}"), entry(t0), t0);
+        }
+        let later = t0 + META_TTL + Duration::from_secs(1);
+        insert_meta(&mut map, "fresh".into(), entry(later), later);
+        assert_eq!(map.len(), 11);
+        assert_eq!(drop_expired_meta(&mut map, later), 10);
+        assert_eq!(map.keys().collect::<Vec<_>>(), ["fresh"]);
+        assert_eq!(drop_expired_meta(&mut map, later), 0);
     }
 
     #[test]

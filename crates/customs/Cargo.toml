@@ -46,6 +46,10 @@ semver.workspace = true
 customs-scan = { path = "../customs-scan" }
 customs-model = { path = "../customs-model" }
 
+# malloc_trim: hands memory freed after a burst of scans back to the OS (util::release_free_memory).
+[target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
+libc.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true
 tar.workspace = true
