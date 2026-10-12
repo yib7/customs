@@ -377,3 +377,15 @@ fn metrics_json_corrupt_still_loads() {
     assert!(m.metrics_error.is_none());
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn rejects_gbdt_feature_the_scanner_does_not_produce() {
+    // An absent feature would take the tree's NaN branch, which training never saw for it.
+    let dir = fixture_copy("gbdt-feature");
+    let path = dir.join("code_gbdt.json");
+    let text = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(&path, text.replacen("\"inst_network\"", "\"inst_netwrk\"", 1)).unwrap();
+    let err = Models::load(&dir).unwrap_err().to_string();
+    assert!(err.contains("inst_netwrk"), "{err}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}

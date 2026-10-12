@@ -157,6 +157,26 @@ impl Models {
             .as_deref()
             .map(|f| TreeEnsemble::from_json(&read("code_gbdt", f)?))
             .transpose()?;
+        if let Some(m) = &code_gbdt {
+            // An absent feature takes each split's missing-value branch, which training
+            // (LightGBM with `use_missing: False`) never used, so require every one.
+            let produced = customs_scan::feature_names();
+            let unknown: Vec<&str> = m
+                .feature_names()
+                .iter()
+                .map(String::as_str)
+                .filter(|n| !produced.contains(n))
+                .collect();
+            if !unknown.is_empty() {
+                return Err(ModelError::invalid(
+                    "code_gbdt",
+                    format!(
+                        "features not produced by customs-scan: {}",
+                        unknown.join(", ")
+                    ),
+                ));
+            }
+        }
         let name_model = manifest
             .name_model
             .as_deref()
