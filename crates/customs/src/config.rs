@@ -412,7 +412,7 @@ impl PackageRule {
         let name = name.trim();
         // A specifier written as a name would never match anything, so a deny entry
         // like `pypi:evil>=1.0` would protect nothing.
-        const SYNTAX: &str = "use `pypi:name`, `pypi:name==1.0`, `npm:name` or `npm:name@1.0`                               (exact versions only; ranges and extras are not supported)";
+        const SYNTAX: &str = "use `pypi:name`, `pypi:name==1.0`, `npm:name` or `npm:name@1.0` (exact versions only; ranges and extras are not supported)";
         if !valid_package_name(ecosystem, name) {
             return Err(format!("'{s}': missing or invalid package name; {SYNTAX}"));
         }
@@ -700,7 +700,7 @@ impl Policy {
                 return Err(ConfigError::new(
                     key,
                     format!(
-                        "'{v}': `***` stands for the stored credentials, and the active                          upstream is '{}'; send a new URL with its own credentials",
+                        "'{v}': `***` stands for the stored credentials, and the active upstream is '{}'; send a new URL with its own credentials",
                         redact_upstream(old)
                     ),
                 ));

@@ -333,7 +333,7 @@ pub fn policy_auth_for(ip: IpAddr, opts: &ServeOptions) -> anyhow::Result<Policy
         None => {
             tracing::warn!(
                 %ip,
-                "policy changes over the API are off: this server is reachable from the network                  and has no CUSTOMS_ADMIN_TOKEN"
+                "policy changes over the API are off: this server is reachable from the network and has no CUSTOMS_ADMIN_TOKEN"
             );
             PolicyAuth::Disabled
         }
