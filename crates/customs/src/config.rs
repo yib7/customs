@@ -331,6 +331,14 @@ pub struct Policy {
     /// run time do not trigger it: only install-time code counts.
     #[serde(default = "default_block")]
     pub agent_bypass: RuleSeverity,
+    /// Install-time code reads one way to the interpreter and another to the scanner's
+    /// feature pass: code after a bare carriage return or a Unicode line separator, behind
+    /// a backslash-CRLF continuation, inside a Python f-string field, imported past a
+    /// byte-order mark, or in a wheel `.data` file that installs as a top-level package.
+    /// The model never saw that code, so the indicators found in it (a process launch, a
+    /// network or download call, dynamic code, secret paths, ...) block on their own.
+    #[serde(default = "default_block")]
+    pub hidden_code: RuleSeverity,
     #[serde(default)]
     pub allow: Vec<String>,
     #[serde(default)]
@@ -366,6 +374,7 @@ impl Default for Policy {
             scan_error: default_block(),
             startup_hook: default_block(),
             agent_bypass: default_block(),
+            hidden_code: default_block(),
             allow: Vec::new(),
             deny: Vec::new(),
             established: Established::default(),
@@ -718,6 +727,7 @@ npm = "https://registry.npmjs.org"
         assert_eq!(p.scan_error, RuleSeverity::Block);
         assert_eq!(p.startup_hook, RuleSeverity::Block);
         assert_eq!(p.agent_bypass, RuleSeverity::Block);
+        assert_eq!(p.hidden_code, RuleSeverity::Block);
         assert_eq!(Policy::default().young_dependency_days, 7);
         let e = Policy::from_toml("young_dependency_days = 0").unwrap_err();
         assert_eq!(e.key, "young_dependency_days");

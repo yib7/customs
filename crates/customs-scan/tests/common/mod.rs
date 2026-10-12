@@ -13,6 +13,15 @@ pub enum TarItem<'a> {
     RawPath(&'a str, &'a [u8]),
     Symlink(&'a str, &'a str),
     HardLink(&'a str, &'a str),
+    /// A GNU sparse member (typeflag `S`) holding `data` as one chunk.
+    Sparse(&'a str, &'a [u8]),
+}
+
+/// Write `v` as a NUL-terminated octal field.
+fn octal(field: &mut [u8], v: u64) {
+    let s = format!("{v:0w$o}", w = field.len() - 1);
+    field[..s.len()].copy_from_slice(s.as_bytes());
+    field[s.len()..].fill(0);
 }
 
 fn raw_header(path: &str, size: u64, kind: tar::EntryType) -> tar::Header {
@@ -56,9 +65,28 @@ pub fn tar_bytes(items: &[TarItem<'_>]) -> Vec<u8> {
                 h.set_cksum();
                 b.append(&h, &[][..]).unwrap();
             }
+            TarItem::Sparse(p, d) => {
+                let mut h = raw_header(p, d.len() as u64, tar::EntryType::GNUSparse);
+                let gnu = h.as_gnu_mut().unwrap();
+                octal(&mut gnu.sparse[0].offset, 0);
+                octal(&mut gnu.sparse[0].numbytes, d.len() as u64);
+                octal(&mut gnu.realsize, d.len() as u64);
+                h.set_cksum();
+                b.append(&h, *d).unwrap();
+            }
         }
     }
     b.into_inner().unwrap()
+}
+
+/// A tar whose `before` entries are followed by one all-zero block and then the `after`
+/// entries (node-tar reads on until two zero blocks in a row; the tar crate stops at one).
+pub fn tar_with_zero_block(before: &[TarItem<'_>], after: &[TarItem<'_>]) -> Vec<u8> {
+    let mut t = tar_bytes(before);
+    t.truncate(t.len() - 1024);
+    t.extend([0u8; 512]);
+    t.extend(tar_bytes(after));
+    t
 }
 
 pub fn gz(data: &[u8]) -> Vec<u8> {
@@ -124,11 +152,16 @@ pub fn zip_claiming_method(files: &[(&str, &[u8])], relabel: &[&str], method: u1
 }
 
 pub fn zip_with_symlink(target: &str) -> Vec<u8> {
+    zip_with_symlink_named("pkg/link", target)
+}
+
+/// A wheel-like zip whose `name` entry carries symlink mode with `target` as its bytes.
+pub fn zip_with_symlink_named(name: &str, target: &str) -> Vec<u8> {
     let mut w = zip::ZipWriter::new(Cursor::new(Vec::new()));
     let opts = SimpleFileOptions::default();
     w.start_file("pkg/__init__.py", opts).unwrap();
     w.write_all(b"x = 1\n").unwrap();
-    w.add_symlink("pkg/link", target, opts).unwrap();
+    w.add_symlink(name, target, opts).unwrap();
     w.finish().unwrap().into_inner()
 }
 

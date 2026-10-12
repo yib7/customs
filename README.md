@@ -449,6 +449,12 @@ so the developer's own agent searched the disk for secrets. Packages that drive 
 when they run are not affected: the 14 agent CLIs and orchestrators checked carry 83 such
 flags, none in install-time code.
 
+Install-time code the interpreter reads differently from the scanner's lexers (code after
+a bare carriage return, inside an f-string field, or in a module imported only once a
+byte-order mark is dropped) blocks when it launches, connects, downloads or reads secrets
+(`hidden_code`). The model's inputs stay as they were; the rule reads a second copy of the
+text the way Python or Node does.
+
 ## Limitations
 
 * The model has false positives on popular packages (the `requests` sdist scores 0.99).

@@ -38,12 +38,32 @@ pub struct Token<'a> {
 }
 
 pub fn lex(src: &str, lang: Lang) -> Vec<Token<'_>> {
+    lex_with(src, lang, LexMode::default())
+}
+
+/// Lexer options. The default is the lexer whose tokens feed the models and the feature
+/// counts, which must not change; the others serve only the second, interpreter-faithful
+/// pass over install-time code (see `crate::shadow`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LexMode {
+    /// Lex the replacement fields of Python f-strings and t-strings as code. By default an
+    /// f-string is one `Str` token, fields included.
+    pub fstring_fields: bool,
+}
+
+pub fn lex_with(src: &str, lang: Lang, mode: LexMode) -> Vec<Token<'_>> {
+    let mut lexer = Lexer::new(src);
+    lexer.fstring_fields = mode.fstring_fields;
     match lang {
-        Lang::Python => Lexer::new(src).python(),
-        Lang::Js => Lexer::new(src).js(),
-        Lang::Shell => Lexer::new(src).shell(),
+        Lang::Python => lexer.python(),
+        Lang::Js => lexer.js(),
+        Lang::Shell => lexer.shell(),
     }
 }
+
+/// How deep f-strings nest (in fields and format specs) before inner ones are lexed as
+/// plain strings, so a hostile file cannot exhaust the stack.
+const MAX_FSTRING_NESTING: u32 = 32;
 
 const PY_OPS: &[&str] = &[
     "**=", "//=", ">>=", "<<=", "...", "->", ":=", "**", "//", "==", "!=", "<=", ">=", "<<", ">>",
@@ -88,6 +108,10 @@ struct Lexer<'a> {
     i: usize,
     line: u32,
     out: Vec<Token<'a>>,
+    /// See [`LexMode::fstring_fields`].
+    fstring_fields: bool,
+    /// Open f-string replacement fields.
+    fdepth: u32,
 }
 
 impl<'a> Lexer<'a> {
@@ -98,6 +122,8 @@ impl<'a> Lexer<'a> {
             i: 0,
             line: 1,
             out: Vec::with_capacity(src.len() / 4),
+            fstring_fields: false,
+            fdepth: 0,
         }
     }
 
@@ -195,43 +221,51 @@ impl<'a> Lexer<'a> {
     fn python(mut self) -> Vec<Token<'a>> {
         let mut depth: usize = 0;
         while self.i < self.b.len() {
-            let c = self.b[self.i];
-            match c {
-                b'#' => self.skip_to_eol(),
-                b'\n' => {
-                    if depth == 0 && self.out.last().is_some_and(|t| t.kind != TokKind::Newline) {
-                        self.push(TokKind::Newline, self.i, self.i, self.line);
-                    }
-                    self.line += 1;
-                    self.i += 1;
-                }
-                b'\\' if self.peek(1) == b'\n' => {
-                    self.line += 1;
-                    self.i += 2;
-                }
-                b'\\' if self.peek(1) == b'\r' && self.peek(2) == b'\n' => {
-                    self.line += 1;
-                    self.i += 3;
-                }
-                b'\'' | b'"' => self.py_string(c),
-                b'0'..=b'9' => self.number(),
-                b'.' if self.peek(1).is_ascii_digit() => self.number(),
-                _ if is_ident_start(c) => self.ident(),
-                _ if c.is_ascii_whitespace() => self.i += 1,
-                _ => {
-                    match c {
-                        b'(' | b'[' | b'{' => depth += 1,
-                        b')' | b']' | b'}' => depth = depth.saturating_sub(1),
-                        _ => {}
-                    }
-                    self.punct(PY_OPS);
-                }
-            }
+            self.py_token(&mut depth);
         }
         self.out
     }
 
+    /// Lex one Python token (or skip a comment or whitespace) at `i`, which must be in
+    /// bounds. `depth` is the bracket depth: a newline inside brackets ends no statement.
+    fn py_token(&mut self, depth: &mut usize) {
+        let c = self.b[self.i];
+        match c {
+            b'#' => self.skip_to_eol(),
+            b'\n' => {
+                if *depth == 0 && self.out.last().is_some_and(|t| t.kind != TokKind::Newline) {
+                    self.push(TokKind::Newline, self.i, self.i, self.line);
+                }
+                self.line += 1;
+                self.i += 1;
+            }
+            b'\\' if self.peek(1) == b'\n' => {
+                self.line += 1;
+                self.i += 2;
+            }
+            b'\\' if self.peek(1) == b'\r' && self.peek(2) == b'\n' => {
+                self.line += 1;
+                self.i += 3;
+            }
+            b'\'' | b'"' => self.py_string(c),
+            b'0'..=b'9' => self.number(),
+            b'.' if self.peek(1).is_ascii_digit() => self.number(),
+            _ if is_ident_start(c) => self.ident(),
+            _ if c.is_ascii_whitespace() => self.i += 1,
+            _ => {
+                match c {
+                    b'(' | b'[' | b'{' => *depth += 1,
+                    b')' | b']' | b'}' => *depth = depth.saturating_sub(1),
+                    _ => {}
+                }
+                self.punct(PY_OPS);
+            }
+        }
+    }
+
     fn py_string(&mut self, quote: u8) {
+        // `Some(raw)` for an f-string or t-string whose fields are lexed as code.
+        let mut fstring = None;
         // A string prefix (r, b, f, rb, ...) was lexed as an identifier glued to the quote.
         if let Some(prev) = self.out.last() {
             let prev_end =
@@ -244,10 +278,18 @@ impl<'a> Lexer<'a> {
                     "r" | "u" | "b" | "f" | "t" | "br" | "rb" | "fr" | "rf" | "tr" | "rt"
                 )
             {
+                if self.fstring_fields && lower.contains(['f', 't']) {
+                    fstring = Some(lower.contains('r'));
+                }
                 self.out.pop();
             }
         }
         let triple = self.peek(1) == quote && self.peek(2) == quote;
+        if let Some(raw) = fstring.filter(|_| self.fdepth < MAX_FSTRING_NESTING) {
+            self.i += if triple { 3 } else { 1 };
+            self.fstring_text(quote, triple, raw, false);
+            return;
+        }
         if !triple {
             // Raw strings still cannot end on an escaped quote, so escapes are always honored.
             self.quoted(quote, true);
@@ -274,6 +316,113 @@ impl<'a> Lexer<'a> {
         self.i = start;
         self.advance_to(end);
         self.i = (end + 3).min(self.b.len());
+    }
+
+    /// The literal text of an f-string from `i` (just inside the opening quote) through
+    /// the closing quote, with each replacement field lexed as code. Each run of literal
+    /// text is one `Str` token. In a format spec (`in_spec`) the text ends at the `}`
+    /// that closes the field instead. Returns true when the string itself ended: at its
+    /// closing quote, at the end of the line for an unterminated single-quoted string, or
+    /// at the end of input.
+    fn fstring_text(&mut self, quote: u8, triple: bool, raw: bool, in_spec: bool) -> bool {
+        let mut start = self.i;
+        let mut line = self.line;
+        let chunk = |lx: &mut Self, start: usize, line: u32| {
+            if lx.i > start {
+                lx.push(TokKind::Str, start, lx.i, line);
+            }
+        };
+        while self.i < self.b.len() {
+            let c = self.b[self.i];
+            match c {
+                // `\{` leaves the brace to open a field; `\N{NAME}` is one character.
+                b'\\' if matches!(self.peek(1), b'{' | b'}') => self.i += 1,
+                b'\\' if !raw && self.peek(1) == b'N' && self.peek(2) == b'{' => {
+                    let name = self.b[self.i + 3..]
+                        .iter()
+                        .take(128)
+                        .position(|&x| !(x.is_ascii_alphanumeric() || x == b' ' || x == b'-'));
+                    match name {
+                        Some(p) if self.b[self.i + 3 + p] == b'}' => self.i += 3 + p + 1,
+                        _ => self.i += 2,
+                    }
+                }
+                b'\\' => {
+                    if self.peek(1) == b'\n' {
+                        self.line += 1;
+                    }
+                    self.i = (self.i + 2).min(self.b.len());
+                }
+                b'\n' if !triple => {
+                    chunk(self, start, line);
+                    return true;
+                }
+                b'\n' => {
+                    self.line += 1;
+                    self.i += 1;
+                }
+                _ if c == quote
+                    && (!triple || (self.peek(1) == quote && self.peek(2) == quote)) =>
+                {
+                    chunk(self, start, line);
+                    self.i += if triple { 3 } else { 1 };
+                    return true;
+                }
+                b'{' | b'}' if !in_spec && self.peek(1) == c => self.i += 2,
+                b'}' if in_spec => {
+                    chunk(self, start, line);
+                    self.i += 1;
+                    return false;
+                }
+                b'{' if self.fdepth < MAX_FSTRING_NESTING => {
+                    chunk(self, start, line);
+                    self.i += 1;
+                    self.fdepth += 1;
+                    let ended = self.fstring_field(quote, triple, raw);
+                    self.fdepth -= 1;
+                    if ended {
+                        return true;
+                    }
+                    start = self.i;
+                    line = self.line;
+                }
+                _ => self.i += 1,
+            }
+        }
+        chunk(self, start, line);
+        true
+    }
+
+    /// One replacement field, from just after its `{`: code up to the top-level `}`, with
+    /// an optional `!r`/`!s`/`!a` conversion and `:` format spec. As in Python 3.12+
+    /// (PEP 701), the code may span lines and hold strings in the enclosing quote. Returns
+    /// true when the enclosing string ended inside the field.
+    fn fstring_field(&mut self, quote: u8, triple: bool, raw: bool) -> bool {
+        let mut depth: usize = 1;
+        while self.i < self.b.len() {
+            if depth <= 1 {
+                match self.b[self.i] {
+                    b'}' => {
+                        self.i += 1;
+                        return false;
+                    }
+                    b'!' if self.peek(1) != b'=' => {
+                        self.i += 1;
+                        while self.i < self.b.len() && is_ident_char(self.b[self.i]) {
+                            self.i += 1;
+                        }
+                        continue;
+                    }
+                    b':' => {
+                        self.i += 1;
+                        return self.fstring_text(quote, triple, raw, true);
+                    }
+                    _ => {}
+                }
+            }
+            self.py_token(&mut depth);
+        }
+        true
     }
 
     fn js_regex_allowed(&self) -> bool {
@@ -1386,6 +1535,48 @@ mod tests {
         assert_eq!(strs, vec!["\\x00", "doc\nstring", "{x}"]);
         assert_eq!(toks.iter().find(|t| t.text == "d").unwrap().line, 5);
         assert!(!toks.iter().any(|t| t.text == "rb" || t.text == "f"));
+    }
+
+    #[test]
+    fn fstring_fields_are_code_only_in_that_mode() {
+        let src = "a = f\"x{b!r:>{w}}y{{z}}\\N{BULLET}\"\nc = F'''{\n  d[\"k\"]\n}'''\ne = 1\n";
+        let mode = LexMode {
+            fstring_fields: true,
+        };
+        let toks = lex_with(src, Lang::Python, mode);
+        assert_eq!(
+            kinds(&toks),
+            vec![
+                (TokKind::Ident, "a"),
+                (TokKind::Punct, "="),
+                (TokKind::Str, "x"),
+                (TokKind::Ident, "b"),
+                (TokKind::Str, ">"),
+                (TokKind::Ident, "w"),
+                (TokKind::Str, "y{{z}}\\N{BULLET}"),
+                (TokKind::Ident, "c"),
+                (TokKind::Punct, "="),
+                (TokKind::Ident, "d"),
+                (TokKind::Punct, "["),
+                (TokKind::Str, "k"),
+                (TokKind::Punct, "]"),
+                (TokKind::Ident, "e"),
+                (TokKind::Punct, "="),
+                (TokKind::Num, "1"),
+            ]
+        );
+        assert_eq!(toks.iter().find(|t| t.text == "d").unwrap().line, 3);
+        assert_eq!(toks.iter().find(|t| t.text == "e").unwrap().line, 5);
+        // The default lexer, which feeds the models, still reads one string per f-string.
+        let strs: Vec<_> = lex(src, Lang::Python)
+            .into_iter()
+            .filter(|t| t.kind == TokKind::Str)
+            .map(|t| t.text)
+            .collect();
+        assert_eq!(
+            strs,
+            vec!["x{b!r:>{w}}y{{z}}\\N{BULLET}", "{\n  d[\"k\"]\n}"]
+        );
     }
 
     #[test]

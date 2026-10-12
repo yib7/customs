@@ -490,6 +490,47 @@ of these flags between them and none on the install surface, including happy-cod
 whose postinstall script unpacks tools. The rule has not been measured on the training
 corpus.
 
+The features keep the scanner's view of an archive, because it is what the models were
+trained on, but pip and npm extract some archives differently, and code they would
+install unread fails closed (`unread_code`, each label naming its reason): a root code
+path stored twice with
+different content (installers keep the last copy, the scanner reads the first); for npm,
+any code file that node-tar's `strip:1` places differently from the scanner's root;
+absolute-path code entries (both installers strip the root and extract them); in PyPI
+archives, code-like hardlinks, symlinks and GNU sparse entries at install-time positions
+(pip extracts them as files), and zip entries marked as symlinks (pip writes their bytes);
+a Python file on the install surface whose PEP 263 coding cookie names a codec that is not
+ASCII-transparent (UTF-7, `unicode_escape`, UTF-16, EBCDIC, HZ, ISO-2022, or Shift JIS,
+GBK and Big5 when a second byte could swallow a backslash), since Python then runs text
+that is not the bytes the scanner lexed; and, for npm, an `install` or `preinstall` script
+that is present but empty or not a string next to a root `binding.gyp`, for which npm
+still runs `node-gyp rebuild`. A tar entry after an end-of-archive block, which node-tar
+still extracts, rejects the archive (`scan_error`).
+
+A fifth rule, `hidden_code`, covers install-time code that the interpreter reads
+differently from the feature lexers. Those lexers end lines only at `\n`, keep a
+byte-order mark glued to the first token, and read a Python f-string as one string;
+CPython and Node also end lines at a bare `\r` (Node also at U+2028 and U+2029 outside
+literals), drop the mark, honour a backslash-CRLF continuation inside quotes, and run the
+code in f-string fields. Changing the feature lexers would change the model inputs of
+ordinary files that merely hold a stray `\r`, a mark or an f-string, so for each
+install-surface Python or JavaScript file where the readings can differ the scanner
+analyzes the interpreter's reading once more and lists, as `file:line: indicators (why)`,
+the indicators only that reading has, among `proc_exec`, `dyn_code`, `network`,
+`secret_paths`, `persistence`, `download_exec`, `exfil_endpoint`, `ip_url` and
+`crypto_wallet` (`recon`, `env_access`, `url`, `file_write` and `decode_obf` are left out:
+benign f-strings hit them). An f-string field counts only for an indicator the file
+shows nowhere else: requests 2.34.2 formats `{urllib3.__version__}` into a warning in a file
+that already imports `urllib3`. So a field payload in a file that already launches a
+process somewhere in plain view is not listed; the model then sees `proc_exec` anyway.
+Modules imported only in that reading (a byte-order mark before `from helper import run`)
+are analyzed too, and any of those indicators in them counts. So does a wheel's
+`<name>.data/purelib/<pkg>/__init__.py` or `.../platlib/...`, which installs as a
+top-level package but is not on the install surface. Wheel `.data` copies of
+`sitecustomize.py` and `usercustomize.py`, like the root ones, are startup hooks
+(`startup_hook`). Neither the second reading nor these lists reach the features or the
+token stream.
+
 Root normalization: top-level directories are stripped while the current level holds
 exactly one directory and nothing besides sidecar `*.json` files (other than
 `package.json`), stopping at a level that has `package.json`, `PKG-INFO`, `setup.py`,
@@ -698,10 +739,12 @@ or `block`. Rules: `deny`, `allow`,
 rules of section 8 (`provenance_dropped`, `install_script_added`, `publisher_changed`,
 `dormant_revival`, `version_anomaly`, `nonregistry_dependency_added`,
 `young_dependency_added`), `scan_error` (scanner rejected the archive, block by default),
-`unread_code` (code the scanner could not read, block by default), `startup_hook`
-(a `.pth` file that launches, connects, downloads or reads secrets, block by default),
-`agent_bypass` (install-time code runs an AI coding CLI with its permission checks off,
-block by default), `not_scanned`
+`unread_code` (code the scanner could not read, or that the installer reads differently,
+block by default), `startup_hook` (a `.pth`, `sitecustomize` or `usercustomize` file that
+launches, connects, downloads or reads secrets, block by default), `agent_bypass`
+(install-time code runs an AI coding CLI with its permission checks off, block by
+default), `hidden_code` (install-time code the interpreter runs but the model inputs
+leave out, block by default), `not_scanned`
 (archive above the scan size limit; `warn` from `POST /api/check` for a wheel above the
 check limit, which it does not download).
 `reasons` mix model features (positive contributions to the stacked logit, largest first)
@@ -961,9 +1004,10 @@ nonregistry_dependency_added = "block"  # npm: new git/URL/file dependency since
 young_dependency_added = "block"        # npm: new dependency first published days before, by strangers
 young_dependency_days = 7
 # Scanner rules: "off", "warn" or "block"
-unread_code = "block"       # code the scanner could not read (size cap, encryption, compression)
-startup_hook = "block"      # a .pth file that runs a process, network or secret access at startup
+unread_code = "block"       # code the scanner could not read (size cap, encryption, installer differences)
+startup_hook = "block"      # a .pth or sitecustomize file that runs a process, network or secret access at startup
 agent_bypass = "block"      # install-time code runs an AI coding CLI with permission checks off
+hidden_code = "block"       # install-time code the interpreter reads differently from the scanner
 scan_error = "block"        # the scanner rejected the archive (limits, bomb, corrupt)
 allow = ["pypi:requests", "npm:react"]  # always allow (exact names)
 deny  = ["npm:event-stream@3.3.6"]

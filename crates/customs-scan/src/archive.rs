@@ -3,6 +3,10 @@
 //! Nothing is ever written to disk. Entries with absolute or `..` paths and link entries
 //! are skipped and counted; caps on entry count, per-entry size, total decompressed bytes,
 //! compression ratio and nesting depth bound the work an archive can force on the scanner.
+//! Skipped code entries that an installer would still extract (an absolute path, a GNU
+//! sparse member, a zip entry marked as a symlink) are listed in [`Contents::unread`], and
+//! tar links in [`Contents::links`], so the scanner can report them instead of passing them
+//! silently. None of them is read into the entries the features come from.
 
 use crate::{ScanError, ScanOptions};
 use std::cell::Cell;
@@ -27,6 +31,18 @@ pub struct Entry {
     pub full: bool,
     /// Depth of the archive the entry came from (0 for the scanned archive itself).
     pub depth: u32,
+    /// The path as written in the archive, before normalizing and stripping.
+    pub raw: String,
+}
+
+/// A tar link entry of the scanned archive itself. Links are never followed or read.
+#[derive(Debug, Clone)]
+pub struct Link {
+    /// Normalized path relative to the package root, like [`Entry::path`].
+    pub path: String,
+    /// The link target as written in the archive.
+    pub target: String,
+    pub hard: bool,
 }
 
 #[derive(Debug, Default)]
@@ -38,9 +54,14 @@ pub struct Contents {
     pub stripped_prefix: Option<String>,
     pub errors: Vec<String>,
     /// Code entries of the scanned archive itself whose content could not be read
-    /// (encrypted, an unsupported compression method, a read error). An installer that
-    /// can read them would run code the scanner never saw.
+    /// (encrypted, an unsupported compression method, a read error), or that were skipped
+    /// although an installer extracts them (with the reason in parentheses). An installer
+    /// that can read them would run code the scanner never saw.
     pub unread: Vec<String>,
+    /// Tar link entries of the scanned archive itself (skipped, and counted in `n_links`).
+    pub links: Vec<Link>,
+    /// Format of the scanned archive itself.
+    pub format: Option<Format>,
 }
 
 /// Record an entry of the scanned archive that could not be read, when it is code.
@@ -50,6 +71,70 @@ fn note_unread(out: &mut Contents, depth: u32, path: &str) {
     if depth == 0 && !is_nested_archive(path) && is_code_like(path, b"") {
         out.unread.push(path.to_string());
     }
+}
+
+/// [`note_unread`] for an entry that was skipped although installers extract it, with the
+/// reason.
+fn note_skipped(out: &mut Contents, depth: u32, path: &str, why: &str) {
+    if depth == 0 && !is_nested_archive(path) && is_code_like(path, b"") {
+        out.unread.push(format!("{path} ({why})"));
+    }
+}
+
+/// An absolute entry (`/p-1.0/setup.py`, `C:\w\x.py`) the way installers extract it: pip
+/// and node-tar strip the root and keep the rest. `None` when the rest climbs out with
+/// `..`, which both refuse.
+fn strip_root(raw: &str) -> Option<String> {
+    let mut p = raw;
+    loop {
+        let b = p.as_bytes();
+        if b.first().is_some_and(|&c| c == b'/' || c == b'\\') {
+            p = &p[1..];
+        } else if b.len() >= 2 && b[1] == b':' && b[0].is_ascii_alphabetic() {
+            p = &p[2..];
+        } else {
+            break;
+        }
+    }
+    normalize_path(p)
+}
+
+/// Where node-tar, as npm runs it (`strip: 1`), writes a regular file entry, relative to
+/// the package directory; `None` when it drops the entry. Mirrors node-tar 7's
+/// `[CHECKPATH]`: drop the first `/`-separated component, then strip absolute roots, refuse
+/// `..`, and resolve `.` and empty components. A backslash is an ordinary character on
+/// POSIX, so it is kept.
+pub(crate) fn node_tar_path(raw: &str) -> Option<String> {
+    let (_, mut p) = raw.split_once('/')?;
+    loop {
+        let b = p.as_bytes();
+        if let Some(rest) = p.strip_prefix("//?/") {
+            p = rest;
+        } else if p.starts_with('/') {
+            p = &p[1..];
+        } else if b.len() >= 2 && b[1] == b':' && b[0].is_ascii_alphabetic() {
+            p = &p[if matches!(b.get(2), Some(b'/' | b'\\')) {
+                3
+            } else {
+                2
+            }..];
+        } else if let Some(unc) = p.strip_prefix("\\\\") {
+            // `\\server\share\` is one root.
+            p = unc.splitn(3, ['/', '\\']).nth(2).unwrap_or("");
+        } else if p.starts_with('\\') {
+            p = &p[1..];
+        } else {
+            break;
+        }
+    }
+    if p.split(['/', '\\']).any(|c| c == "..") {
+        return None;
+    }
+    let parts: Vec<&str> = p
+        .split('/')
+        .filter(|c| !c.is_empty() && *c != ".")
+        .collect();
+    (!parts.is_empty()).then(|| parts.join("/"))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -179,6 +264,11 @@ fn collapse_doubled(parts: &mut Vec<&str>) {
 struct Budget {
     entries: usize,
     total: u64,
+    /// Decompressed bytes read from nested tar archives that were then rejected. They are
+    /// kept apart from `total`, so a rejected bundle does not shrink the room later nested
+    /// archives have; once they reach the total cap no further nested archive is expanded,
+    /// so many rejected archives cannot each spend the cap again.
+    wasted: u64,
 }
 
 /// Counts decompressed bytes and fails once the total or the expansion ratio is exceeded.
@@ -218,7 +308,9 @@ pub fn read_archive(bytes: &[u8], opts: &ScanOptions) -> Result<Contents, ScanEr
     let mut budget = Budget {
         entries: 0,
         total: 0,
+        wasted: 0,
     };
+    contents.format = sniff_format(bytes);
     read_into(bytes, "", 0, opts, &mut budget, &mut contents)?;
     strip_prefix(&mut contents);
     Ok(contents)
@@ -267,6 +359,13 @@ fn read_into(
             out.errors.push(format!(
                 "nested archive not expanded (depth cap {}): {}",
                 opts.max_nesting_depth, out.entries[i].path
+            ));
+            continue;
+        }
+        if budget.wasted >= opts.max_total_bytes {
+            out.errors.push(format!(
+                "nested archive not expanded (work budget for nested archives spent): {}",
+                out.entries[i].path
             ));
             continue;
         }
@@ -333,6 +432,8 @@ fn read_capped<R: Read>(r: &mut R, want_full: bool, cap: u64) -> io::Result<(Vec
     Ok((buf, true))
 }
 
+type Tripped = Rc<Cell<Option<&'static str>>>;
+
 fn read_tar<R: Read>(
     reader: R,
     compressed_len: u64,
@@ -354,18 +455,107 @@ fn read_tar<R: Read>(
     };
     let start_total = budget.total;
     let mut archive = tar::Archive::new(guard);
-    let rejected = |tripped: &Rc<Cell<Option<&'static str>>>| {
-        tripped.get().map(|r| ScanError::Rejected(r.into()))
+    let mut result = tar_entries(&mut archive, &tripped, prefix, depth, opts, budget, out);
+    let mut guard = archive.into_inner();
+    if result.is_ok() && depth == 0 && entries_after_end(&mut guard) {
+        result = Err(tripped.get().map_or_else(
+            || {
+                ScanError::Rejected(
+                    "tar entries after an end-of-archive block (npm would extract them)".into(),
+                )
+            },
+            |r| ScanError::Rejected(r.into()),
+        ));
+    }
+    // The tar reader skips unread entry data through the guard, so its count is the true
+    // amount of decompressed work, whether or not the archive was then refused.
+    match &result {
+        Ok(()) => budget.total = start_total + guard.read,
+        Err(_) if depth > 0 => budget.wasted += guard.read,
+        Err(_) => {}
+    }
+    result
+}
+
+/// Whether a tar entry header follows the zero block the tar reader stopped at. The tar
+/// crate ends an archive at its first all-zero block, but node-tar ends it only at two in a
+/// row: it reads on past one, skipping blocks that are not headers, and extracts any entry
+/// it finds. `true` also when the guard trips while looking.
+fn entries_after_end<R: Read>(r: &mut Guard<R>) -> bool {
+    let mut block = [0u8; 512];
+    let mut prev_zero = true;
+    loop {
+        let mut n = 0;
+        while n < block.len() {
+            match r.read(&mut block[n..]) {
+                Ok(0) => return false,
+                Ok(k) => n += k,
+                Err(_) => return r.tripped.get().is_some(),
+            }
+        }
+        if block.iter().all(|&b| b == 0) {
+            if prev_zero {
+                return false;
+            }
+            prev_zero = true;
+        } else {
+            prev_zero = false;
+            if is_tar_header(&block) {
+                return true;
+            }
+        }
+    }
+}
+
+/// A block whose header checksum is valid (the sum of its bytes, with the checksum field
+/// read as spaces, equals the octal number in that field).
+fn is_tar_header(b: &[u8; 512]) -> bool {
+    let field = &b[148..156];
+    let digits: Vec<u8> = field
+        .iter()
+        .copied()
+        .skip_while(|&c| c == b' ')
+        .take_while(|c| (b'0'..=b'7').contains(c))
+        .collect();
+    let Some(want) = std::str::from_utf8(&digits)
+        .ok()
+        .and_then(|d| u64::from_str_radix(d, 8).ok())
+    else {
+        return false;
     };
+    let sum: u64 = b
+        .iter()
+        .enumerate()
+        .map(|(i, &c)| {
+            if (148..156).contains(&i) {
+                32
+            } else {
+                c as u64
+            }
+        })
+        .sum();
+    want == sum
+}
+
+fn tar_entries<R: Read>(
+    archive: &mut tar::Archive<Guard<R>>,
+    tripped: &Tripped,
+    prefix: &str,
+    depth: u32,
+    opts: &ScanOptions,
+    budget: &mut Budget,
+    out: &mut Contents,
+) -> Result<(), ScanError> {
+    let rejected = |tripped: &Tripped| tripped.get().map(|r| ScanError::Rejected(r.into()));
     let entries = match archive.entries() {
         Ok(e) => e,
-        Err(e) => return Err(rejected(&tripped).unwrap_or(ScanError::Io(e))),
+        Err(e) => return Err(rejected(tripped).unwrap_or(ScanError::Io(e))),
     };
     for (n_read, entry) in entries.enumerate() {
         let mut entry = match entry {
             Ok(e) => e,
             Err(e) => {
-                if let Some(r) = rejected(&tripped) {
+                if let Some(r) = rejected(tripped) {
                     return Err(r);
                 }
                 // At depth 0 the rest of the archive is unknown, and installers disagree
@@ -392,6 +582,19 @@ fn read_tar<R: Read>(
         if kind.is_symlink() || kind.is_hard_link() {
             out.n_links += 1;
             out.errors.push(format!("link entry skipped: {raw}"));
+            if depth == 0 {
+                if let Some(path) = normalize_path(&raw) {
+                    let target = entry
+                        .link_name_bytes()
+                        .map(|t| String::from_utf8_lossy(&t).into_owned())
+                        .unwrap_or_default();
+                    out.links.push(Link {
+                        path,
+                        target,
+                        hard: kind.is_hard_link(),
+                    });
+                }
+            }
             continue;
         }
         if !(kind.is_file() || kind == tar::EntryType::Continuous) {
@@ -402,11 +605,20 @@ fn read_tar<R: Read>(
             {
                 out.errors.push(format!("special entry skipped: {raw}"));
             }
+            // Python's tarfile reads a GNU sparse member like a regular file.
+            if kind.is_gnu_sparse() {
+                if let Some(path) = normalize_path(&raw).or_else(|| strip_root(&raw)) {
+                    note_skipped(out, depth, &path, "GNU sparse entry; pip extracts it");
+                }
+            }
             continue;
         }
         let Some(path) = normalize_path(&raw) else {
             out.n_unsafe_paths += 1;
             out.errors.push(format!("unsafe path skipped: {raw}"));
+            if let Some(path) = strip_root(&raw) {
+                note_skipped(out, depth, &path, ABSOLUTE);
+            }
             continue;
         };
         let declared = entry.header().size().unwrap_or(0);
@@ -414,7 +626,7 @@ fn read_tar<R: Read>(
         let (data, got_full) = match read_capped(&mut entry, full, opts.max_entry_bytes) {
             Ok(v) => v,
             Err(e) => {
-                if let Some(r) = rejected(&tripped) {
+                if let Some(r) = rejected(tripped) {
                     return Err(r);
                 }
                 if depth == 0 {
@@ -441,14 +653,14 @@ fn read_tar<R: Read>(
             data,
             full: got_full,
             depth,
+            raw,
         });
     }
-    // The tar reader skips unread entry data through the guard, so its count is the true
-    // amount of decompressed work.
-    let used = archive.into_inner().read;
-    budget.total = start_total + used;
     Ok(())
 }
+
+/// Why a skipped absolute entry is still reported.
+const ABSOLUTE: &str = "absolute path; installers strip the root";
 
 fn read_zip(
     bytes: &[u8],
@@ -494,11 +706,22 @@ fn read_zip(
         if f.is_symlink() {
             out.n_links += 1;
             out.errors.push(format!("link entry skipped: {raw}"));
+            if let Some(path) = normalize_path(&raw) {
+                note_skipped(
+                    out,
+                    depth,
+                    &path,
+                    "zip entry marked as a symlink; pip writes its bytes as a file",
+                );
+            }
             continue;
         }
         let Some(path) = normalize_path(&raw) else {
             out.n_unsafe_paths += 1;
             out.errors.push(format!("unsafe path skipped: {raw}"));
+            if let Some(path) = strip_root(&raw) {
+                note_skipped(out, depth, &path, ABSOLUTE);
+            }
             continue;
         };
         let declared = f.size();
@@ -542,6 +765,7 @@ fn read_zip(
             data,
             full: got_full,
             depth,
+            raw,
         });
     }
     Ok(())
@@ -607,10 +831,13 @@ fn strip_prefix(c: &mut Contents) {
                 e.path = e.path[cut..].to_string();
             }
         }
-        for u in c.unread.iter_mut() {
-            if u.len() > cut && u.starts_with(&root) && u.as_bytes()[root.len()] == b'/' {
-                *u = u[cut..].to_string();
-            }
+        let under =
+            |p: &str| p.len() > cut && p.starts_with(&root) && p.as_bytes()[root.len()] == b'/';
+        for u in c.unread.iter_mut().filter(|u| under(u)) {
+            *u = u[cut..].to_string();
+        }
+        for l in c.links.iter_mut().filter(|l| under(&l.path)) {
+            l.path = l.path[cut..].to_string();
         }
         stripped.push(root);
     }
@@ -694,6 +921,16 @@ fn reroot_nested(c: &mut Contents, stripped: &mut Vec<String>) {
             e.path = rest.to_string();
         }
     }
+    for l in c.links.iter_mut() {
+        if let Some(rest) = l.path.strip_prefix(&prefix) {
+            l.path = rest.to_string();
+        }
+    }
+    for u in c.unread.iter_mut() {
+        if let Some(rest) = u.strip_prefix(&prefix) {
+            *u = rest.to_string();
+        }
+    }
     stripped.push(root);
 }
 
@@ -734,6 +971,7 @@ mod tests {
             data: vec![b'x'],
             full: true,
             depth: 0,
+            raw: path.into(),
         }
     }
 
