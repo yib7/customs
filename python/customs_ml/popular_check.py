@@ -17,6 +17,7 @@ Names come from ``models/popular_{pypi,npm}.txt`` (the name model's popularity l
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import urllib.error
 import urllib.request
@@ -59,8 +60,9 @@ def check(server: str, eco: str, name: str) -> dict:
         except ValueError:
             error = str(e.code)
         return {"eco": eco, "name": name, "error": error}
-    except (urllib.error.URLError, TimeoutError) as e:
-        return {"eco": eco, "name": name, "error": str(e)}
+    except (OSError, http.client.HTTPException, ValueError) as e:
+        # URLError, timeouts, resets, a dropped or garbled response: recorded per package.
+        return {"eco": eco, "name": name, "error": f"{type(e).__name__}: {e}"}
 
 
 def summarize(rows: list[dict]) -> dict:
@@ -89,6 +91,11 @@ def names(eco: str, n: int) -> list[str]:
     return [x.strip() for x in path.read_text(encoding="utf-8").splitlines() if x.strip()][:n]
 
 
+def flagged_line(r: dict) -> str:
+    risk = "n/a" if r["risk"] is None else f"{r['risk']:.3f}"
+    return f"  model {r['model_decision']}: {r['name']} {r['version']} {risk} {r['top']}"
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--server", default="http://127.0.0.1:7979")
@@ -110,8 +117,7 @@ def main() -> None:
             f"with rules {s['final']}; rules {s['rules']}"
         )
         for r in s["model_flagged"]:
-            flag, risk = r["model_decision"], r["risk"]
-            print(f"  model {flag}: {r['name']} {r['version']} {risk:.3f} {r['top']}")
+            print(flagged_line(r))
 
 
 if __name__ == "__main__":

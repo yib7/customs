@@ -1,3 +1,7 @@
+import http.client
+import urllib.request
+
+from customs_ml import popular_check
 from customs_ml.popular_check import record, summarize
 
 
@@ -45,3 +49,17 @@ def test_summarize_per_ecosystem():
     assert npm["risk_max"] == 0.9
     assert s["pypi"]["model"] == {"allow": 1, "warn": 0, "block": 0}
     assert s["pypi"]["model_flagged"] == []
+
+
+def test_check_records_a_dropped_connection(monkeypatch):
+    def drop(*a, **k):
+        raise http.client.IncompleteRead(b"")
+
+    monkeypatch.setattr(urllib.request, "urlopen", drop)
+    r = popular_check.check("http://127.0.0.1:9", "npm", "x")
+    assert r["name"] == "x" and "error" in r
+
+
+def test_flagged_line_without_a_risk():
+    r = record("npm", "x", verdict("warn", "warn", None, reasons=["env"]))
+    assert "n/a" in popular_check.flagged_line(r)

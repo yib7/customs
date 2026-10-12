@@ -1,5 +1,6 @@
 import io
 import json
+import subprocess
 import tarfile
 
 from customs_ml import history_eval as he
@@ -260,3 +261,21 @@ def test_takeover_families():
             "block_with_rules": 2,
         }
     ]
+
+
+def test_parity_counts_a_timed_out_check_as_no_verdict(monkeypatch, tmp_path):
+    monkeypatch.setenv("CUSTOMS_DATA", str(tmp_path))
+    rows = [
+        {"name": f"p{i}", "version": "1.0.0", **dict.fromkeys(he.RULES, False)} for i in range(3)
+    ]
+    (tmp_path / "work").mkdir()
+    (tmp_path / "work" / "history_eval_rows.json").write_text(
+        json.dumps({"benign": rows}), encoding="utf-8"
+    )
+
+    def slow(cmd, **kw):
+        raise subprocess.TimeoutExpired(cmd, kw.get("timeout"))
+
+    monkeypatch.setattr(he.subprocess, "run", slow)
+    out = he.parity(tmp_path / "customs", tmp_path / "models")
+    assert out == {"checked": 0, "agree": 0, "disagree": []}

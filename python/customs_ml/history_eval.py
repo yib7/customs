@@ -732,13 +732,16 @@ def parity(binary: Path, models: Path, per_rule: int = 20, quiet: int = 30, seed
     def check(r) -> list[str] | None:
         cmd = [str(binary), "check", "--json", "--server", "http://127.0.0.1:9"]
         cmd += ["--config", str(policy), "--models", str(models), "--data-dir", str(tmp)]
-        p = subprocess.run(
-            [*cmd, "npm", f"{r.name}@{r.version}"],
-            capture_output=True,
-            text=True,
-            timeout=300,
-            encoding="utf-8",
-        )
+        try:
+            p = subprocess.run(
+                [*cmd, "npm", f"{r.name}@{r.version}"],
+                capture_output=True,
+                text=True,
+                timeout=300,
+                encoding="utf-8",
+            )
+        except subprocess.TimeoutExpired:
+            return None  # no verdict, like unparsable output
         try:
             hits = json.loads(p.stdout).get("policy_hits", [])
         except ValueError:
