@@ -77,8 +77,10 @@ First public release. Not tagged yet.
 - npm files inside a directory of the same name (`dist/compiled/ipaddr.js/ipaddr.js` in
   `next`) are no longer reported as `unread_code`, which blocked `next` 16.4.0.
 - `customs serve` hands memory back after a burst of installs: one `npm install` of about
-  450 packages peaked at 1.2 GB and stayed there; it now peaks near 0.6 GB and settles at
-  about 0.3 GB within 10 seconds. Expired package metadata is dropped while idle.
+  450 packages left it at 1.2 GB resident for good. With two glibc malloc arenas
+  (`MALLOC_ARENA_MAX` still overrides) and a trim every 10 seconds, a larger run (`check
+  next`, a 12-package pip install and that npm install) peaks under 0.5 GB and settles
+  under 0.2 GB. Expired package metadata is dropped while idle.
 - Training tools: UTF-8 for all text I/O, and a missing GuardDog, an empty held-out half,
   a timed-out parity check or a CNN run without a usable validation PR AUC give a clear
   error or a recorded result instead of a crash. MalRegistry dev-half rows that

@@ -180,6 +180,21 @@ pub fn release_free_memory() {
     }
 }
 
+/// Cap glibc at two malloc arenas unless `MALLOC_ARENA_MAX` is set. By default glibc makes
+/// up to eight per core, each holding on to its own freed memory, so what one burst of scans
+/// frees on one thread is not reused by the next: the same install journey settled at 395 MB
+/// resident with the default and at 163 MB with two, no slower. Call before any threads
+/// start. A no-op on other allocators.
+pub fn limit_malloc_arenas() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    if std::env::var_os("MALLOC_ARENA_MAX").is_none() {
+        // SAFETY: mallopt takes two integers and only changes allocator tuning.
+        unsafe {
+            libc::mallopt(libc::M_ARENA_MAX, 2);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
