@@ -16,7 +16,7 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::sync::{mpsc, OnceCell};
+use tokio::sync::{mpsc, OnceCell, Semaphore};
 
 use crate::audit;
 use crate::cli::{scan_file, split_package_arg};
@@ -536,15 +536,29 @@ impl McpServer {
             .map(PathBuf::from)
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| PathBuf::from("."));
-        let installs = parse_command(&a.command, &cwd);
+        // Parsing reads requirements files, scripts and project manifests: keep that file
+        // I/O off the async workers.
+        let command = a.command;
+        let parsed = tokio::task::spawn_blocking(move || {
+            let installs = parse_command(&command, &cwd);
+            let targets: Vec<Target> = installs.iter().flat_map(|i| i.targets.clone()).collect();
+            (installs, expand_projects(targets))
+        })
+        .await;
+        let (installs, expanded) = match parsed {
+            Ok(p) => p,
+            Err(e) => {
+                return Ok(ToolOutput::error(format!(
+                    "reading the command failed: {e}"
+                )))
+            }
+        };
         let mut tools: Vec<&str> = Vec::new();
         for i in &installs {
             if !tools.contains(&i.tool.as_str()) {
                 tools.push(&i.tool);
             }
         }
-        let targets: Vec<Target> = installs.iter().flat_map(|i| i.targets.clone()).collect();
-        let expanded = expand_projects(targets);
         if expanded.targets.is_empty() && expanded.mismatches.is_empty() {
             return Ok(ToolOutput::ok(
                 "No package installs found in this command; Customs has nothing to check.".into(),
@@ -639,11 +653,25 @@ impl McpServer {
     }
 
     async fn audit(&self, a: AuditArgs) -> Result<ToolOutput, RpcError> {
-        let files = match audit::find_lockfiles(&[PathBuf::from(&a.path)], a.recursive) {
-            Ok(f) => f,
-            Err(e) => return Ok(ToolOutput::error(e)),
+        // Walking a tree and reading lockfiles is blocking file I/O: run it off the async
+        // workers so other requests keep being served.
+        let (path, recursive, server) = (
+            PathBuf::from(&a.path),
+            a.recursive,
+            self.opts.server.clone(),
+        );
+        let found = tokio::task::spawn_blocking(move || {
+            audit::find_lockfiles(&[path], recursive).map(|files| {
+                let collected = audit::collect(&files, &server);
+                (files, collected)
+            })
+        })
+        .await;
+        let (files, (parsed, errors)) = match found {
+            Ok(Ok(f)) => f,
+            Ok(Err(e)) => return Ok(ToolOutput::error(e)),
+            Err(e) => return Ok(ToolOutput::error(format!("reading lockfiles failed: {e}"))),
         };
-        let (parsed, errors) = audit::collect(&files, &self.opts.server);
         let mut findings = audit::mismatch_findings(parsed.mismatches);
         let via = if parsed.deps.is_empty() {
             "nothing to check".to_string()
@@ -1155,10 +1183,15 @@ fn command_report(
     }
 }
 
-/// Serve MCP on stdin and stdout until stdin closes. Requests run concurrently; replies are
-/// written one per line as they finish.
+/// Requests handled at once. A client that floods the server waits for a slot instead of
+/// starting an unbounded number of package checks.
+const MAX_IN_FLIGHT: usize = 16;
+
+/// Serve MCP on stdin and stdout until stdin closes. Requests run concurrently, at most
+/// [`MAX_IN_FLIGHT`] at a time; replies are written one per line as they finish.
 pub async fn run_mcp(opts: McpOptions) -> i32 {
     let server = McpServer::new(opts);
+    let slots = Arc::new(Semaphore::new(MAX_IN_FLIGHT));
     let (tx, mut rx) = mpsc::unbounded_channel::<Value>();
     let writer = tokio::spawn(async move {
         let mut out = tokio::io::stdout();
@@ -1181,8 +1214,14 @@ pub async fn run_mcp(opts: McpOptions) -> i32 {
                 if line.is_empty() {
                     continue;
                 }
+                // Wait for a free slot before reading on, so the number of tasks (and the
+                // lines they hold) stays bounded too. The semaphore is never closed.
+                let Ok(slot) = slots.clone().acquire_owned().await else {
+                    break 1;
+                };
                 let (server, tx) = (server.clone(), tx.clone());
                 tokio::spawn(async move {
+                    let _slot = slot;
                     if let Some(reply) = server.handle_line(&line).await {
                         let _ = tx.send(reply);
                     }
