@@ -375,7 +375,10 @@ def history_rules(
     if cur is None:
         return None
     earlier = _earlier(meta, version)
-    facts = lambda v: meta["versions"].get(v)  # noqa: E731
+
+    def facts(v):
+        return meta["versions"].get(v)
+
     out = dict.fromkeys(RULES, False)
     if earlier:
         pt, pv = earlier[0]
@@ -714,7 +717,7 @@ def parity(binary: Path, models: Path, per_rule: int = 20, quiet: int = 30, seed
     rows = rows[known]
     picks = []
     for k in RULES:
-        hit = rows[rows[k] == True]  # noqa: E712
+        hit = rows[rows[k].eq(True)]
         picks.append(hit.sample(min(per_rule, len(hit)), random_state=seed))
     none = rows[~rows[list(RULES)].astype(bool).any(axis=1)]
     picks.append(none.sample(min(quiet, len(none)), random_state=seed))
