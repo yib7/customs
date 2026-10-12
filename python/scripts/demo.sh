@@ -75,7 +75,8 @@ req.write(Buffer.from(data).toString("base64")); req.end();
 JS
 echo 'module.exports = (s) => s;' >"$WORK/pkg/package/index.js"
 tar -czf "$WORK/colors-helper-utils-1.0.4.tgz" -C "$WORK/pkg" package
-"$BIN" scan "$WORK/colors-helper-utils-1.0.4.tgz" || true
+# --models: a binary under $CARGO_TARGET_DIR does not sit next to this checkout's models/.
+"$BIN" scan --models models "$WORK/colors-helper-utils-1.0.4.tgz" || true
 
 step "pip installs through the proxy (allowed package)"
 python3 -m pip download --quiet --no-deps --dest "$WORK/dl" \
