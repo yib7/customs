@@ -15,7 +15,7 @@ use super::{
 use crate::engine::ArtifactRequest;
 use crate::registry::npm_escape;
 use crate::server::AppState;
-use crate::util::{normalize_name, parse_npm_tarball};
+use crate::util::{normalize_name, parse_npm_tarball, redact_url, redact_urls};
 use crate::verdict::EventKind;
 
 /// What a path under `/npm/` refers to.
@@ -130,13 +130,19 @@ pub async fn npm_any(
     let Some(parsed) = parse_npm_path(&rest) else {
         return (StatusCode::NOT_FOUND, r#"{"error":"Not found"}"#).into_response();
     };
+    let read = method == Method::GET || method == Method::HEAD;
+    // Besides reads, only the advisory queries `npm audit` POSTs go upstream. Anything else
+    // (dist-tag moves, token or user endpoints) would act there with the proxy's credentials.
+    let allowed = read
+        || matches!(&parsed, NpmPath::Special(p)
+            if method == Method::POST && p.starts_with("-/npm/v1/security/"));
     match parsed {
-        NpmPath::Special(p) => passthrough(&state, method, &p, uri.query(), &headers, body).await,
-        _ if method != Method::GET && method != Method::HEAD => (
+        _ if !allowed => (
             StatusCode::METHOD_NOT_ALLOWED,
             r#"{"error":"customs is a read-only registry proxy"}"#,
         )
             .into_response(),
+        NpmPath::Special(p) => passthrough(&state, method, &p, uri.query(), &headers, body).await,
         NpmPath::Packument { name, version } => {
             packument(&state, &headers, &name, version.as_deref()).await
         }
@@ -176,11 +182,12 @@ async fn packument(
     let page = match page {
         Ok(p) => p,
         Err(e) => {
-            tracing::warn!(%url, error = %e, "upstream packument failed");
+            tracing::warn!(url = %redact_url(&url), error = %e, "upstream packument failed");
             return (
                 StatusCode::BAD_GATEWAY,
                 [(header::CONTENT_TYPE, "application/json")],
-                serde_json::json!({ "error": format!("customs: upstream error: {e}") }).to_string(),
+                serde_json::json!({ "error": redact_urls(&format!("customs: upstream error: {e}")) })
+                    .to_string(),
             )
                 .into_response();
         }
@@ -300,9 +307,9 @@ async fn passthrough(
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or("application/json")
                 .to_string();
-            match resp.bytes().await {
+            match crate::registry::read_capped(resp, crate::registry::MAX_PAGE_BYTES).await {
                 Ok(bytes) => (status, [(header::CONTENT_TYPE, ct)], bytes).into_response(),
-                // A body cut short is an upstream failure, not an empty answer.
+                // A body cut short (or too long) is an upstream failure, not an empty answer.
                 Err(e) => upstream_error(e),
             }
         }
@@ -310,10 +317,10 @@ async fn passthrough(
     }
 }
 
-fn upstream_error(e: reqwest::Error) -> Response {
+fn upstream_error(e: impl std::fmt::Display) -> Response {
     (
         StatusCode::BAD_GATEWAY,
-        format!("customs: upstream error: {e}\n"),
+        redact_urls(&format!("customs: upstream error: {e}\n")),
     )
         .into_response()
 }

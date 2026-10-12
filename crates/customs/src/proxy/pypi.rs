@@ -17,7 +17,7 @@ use super::{
 use crate::config::Mode;
 use crate::engine::ArtifactRequest;
 use crate::server::AppState;
-use crate::util::{normalize_name, parse_pypi_filename};
+use crate::util::{normalize_name, parse_pypi_filename, redact_url, redact_urls};
 use crate::verdict::EventKind;
 
 const DEFAULT_ACCEPT: &str =
@@ -138,10 +138,10 @@ async fn fetch_and_rewrite(
     let page = match page {
         Ok(p) => p,
         Err(e) => {
-            tracing::warn!(%url, error = %e, "upstream simple page failed");
+            tracing::warn!(url = %redact_url(&url), error = %e, "upstream simple page failed");
             return (
                 StatusCode::BAD_GATEWAY,
-                format!("customs: upstream error: {e}\n"),
+                redact_urls(&format!("customs: upstream error: {e}\n")),
             )
                 .into_response();
         }
@@ -310,7 +310,7 @@ pub async fn file(
                 .into_response(),
             Err(e) => (
                 StatusCode::BAD_GATEWAY,
-                format!("customs: upstream error: {e}\n"),
+                redact_urls(&format!("customs: upstream error: {e}\n")),
             )
                 .into_response(),
         };

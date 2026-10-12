@@ -14,7 +14,7 @@ use tokio_util::io::ReaderStream;
 
 use crate::config::Mode;
 use crate::engine::{EngineError, Outcome};
-use crate::util::ecosystem_str;
+use crate::util::{ecosystem_str, redact_urls};
 use crate::verdict::Verdict;
 
 /// Whether the policy can hide young versions; metadata is fetched for that only then.
@@ -243,10 +243,12 @@ pub fn error_response(e: &EngineError) -> Response {
         EngineError::Upstream(_) => StatusCode::BAD_GATEWAY,
         EngineError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
     };
+    // Upstream errors name the URL, which may carry the registry credentials.
+    let msg = redact_urls(&e.to_string());
     if status.is_server_error() {
-        tracing::error!(error = %e, "artifact evaluation failed");
+        tracing::error!(error = %msg, "artifact evaluation failed");
     }
-    (status, format!("customs: {e}\n")).into_response()
+    (status, format!("customs: {msg}\n")).into_response()
 }
 
 #[cfg(test)]

@@ -41,6 +41,13 @@ pub fn router() -> Router<AppState> {
         .fallback(|| async { api_error(StatusCode::NOT_FOUND, "no such API route") })
 }
 
+/// A name the registry could hold. Anything else would be pasted into the upstream URL the
+/// server fetches with its registry credentials, where `?`, `#` and `..` change what is
+/// requested.
+fn package_name_ok(eco: customs_scan::Ecosystem, name: &str) -> bool {
+    name.len() <= 214 && crate::config::valid_package_name(eco, name)
+}
+
 pub fn api_error(status: StatusCode, msg: impl Into<String>) -> Response {
     (status, Json(json!({ "error": msg.into() }))).into_response()
 }
@@ -89,7 +96,7 @@ async fn check(
         );
     };
     let name = req.name.trim();
-    if name.is_empty() || name.len() > 214 || name.chars().any(char::is_whitespace) {
+    if !package_name_ok(eco, name) {
         return api_error(StatusCode::BAD_REQUEST, "invalid package name");
     }
     let client = req.client.or_else(|| Some("api".into()));
@@ -150,7 +157,7 @@ async fn diff(
         );
     };
     let name = q.name.trim();
-    if name.is_empty() || name.len() > 214 || name.chars().any(char::is_whitespace) {
+    if !package_name_ok(eco, name) {
         return api_error(StatusCode::BAD_REQUEST, "invalid package name");
     }
     let blank = |v: Option<String>| v.filter(|s| !s.trim().is_empty());
@@ -273,10 +280,41 @@ async fn put_policy(
     extensions: axum::http::Extensions,
     body: String,
 ) -> Response {
-    let remote = extensions
+    let remote_ip = extensions
         .get::<ConnectInfo<SocketAddr>>()
-        .map(|c| c.0.ip().to_string());
+        .map(|c| c.0.ip());
+    let remote = remote_ip.map(|ip| ip.to_string());
+    let now = std::time::Instant::now();
+    let throttled = match (&state.policy_auth, remote_ip) {
+        (crate::server::PolicyAuth::Token(_), Some(ip)) => state.token_failures.locked(ip, now),
+        _ => None,
+    };
+    if let Some(secs) = throttled {
+        state.engine.metrics.policy_change("refused");
+        tracing::warn!(
+            remote = remote.as_deref().unwrap_or("-"),
+            "policy change refused: too many wrong admin tokens"
+        );
+        let mut resp = (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({
+                "error": format!(
+                    "too many wrong admin tokens from this address; try again in {secs} s"
+                ),
+                "code": "too_many_attempts",
+            })),
+        )
+            .into_response();
+        resp.headers_mut()
+            .insert(axum::http::header::RETRY_AFTER, secs.into());
+        return resp;
+    }
     if let Some((status, code, msg)) = state.policy_auth.refuse(&headers) {
+        if code == "admin_token_invalid" {
+            if let Some(ip) = remote_ip {
+                state.token_failures.failed(ip, now);
+            }
+        }
         state.engine.metrics.policy_change("refused");
         tracing::warn!(
             code,
@@ -423,7 +461,6 @@ async fn model(State(state): State<AppState>) -> Response {
         "thresholds": eff,
         "model_thresholds": m.thresholds(),
         "manifest": m.manifest,
-        "models_dir": m.dir.display().to_string(),
         "components": {
             "code_gbdt": component(m.code_gbdt.is_some(), m.code_gbdt.as_ref().map(|g| json!({
                 "n_trees": g.n_trees(), "n_features": g.feature_names().len() })).unwrap_or(Value::Null)),

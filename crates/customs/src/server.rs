@@ -1,13 +1,14 @@
 //! HTTP server assembly: routes, middleware, static dashboard, graceful shutdown.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use axum::extract::{MatchedPath, Request, State};
-use axum::http::{header, Method, StatusCode};
+use axum::http::{header, HeaderValue, Method, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{any, get};
@@ -29,6 +30,57 @@ pub struct AppState {
     /// Host names, beyond loopback names and IP literals, under which the policy may be
     /// changed (lowercase, no port); see [`ServeOptions::allowed_hosts`].
     pub allowed_hosts: Arc<[String]>,
+    /// Wrong admin tokens by client address.
+    pub token_failures: Arc<TokenFailures>,
+}
+
+/// How long wrong admin tokens from one address count against it.
+pub const TOKEN_FAILURE_WINDOW: Duration = Duration::from_secs(60);
+
+/// Wrong admin tokens by client address (IPv6 by /64, the block one host usually holds),
+/// so a token cannot be guessed at network speed: see [`MAX_TOKEN_FAILURES`].
+#[derive(Debug, Default)]
+pub struct TokenFailures(Mutex<HashMap<IpAddr, (u32, Instant)>>);
+
+/// Addresses tracked before expired entries are swept.
+const TOKEN_FAILURES_SWEEP_AT: usize = 4096;
+
+fn failure_key(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => IpAddr::V4(v4),
+            None => {
+                let s = v6.segments();
+                IpAddr::V6(std::net::Ipv6Addr::new(s[0], s[1], s[2], s[3], 0, 0, 0, 0))
+            }
+        },
+        v4 => v4,
+    }
+}
+
+impl TokenFailures {
+    /// Seconds until `ip` may send a token again, when it has used up its attempts.
+    pub fn locked(&self, ip: IpAddr, now: Instant) -> Option<u64> {
+        let map = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let (n, since) = map.get(&failure_key(ip))?;
+        let left = TOKEN_FAILURE_WINDOW.checked_sub(now.saturating_duration_since(*since))?;
+        (*n >= MAX_TOKEN_FAILURES && !left.is_zero()).then(|| left.as_secs().max(1))
+    }
+
+    /// Count a wrong token from `ip`.
+    pub fn failed(&self, ip: IpAddr, now: Instant) {
+        let mut map = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if map.len() >= TOKEN_FAILURES_SWEEP_AT {
+            map.retain(|_, (_, since)| {
+                now.saturating_duration_since(*since) < TOKEN_FAILURE_WINDOW
+            });
+        }
+        let e = map.entry(failure_key(ip)).or_insert((0, now));
+        if now.saturating_duration_since(e.1) >= TOKEN_FAILURE_WINDOW {
+            *e = (0, now);
+        }
+        e.0 = e.0.saturating_add(1);
+    }
 }
 
 /// Who may change the policy through `PUT /api/policy`.
@@ -116,6 +168,10 @@ pub struct ServeOptions {
 /// Shortest admin token accepted.
 pub const MIN_ADMIN_TOKEN_LEN: usize = 16;
 
+/// Wrong admin tokens one address may send within [`TOKEN_FAILURE_WINDOW`] before its
+/// policy changes are refused until the window ends.
+pub const MAX_TOKEN_FAILURES: u32 = 10;
+
 const NOT_BUILT: &str = r#"<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Customs</title>
@@ -128,6 +184,41 @@ code{background:#eee;padding:.1rem .3rem;border-radius:3px}@media(prefers-color-
 <p>The API is available: <a href="/api/events">/api/events</a>, <a href="/api/stats">/api/stats</a>,
 <a href="/api/model">/api/model</a>, <a href="/metrics">/metrics</a>.</p>
 </body></html>"#;
+
+/// Content-Security-Policy on every response. The built dashboard loads only its own
+/// scripts, styles and API (the theme script is a file rather than inline for this reason);
+/// React's `style={...}` goes through the CSSOM, which `style-src` does not govern.
+const CSP: &str = concat!(
+    "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; ",
+    "font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; ",
+    "form-action 'self'; frame-ancestors 'none'"
+);
+
+/// The "not built" page carries its styles inline.
+const NOT_BUILT_CSP: &str = concat!(
+    "default-src 'self'; script-src 'self'; style-src 'unsafe-inline'; object-src 'none'; ",
+    "base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+);
+
+/// Browser hardening on every response: no type sniffing, no framing (the Policy page must
+/// not be clickjacked into switching enforcement off), no referrer, and the CSP above
+/// unless the handler set its own.
+async fn security_headers(req: Request, next: Next) -> Response {
+    let mut resp = next.run(req).await;
+    let h = resp.headers_mut();
+    h.entry(header::CONTENT_SECURITY_POLICY)
+        .or_insert(HeaderValue::from_static(CSP));
+    h.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    h.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+    h.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    resp
+}
 
 /// No CORS: the built dashboard is same-origin, and the Vite dev server proxies `/api`
 /// with the browser's `Host` (`changeOrigin: false`), so its dashboard is same-origin too.
@@ -153,10 +244,19 @@ pub fn router(state: AppState, ui_dir: Option<&Path>) -> Router {
             app = app.fallback_service(spa);
         }
         None => {
-            app = app.fallback(|| async { Html(NOT_BUILT) });
+            app = app.fallback(|| async {
+                (
+                    [(
+                        header::CONTENT_SECURITY_POLICY,
+                        HeaderValue::from_static(NOT_BUILT_CSP),
+                    )],
+                    Html(NOT_BUILT),
+                )
+            });
         }
     }
     app.layer(middleware::from_fn_with_state(state.clone(), track))
+        .layer(middleware::from_fn(security_headers))
         .with_state(state)
 }
 
@@ -341,6 +441,15 @@ pub fn policy_auth_for(ip: IpAddr, opts: &ServeOptions) -> anyhow::Result<Policy
     })
 }
 
+/// Whether every request must name this machine by a loopback name, an IP address or an
+/// `--allowed-hosts` name ([`guard_loopback_host`]): on a loopback listener, and on one
+/// whose operator vouched that its published port is loopback
+/// (`--allow-anonymous-policy-changes` without a token, the compose file's container).
+/// Legitimate clients of either use such names, so any other `Host` is a rebound page.
+pub fn host_guard_for(ip: IpAddr, opts: &ServeOptions) -> bool {
+    ip.is_loopback() || (opts.allow_anonymous_policy_changes && opts.admin_token.is_none())
+}
+
 /// Serve on `listener` until `shutdown` resolves, then drain in-flight requests.
 pub async fn serve_with(
     listener: TcpListener,
@@ -359,9 +468,10 @@ pub async fn serve_with(
         shutdown: rx,
         policy_auth,
         allowed_hosts: allowed_hosts.clone(),
+        token_failures: Arc::default(),
     };
     let mut app = router(state, ui_dir.as_deref());
-    if addr.ip().is_loopback() {
+    if host_guard_for(addr.ip(), &opts) {
         app = app.layer(middleware::from_fn_with_state(
             allowed_hosts,
             guard_loopback_host,
@@ -520,6 +630,49 @@ mod tests {
             ..Default::default()
         };
         assert!(policy_auth_for(ip("127.0.0.1"), &short).is_err());
+    }
+
+    #[test]
+    fn host_names_are_checked_where_clients_use_loopback_names() {
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        let open = ServeOptions::default();
+        let anon = ServeOptions {
+            allow_anonymous_policy_changes: true,
+            ..Default::default()
+        };
+        assert!(host_guard_for(ip("127.0.0.1"), &open));
+        assert!(host_guard_for(ip("::1"), &anon));
+        // A team server is reached under its own names.
+        assert!(!host_guard_for(ip("0.0.0.0"), &open));
+        // A container told its published port is loopback (the compose file) is reached as
+        // localhost too, so a rebound name must not read its events or policy.
+        assert!(host_guard_for(ip("0.0.0.0"), &anon));
+    }
+
+    #[test]
+    fn token_failures_lock_an_address_for_the_rest_of_the_window() {
+        let f = TokenFailures::default();
+        let t0 = Instant::now();
+        let ip: IpAddr = "192.0.2.7".parse().unwrap();
+        for _ in 0..MAX_TOKEN_FAILURES - 1 {
+            f.failed(ip, t0);
+        }
+        assert_eq!(f.locked(ip, t0), None);
+        f.failed(ip, t0);
+        assert_eq!(f.locked(ip, t0), Some(TOKEN_FAILURE_WINDOW.as_secs()));
+        // Another address is not affected; one in the same IPv6 /64 is.
+        assert_eq!(f.locked("192.0.2.8".parse().unwrap(), t0), None);
+        let v6 = |s: &str| s.parse::<IpAddr>().unwrap();
+        for _ in 0..MAX_TOKEN_FAILURES {
+            f.failed(v6("2001:db8:1:2::1"), t0);
+        }
+        assert!(f.locked(v6("2001:db8:1:2:ffff::9"), t0).is_some());
+        assert_eq!(f.locked(v6("2001:db8:1:3::1"), t0), None);
+        // The window ends, and the count starts over.
+        let later = t0 + TOKEN_FAILURE_WINDOW;
+        assert_eq!(f.locked(ip, later), None);
+        f.failed(ip, later);
+        assert_eq!(f.locked(ip, later), None);
     }
 
     #[test]

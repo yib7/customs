@@ -60,6 +60,9 @@ pub struct Limits {
     /// An archive download that takes longer than this in all is abandoned (502), so an
     /// upstream that drips bytes cannot hold the download and everyone waiting on it.
     pub download_timeout: Duration,
+    /// Archives scanned at the same time; more wait for a slot. Each scan holds its archive
+    /// in memory, so this bounds memory under a burst of distinct packages.
+    pub max_concurrent_scans: usize,
 }
 
 impl Default for Limits {
@@ -70,6 +73,7 @@ impl Default for Limits {
             max_check_bytes: 64 << 20,
             max_cache_bytes: 10 << 30,
             download_timeout: Duration::from_secs(600),
+            max_concurrent_scans: std::thread::available_parallelism().map_or(4, |n| n.get()),
         }
     }
 }
@@ -135,7 +139,8 @@ pub struct MetaFacts {
     pub history: Option<ReleaseHistory>,
     /// The registry marks the version (or the requested file) yanked, or npm deprecated.
     pub yanked: bool,
-    /// Metadata read fresh does not list the version or file, so its age is unknown.
+    /// Metadata read fresh does not list the version or file, or could not be read, so its
+    /// age is unknown.
     pub age_unknown: bool,
     /// Hits about how the version or the archive was chosen.
     pub notes: Vec<PolicyHit>,
@@ -234,6 +239,8 @@ pub struct Engine {
     tmp_counter: AtomicU64,
     /// Bytes downloaded since the cache size was last checked.
     cache_growth: AtomicU64,
+    /// One permit per scan that may run now ([`Limits::max_concurrent_scans`]).
+    scan_slots: tokio::sync::Semaphore,
 }
 
 const INSTALL_SCRIPT_NAMES: [&str; 3] = ["preinstall", "install", "postinstall"];
@@ -254,6 +261,17 @@ fn install_scripts_from_report(r: &ScanReport) -> Vec<String> {
         out.push("install script".into());
     }
     out
+}
+
+/// Refuse a name no registry could hold before it becomes part of an upstream URL.
+fn check_name(eco: Ecosystem, name: &str) -> Result<(), EngineError> {
+    if crate::config::valid_package_name(eco, name) {
+        return Ok(());
+    }
+    Err(EngineError::Unresolvable(format!(
+        "'{name}' is not a valid {} package name",
+        crate::util::registry_name(eco)
+    )))
 }
 
 /// Partial downloads older than this were left by a crash. Age-gated rather than removed
@@ -320,6 +338,7 @@ impl Engine {
             tmp_counter: AtomicU64::new(0),
             // Starting above the trigger makes the first download check the size.
             cache_growth: AtomicU64::new(u64::MAX / 2),
+            scan_slots: tokio::sync::Semaphore::new(cfg.limits.max_concurrent_scans.max(1)),
         }))
     }
 
@@ -523,9 +542,10 @@ impl Engine {
         }
     }
 
-    /// Registry facts for an artifact requested through the proxy. A failed metadata
-    /// lookup only costs the metadata rules, so it is logged and otherwise ignored; metadata
-    /// that does not list the file is another matter (see [`MetaFacts::age_unknown`]).
+    /// Registry facts for an artifact requested through the proxy. Metadata that cannot be
+    /// read, or does not list the file, leaves its age unknown (see
+    /// [`MetaFacts::age_unknown`]), which the release-age rule does not give the benefit of
+    /// the doubt.
     async fn artifact_meta(&self, policy: &Policy, req: &ArtifactRequest) -> MetaFacts {
         let mut facts = MetaFacts {
             exists: true,
@@ -594,8 +614,11 @@ impl Engine {
                 tracing::debug!(name = %req.name, version, "no registry metadata for version");
                 facts.age_unknown = true;
             }
+            // Unreadable metadata (a timeout, garbage, a 5xx) dates nothing either: treating
+            // it as "no rule applies" would let a version published a minute ago through.
             Err(e) => {
-                tracing::warn!(name = %req.name, version, error = %e, "registry metadata lookup failed")
+                tracing::warn!(name = %req.name, version, error = %e, "registry metadata lookup failed");
+                facts.age_unknown = true;
             }
         }
         facts
@@ -640,10 +663,17 @@ impl Engine {
             }
         };
         let dest = self.blob_path(&dl.sha256);
-        if let Some(dir) = dest.parent() {
-            tokio::fs::create_dir_all(dir).await.map_err(internal)?;
+        let moved = async {
+            if let Some(dir) = dest.parent() {
+                tokio::fs::create_dir_all(dir).await?;
+            }
+            tokio::fs::rename(&tmp, &dest).await
         }
-        tokio::fs::rename(&tmp, &dest).await.map_err(internal)?;
+        .await;
+        if let Err(e) = moved {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return Err(internal(e));
+        }
         self.store
             .artifact_put(
                 url,
@@ -696,7 +726,9 @@ impl Engine {
             name: name.to_string(),
             version: version.map(str::to_string),
             sha256: sha256.to_string(),
-            model_version: self.scan_identity(),
+            // The file name too: the scanner reads the same bytes as a wheel and as an
+            // sdist differently. It leads, so the identity stays a suffix for pruning.
+            model_version: format!("{filename}|{}", self.scan_identity()),
         };
         if let Some(json) = self.store.scan_cache_get(&key).map_err(internal)? {
             if let Ok(s) = serde_json::from_str::<ScanSummary>(&json) {
@@ -705,6 +737,8 @@ impl Engine {
             }
         }
         self.metrics.cache("scan_miss");
+        // Held until the summary is built: the archive is in memory for the whole scan.
+        let _slot = self.scan_slots.acquire().await.map_err(internal)?;
         let started = Instant::now();
         let summary = if size > self.limits.max_scan_bytes {
             let limit = self.limits.max_scan_bytes >> 20;
@@ -970,6 +1004,7 @@ impl Engine {
         client: Option<String>,
         as_served: bool,
     ) -> Result<Verdict, EngineError> {
+        check_name(eco, name)?;
         let policy = self.policy();
         let name = normalize_name(eco, name);
         // A pinned version the cached metadata lacks may have been published since.
@@ -1107,6 +1142,7 @@ impl Engine {
             );
             return self.record(v, EventKind::Check, client);
         }
+        on_upstream(policy, eco, file)?;
         let out = self
             .evaluate_artifact(ArtifactRequest {
                 ecosystem: eco,
@@ -1135,6 +1171,7 @@ impl Engine {
         to: Option<&str>,
         client: Option<String>,
     ) -> Result<ReleaseDiff, EngineError> {
+        check_name(eco, name)?;
         let policy = self.policy();
         let name = normalize_name(eco, name);
         let pins: Vec<String> = [from, to]
@@ -1238,6 +1275,8 @@ impl Engine {
             ));
             return Ok(d);
         }
+        on_upstream(&policy, eco, &file_from)?;
+        on_upstream(&policy, eco, &file_to)?;
         let (a, b) = tokio::join!(
             self.fetch_artifact(&file_from.url, &file_from.filename),
             self.fetch_artifact(&file_to.url, &file_to.filename)
@@ -1275,6 +1314,7 @@ impl Engine {
             ));
             return Ok(d);
         }
+        let _slot = self.scan_slots.acquire().await.map_err(internal)?;
         let (ra, rb) = tokio::join!(tokio::fs::read(&path_a), tokio::fs::read(&path_b));
         let (bytes_a, bytes_b) = (ra.map_err(internal)?, rb.map_err(internal)?);
         let files = tokio::task::spawn_blocking(move || {
@@ -1355,6 +1395,38 @@ fn local_verdict(
         false,
         &facts,
     )
+}
+
+/// Refuse a file whose URL (from registry metadata) is not on a host the proxy fetches
+/// archives from: the files and index hosts for PyPI, the registry for npm. A check must
+/// not make the server fetch from wherever a metadata document points.
+fn on_upstream(policy: &Policy, eco: Ecosystem, file: &FileMeta) -> Result<(), EngineError> {
+    let origin = |s: &str| {
+        url::Url::parse(s).ok().map(|u| {
+            (
+                u.scheme().to_string(),
+                u.host_str().map(str::to_ascii_lowercase),
+                u.port_or_known_default(),
+            )
+        })
+    };
+    let up = &policy.upstream;
+    let hosts: &[&str] = match eco {
+        Ecosystem::Pypi => &[&up.pypi_files, &up.pypi_simple],
+        Ecosystem::Npm => &[&up.npm],
+    };
+    let o = origin(&file.url);
+    if o.is_some() && hosts.iter().any(|h| origin(h) == o) {
+        return Ok(());
+    }
+    Err(EngineError::Upstream(format!(
+        "{} is hosted at {}, not on a configured upstream; Customs does not fetch it",
+        file.filename,
+        url::Url::parse(&file.url)
+            .ok()
+            .and_then(|u| u.host_str().map(str::to_string))
+            .unwrap_or_else(|| "an unparsable URL".into())
+    )))
 }
 
 /// The scanner part of [`Engine::scan_identity`].
@@ -1663,7 +1735,7 @@ mod tests {
         // name-only risk change cached under scan:1.1|summary:1, and builds that flagged
         // `x.js/x.js` npm files as unread under scan:2.1; those must not be served.
         let s = scan_suffix(&Limits::default());
-        assert_eq!(s, format!("|scan:3.1|summary:2|max:{}", 256u64 << 20));
+        assert_eq!(s, format!("|scan:4.1|summary:2|max:{}", 256u64 << 20));
     }
 
     #[test]

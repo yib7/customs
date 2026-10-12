@@ -1593,6 +1593,11 @@ async fn events_filters_stats_model_metrics_health() {
     assert_eq!(m["untrained"], true);
     assert_eq!(m["thresholds"]["warn"], 0.5);
     assert_eq!(m["components"]["code_gbdt"]["loaded"], true);
+    // Where the server keeps its files is not the API's business.
+    let text = m.to_string();
+    let models = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../models/dev");
+    assert!(m.get("models_dir").is_none(), "{text}");
+    assert!(!text.contains(models.to_str().unwrap()), "{text}");
 
     let metrics = h.get("/metrics").await.text().await.unwrap();
     assert!(
@@ -2990,6 +2995,7 @@ async fn a_network_facing_server_without_a_token_refuses_policy_changes() {
             shutdown: rx,
             policy_auth: PolicyAuth::Disabled,
             allowed_hosts: Arc::from(Vec::new()),
+            token_failures: Arc::default(),
         },
         None,
     );
@@ -4463,4 +4469,432 @@ fn a_missing_models_dir_says_where_to_point() {
     assert_eq!(code, 1, "{err}");
     assert!(err.contains("manifest.json"), "{err}");
     assert!(err.contains("CUSTOMS_MODELS"), "{err}");
+}
+
+// ------------------------------------------------------------------ hardening
+
+/// A `tracing` writer that keeps everything written to it.
+#[derive(Clone, Default)]
+struct LogBuf(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogBuf {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(b);
+        Ok(b.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuf {
+    type Writer = LogBuf;
+    fn make_writer(&'a self) -> LogBuf {
+        self.clone()
+    }
+}
+
+impl LogBuf {
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+    }
+}
+
+/// A registry that answers every request with 200 and a body that is not JSON.
+async fn start_garbage_registry() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let app = Router::new().fallback(|| async { (StatusCode::OK, "not json") });
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    base
+}
+
+/// Upstream credentials go to the upstream only: not into the log (at any level), not into
+/// the errors the proxy hands pip and npm, and not into API errors. Current-thread runtime,
+/// so every task the server spawns logs to this test's subscriber.
+#[tokio::test(flavor = "current_thread")]
+async fn upstream_credentials_stay_out_of_logs_and_errors() {
+    let logs = LogBuf::default();
+    let sub = tracing_subscriber::fmt()
+        .with_writer(logs.clone())
+        .with_max_level(tracing::Level::TRACE)
+        .with_ansi(false)
+        .finish();
+    let _guard = tracing::subscriber::set_default(sub);
+
+    let with_creds = |base: &str| base.replace("http://", "http://user:s3cret@");
+    let garbage = with_creds(&start_garbage_registry().await);
+    let dead = with_creds(&dead_server());
+    let h = Harness::start(|p| {
+        p.upstream.pypi_simple = format!("{garbage}/simple");
+        p.upstream.pypi_json = format!("{garbage}/pypi");
+        p.upstream.pypi_files = format!("{dead}/files");
+        p.upstream.npm = format!("{dead}/npm");
+    })
+    .await;
+    let mut bodies = Vec::new();
+    for path in [
+        "/pypi/simple/six/",
+        "/pypi/files/ab/cd/six-1.0.0.tar.gz",
+        "/npm/left-pad",
+        "/npm/left-pad/-/left-pad-1.3.0.tgz",
+        "/npm/-/v1/search?text=x",
+    ] {
+        let r = h.get(path).await;
+        bodies.push(format!("{path} {} {}", r.status(), r.text().await.unwrap()));
+    }
+    for (eco, name, version) in [
+        ("pypi", "six", Some("1.0.0")),
+        ("npm", "left-pad", Some("1.3.0")),
+    ] {
+        let (status, v) = h.check(eco, name, version).await;
+        bodies.push(format!("check {eco} {status} {v}"));
+    }
+    h.stop().await;
+    let bodies = bodies.join("\n");
+    let log = logs.text();
+    // The failures above were logged, with the URLs they concern.
+    assert!(log.contains("upstream packument failed"), "{log}");
+    assert!(log.contains("***@127.0.0.1"), "{log}");
+    assert!(!bodies.contains("s3cret"), "{bodies}");
+    assert!(!log.contains("s3cret"), "{log}");
+}
+
+/// Dashboard pages, API answers and the "not built" page all tell the browser not to sniff
+/// types, not to be framed, not to send the URL on as a referrer, and to load nothing from
+/// other origins.
+#[tokio::test(flavor = "multi_thread")]
+async fn responses_carry_security_headers() {
+    fn check(r: &reqwest::Response, what: &str) {
+        let hdr = |n: &str| {
+            r.headers()
+                .get(n)
+                .map(|v| v.to_str().unwrap().to_string())
+                .unwrap_or_default()
+        };
+        assert_eq!(hdr("x-content-type-options"), "nosniff", "{what}");
+        assert_eq!(hdr("x-frame-options"), "DENY", "{what}");
+        assert_eq!(hdr("referrer-policy"), "no-referrer", "{what}");
+        let csp = hdr("content-security-policy");
+        for part in [
+            "default-src 'self'",
+            "script-src 'self'",
+            "object-src 'none'",
+            "base-uri 'none'",
+            "frame-ancestors 'none'",
+        ] {
+            assert!(csp.contains(part), "{what}: {csp}");
+        }
+        assert!(!csp.contains("script-src 'self' 'unsafe"), "{what}: {csp}");
+    }
+    let h = Harness::start(|_| {}).await;
+    check(&h.get("/").await, "not-built page");
+    h.stop().await;
+
+    let ui = tempfile::tempdir().unwrap();
+    std::fs::write(ui.path().join("index.html"), "<html>SPA</html>").unwrap();
+    std::fs::create_dir(ui.path().join("assets")).unwrap();
+    std::fs::write(ui.path().join("assets/app.js"), "console.log(1)").unwrap();
+    let h = Harness::start_with_ui(|_| {}, Some(ui.path().to_path_buf())).await;
+    for path in [
+        "/",
+        "/assets/app.js",
+        "/verdicts/12",
+        "/api/stats",
+        "/api/nope",
+    ] {
+        check(&h.get(path).await, path);
+    }
+    let r = h
+        .http
+        .put(format!("{}/api/policy", h.base))
+        .header("origin", "http://evil.example")
+        .body("{}")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 403);
+    check(&r, "refused PUT");
+    // No CORS: other origins get no permission to read the API.
+    let r = h
+        .http
+        .get(format!("{}/api/events", h.base))
+        .header("origin", "http://evil.example")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.headers().get("access-control-allow-origin").is_none());
+    h.stop().await;
+}
+
+/// Guessing the admin token is cut off: after repeated wrong tokens from one address,
+/// that address is refused (429) for a while, even with the right token.
+#[tokio::test(flavor = "multi_thread")]
+async fn repeated_wrong_admin_tokens_are_throttled() {
+    let token = "right-token-0123456789";
+    let opts = ServeOptions {
+        admin_token: Some(token.into()),
+        ..Default::default()
+    };
+    let h = Harness::start_serving(|_| {}, None, Limits::default(), "127.0.0.1:0", opts).await;
+    let mut p: Value = h.get("/api/policy").await.json().await.unwrap();
+    p["mode"] = json!("monitor");
+    let put = |auth: String| {
+        h.http
+            .put(format!("{}/api/policy", h.base))
+            .header("authorization", auth)
+            .json(&p)
+            .send()
+    };
+    for i in 0..customs::server::MAX_TOKEN_FAILURES {
+        let r = put(format!("Bearer wrong-{i:02}-0123456789"))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 401, "attempt {i}");
+    }
+    let r = put(format!("Bearer {token}")).await.unwrap();
+    assert_eq!(r.status(), 429);
+    assert!(r.headers().get("retry-after").is_some());
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(body["code"], "too_many_attempts");
+    assert_eq!(h.engine.policy().mode, customs::config::Mode::Enforce);
+    // Reads are not affected.
+    assert_eq!(h.get("/api/policy").await.status(), 200);
+    h.stop().await;
+}
+
+/// `Limits::max_concurrent_scans` bounds how many archives are scanned at once, so a burst
+/// of distinct large packages cannot hold every one of them in memory together.
+#[tokio::test(flavor = "multi_thread")]
+async fn scans_wait_for_a_free_slot() {
+    let mock = start_mock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut policy = Policy::default();
+    policy.upstream.pypi_simple = format!("{}/simple", mock.base);
+    policy.upstream.pypi_files = format!("{}/files", mock.base);
+    policy.upstream.pypi_json = format!("{}/pypi", mock.base);
+    policy.upstream.npm = format!("{}/npm", mock.base);
+    let (now, peak) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+    let inner = fake_scanner(Arc::new(AtomicUsize::new(0)));
+    let scanner: ScanFn = {
+        let (now, peak) = (now.clone(), peak.clone());
+        Arc::new(move |b: &[u8], f: &str, e: Ecosystem| {
+            let n = now.fetch_add(1, Ordering::SeqCst) + 1;
+            peak.fetch_max(n, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(150));
+            now.fetch_sub(1, Ordering::SeqCst);
+            inner(b, f, e)
+        })
+    };
+    let engine = Engine::new(EngineConfig {
+        data_dir: dir.path().to_path_buf(),
+        models: dev_models(),
+        policy,
+        policy_path: dir.path().join("policy.toml"),
+        scanner,
+        limits: Limits {
+            max_concurrent_scans: 1,
+            ..Limits::default()
+        },
+        metrics: Arc::new(Metrics::new()),
+    })
+    .unwrap();
+    let mut tasks = Vec::new();
+    for (name, version) in [
+        ("goodpkg", "1.0.0"),
+        ("goodpkg", "1.1.0"),
+        ("rolling", "1.0.0"),
+    ] {
+        let e = engine.clone();
+        tasks.push(tokio::spawn(async move {
+            e.check_resolving(Ecosystem::Pypi, name, Some(version), None, false)
+                .await
+                .map(|v| v.decision)
+        }));
+    }
+    for t in tasks {
+        t.await.unwrap().unwrap();
+    }
+    assert_eq!(peak.load(Ordering::SeqCst), 1);
+}
+
+/// Package names are checked at the API boundary: anything a registry could not hold is a
+/// 400, so a name cannot add a query, a fragment or `..` segments to the upstream URL the
+/// server requests with its registry credentials.
+#[tokio::test(flavor = "multi_thread")]
+async fn api_refuses_names_that_are_not_package_names() {
+    let h = Harness::start(|_| {}).await;
+    for (eco, name) in [
+        ("pypi", "six?x=1"),
+        ("pypi", "six#frag"),
+        ("pypi", "../../admin"),
+        ("pypi", "six/1.0.0"),
+        ("pypi", "-six"),
+        ("npm", "left-pad?write=true"),
+        ("npm", "@scope/pkg/../../-/user/x"),
+        ("npm", "../-/whoami"),
+        ("npm", "a%2fb"),
+    ] {
+        let (status, v) = h.check(eco, name, None).await;
+        assert_eq!(status, 400, "{eco} {name}: {v}");
+        assert_eq!(v["error"], "invalid package name", "{eco} {name}");
+        let r = h
+            .http
+            .get(format!("{}/api/diff", h.base))
+            .query(&[("ecosystem", eco), ("name", name)])
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 400, "diff {eco} {name}");
+    }
+    // Real names still pass.
+    assert_eq!(h.check("pypi", "goodpkg", Some("1.0.0")).await.0, 200);
+    assert_eq!(h.check("npm", "@scope/lib", None).await.0, 200);
+    assert_eq!(h.check("npm", "plainlib", None).await.0, 200);
+    h.stop().await;
+}
+
+/// Registry metadata that cannot be read leaves the release's age unknown, which the
+/// release-age rule treats like a release the metadata does not list: an upstream that
+/// times out or sends garbage for the packument must not let a brand-new version through.
+#[tokio::test(flavor = "multi_thread")]
+async fn unreadable_registry_metadata_does_not_skip_the_age_rule() {
+    let garbage = start_garbage_registry().await;
+    let h = Harness::start(|p| {
+        p.upstream.npm = format!("{garbage}/npm");
+        p.upstream.pypi_json = format!("{garbage}/pypi");
+        p.upstream.pypi_files = format!("{garbage}/files");
+    })
+    .await;
+    let r = h.get("/npm/broken-pkg/-/broken-pkg-1.0.0.tgz").await;
+    assert_eq!(r.status(), 403);
+    let body = r.text().await.unwrap();
+    assert!(body.contains("min_age_days"), "{body}");
+    assert!(body.contains("could not be read"), "{body}");
+    let r = h
+        .get("/pypi/files/ab/cd/broken_pkg-1.0.0-py3-none-any.whl")
+        .await;
+    assert_eq!(r.status(), 403);
+    let body = r.text().await.unwrap();
+    assert!(body.contains("min_age_days"), "{body}");
+    h.stop().await;
+}
+
+/// The npm proxy is read-only: registry endpoints pass through for reads, and the only
+/// writes forwarded are `npm audit`'s advisory queries. Nothing else may reach the
+/// upstream with the proxy's registry credentials (moving a dist-tag, creating a token).
+#[tokio::test(flavor = "multi_thread")]
+async fn npm_passthrough_forwards_only_reads_and_audit_queries() {
+    let h = Harness::start(|_| {}).await;
+    for (method, path) in [
+        ("PUT", "/npm/-/package/plainlib/dist-tags/latest"),
+        ("DELETE", "/npm/-/package/plainlib/dist-tags/beta"),
+        ("POST", "/npm/-/npm/v1/tokens"),
+        ("PUT", "/npm/-/user/org.couchdb.user:someone"),
+    ] {
+        let r = h
+            .http
+            .request(
+                reqwest::Method::from_bytes(method.as_bytes()).unwrap(),
+                format!("{}{path}", h.base),
+            )
+            .body("{}")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 405, "{method} {path}");
+        assert!(
+            r.text().await.unwrap().contains("read-only"),
+            "{method} {path}"
+        );
+    }
+    let r = h.get("/npm/-/v1/search?text=plain").await;
+    assert_eq!(r.status(), 200);
+    // Audit queries are forwarded: the answer is the mock registry's own (it has no audit
+    // endpoint), not the proxy's refusal.
+    let r = h
+        .http
+        .post(format!("{}/npm/-/npm/v1/security/advisories/bulk", h.base))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert!(!r.text().await.unwrap().contains("read-only"));
+    h.stop().await;
+}
+
+/// A check fetches an archive only from the hosts the proxy itself fetches from: a file URL
+/// in registry metadata that points elsewhere (an internal address, another host) is refused,
+/// not downloaded by the server.
+#[tokio::test(flavor = "multi_thread")]
+async fn checks_download_only_from_the_configured_upstream_hosts() {
+    let elsewhere = dead_server();
+    let h = Harness::start(|p| {
+        // The metadata still comes from the mock and lists files on the mock's host,
+        // which is no longer where archives are fetched from.
+        p.upstream.pypi_files = format!("{elsewhere}/files");
+        p.upstream.pypi_simple = format!("{elsewhere}/simple");
+    })
+    .await;
+    let (s, v) = h.check("pypi", "goodpkg", Some("1.0.0")).await;
+    assert_eq!(s, 502, "{v}");
+    assert!(
+        v["error"]
+            .as_str()
+            .unwrap()
+            .contains("not on a configured upstream"),
+        "{v}"
+    );
+    let file = format!("packages/ab/cd/{}", file_name("goodpkg", "1.0.0"));
+    assert_eq!(h.mock.hits(&file), 0);
+    h.stop().await;
+    // Files on the upstream host are fetched as before.
+    let h = Harness::start(|_| {}).await;
+    let (s, v) = h.check("pypi", "goodpkg", Some("1.0.0")).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(h.mock.hits(&file), 1);
+    h.stop().await;
+}
+
+/// A download that cannot be moved into the cache leaves no partial file behind.
+#[tokio::test(flavor = "multi_thread")]
+async fn failed_cache_writes_leave_no_partial_downloads() {
+    let h = Harness::start(|_| {}).await;
+    let cache = h._dir.path().join("cache");
+    // Every blob directory name is taken by a file, so moving the download fails.
+    for i in 0..256 {
+        std::fs::write(cache.join(format!("{i:02x}")), b"").unwrap();
+    }
+    let (s, v) = h.check("pypi", "goodpkg", Some("1.0.0")).await;
+    assert_eq!(s, 500, "{v}");
+    let left: Vec<_> = std::fs::read_dir(cache.join("tmp"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name())
+        .collect();
+    assert!(left.is_empty(), "{left:?}");
+    h.stop().await;
+}
+
+/// The same bytes under another file name are scanned again: the scanner reads a wheel and
+/// an sdist differently, so a summary of one must not answer for the other.
+#[tokio::test(flavor = "multi_thread")]
+async fn scan_summaries_are_kept_per_file_name() {
+    let h = Harness::start(|_| {}).await;
+    let old = "2020-01-01T00:00:00.000000Z".to_string();
+    for f in ["twin-1.0.zip", "twin-1.0-py3-none-any.whl"] {
+        h.mock.extra_pypi.lock().unwrap().push(ExtraFile::new(
+            "twin",
+            "1.0",
+            f,
+            b"benign twin",
+            old.clone(),
+        ));
+    }
+    for f in ["twin-1.0.zip", "twin-1.0-py3-none-any.whl"] {
+        let r = h.get(&format!("/pypi/files/packages/ab/cd/{f}")).await;
+        assert_eq!(r.status(), 200, "{f}");
+    }
+    assert_eq!(h.scans.load(Ordering::SeqCst), 2);
+    h.stop().await;
 }

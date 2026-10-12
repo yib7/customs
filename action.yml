@@ -111,8 +111,9 @@ runs:
         echo "exit-code=$code" >> "$GITHUB_OUTPUT"
         if [ -f "$INPUT_SARIF_FILE" ]; then
           echo "sarif=true" >> "$GITHUB_OUTPUT"
-          # A human-readable summary for the job log, from the same report.
-          jq -r '.runs[0].results[] | "\(.level | ascii_upcase)  \(.locations[0].physicalLocation.artifactLocation.uri):\(.locations[0].physicalLocation.region.startLine)  \(.message.text)"' \
+          # A human-readable summary for the job log, from the same report. Line breaks in
+          # registry-supplied text are flattened, so no line can start a workflow command.
+          jq -r 'def one: tostring | gsub("[\r\n]"; " "); .runs[0].results[] | "\(.level | ascii_upcase)  \(.locations[0].physicalLocation.artifactLocation.uri | one):\(.locations[0].physicalLocation.region.startLine)  \(.message.text | one)"' \
             "$INPUT_SARIF_FILE" || true
         fi
 

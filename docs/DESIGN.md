@@ -456,8 +456,8 @@ risk) and are judged on metadata and the policy rules: large legitimate wheels a
 default, and age and history rules still apply. What such an archive would run at
 install is still read, by streaming entry headers from disk: an npm install hook or a
 root `binding.gyp` (the implicit `node-gyp rebuild`), any sdist (its build runs code), a
-wheel's top-level `.pth` file. Each is reported as `unread_code`, so padding a package
-past the scan limit does not get its install-time code through unread, while a large
+wheel's top-level `.pth`, `sitecustomize.py` or `usercustomize.py` file. Each is
+reported as `unread_code`, so padding a package past the scan limit does not get its install-time code through unread, while a large
 wheel or a hook-free npm package is still served.
 
 A third rule, `startup_hook`, reads the install surface itself. Python runs the `import`
@@ -524,7 +524,9 @@ shows nowhere else: requests 2.34.2 formats `{urllib3.__version__}` into a warni
 that already imports `urllib3`. So a field payload in a file that already launches a
 process somewhere in plain view is not listed; the model then sees `proc_exec` anyway.
 Modules imported only in that reading (a byte-order mark before `from helper import run`)
-are analyzed too, and any of those indicators in them counts. So does a wheel's
+are analyzed too, and any of those indicators in them counts. At most 16 such files are
+read; past that, one line says how many more were not read, which counts as well. So
+does a wheel's
 `<name>.data/purelib/<pkg>/__init__.py` or `.../platlib/...`, which installs as a
 top-level package but is not on the install surface. Wheel `.data` copies of
 `sitecustomize.py` and `usercustomize.py`, like the root ones, are startup hooks
@@ -840,10 +842,11 @@ proxies `/api` with the browser's `Host`, so its dashboard is same-origin as wel
   127.0.0.1 is same-origin to the browser, so CORS alone would not stop it. Any
   state-changing API request carrying a browser `Origin` other than the dashboard's own
   is refused with 403 as well; non-browser clients send none.
-  When the server listens on a loopback address, the same `Host` check applies to every
-  request, reads and package downloads included, since only a rebound page would name a
-  loopback listener by another host name; without it such a page could read the event log
-  and learn what this machine installs. `PUT` takes the full policy, as `GET` returns it
+  When the server listens on a loopback address, or was started with
+  `--allow-anonymous-policy-changes` and no token (a container whose published port is
+  loopback), the same `Host` check applies to every request, reads and package downloads
+  included, since only a rebound page would name such a server by another host name;
+  without it such a page could read the event log and learn what this machine installs. `PUT` takes the full policy, as `GET` returns it
   (a body missing a key, such as `deny` or `established.top`, is refused with one error
   per missing key rather than resetting it), validates, persists to the policy file, and
   returns it; invalid input returns 400 `{ "error", "errors": [ { "field", "message" } ] }`. A 500 means
@@ -854,9 +857,15 @@ proxies `/api` with the browser's `Host`, so its dashboard is same-origin as wel
   characters) the request needs `Authorization: Bearer <token>`, compared in constant
   time; without it the answer is 401 with `WWW-Authenticate: Bearer` and `code`
   `admin_token_required` or `admin_token_invalid`, and the dashboard then asks for the
-  token and keeps it in session storage. Without a token, a server listening on loopback
-  accepts changes as before, while one listening on any other address refuses them with
-  403 `policy_changes_disabled`: anyone who can reach a team server could otherwise put it
+  token and keeps it in session storage. After 10 wrong tokens within a minute from one
+  address (an IPv6 /64 counts as one), that address gets 429 `too_many_attempts` with
+  `Retry-After` until the minute is up, even with the right token. Behind a reverse proxy
+  every client shares the proxy's address, so a flood of wrong tokens holds off policy
+  changes (not checks or installs) for everyone until the minute is up; `X-Forwarded-For`
+  is not trusted, since any client can set it. Without a token, a server listening on
+  loopback accepts changes as before, while one listening on any other address refuses
+  them with 403 `policy_changes_disabled`: anyone who can reach a team server could
+  otherwise put it
   in monitor mode or allow-list a package. `--allow-anonymous-policy-changes` lifts that
   for a container whose published port is itself bound to loopback. Reads and checks
   need no token.
@@ -894,7 +903,7 @@ proxies `/api` with the browser's `Host`, so its dashboard is same-origin as wel
   `PUT`s turned away for a missing or wrong token.
 - `GET /api/model`: the contents of `metrics.json` (under `metrics`, or merged when the file
   already has a `metrics` key) plus `model_version`, `feature_schema_version`, `untrained`,
-  `thresholds` (effective), `model_thresholds`, `manifest`, `models_dir`, and `components`
+  `thresholds` (effective), `model_thresholds`, `manifest`, and `components`
   (`loaded` flags and sizes). `metrics` is null when no metrics file is shipped.
 - `GET /metrics`: Prometheus text format (`customs_http_requests_total{route,status}`,
   `customs_verdicts_total{decision,ecosystem}`, `customs_events_total{kind}`,
@@ -1385,14 +1394,19 @@ interpreter), stopping the server (`pkill` or `killall` naming customs, `kill` o
 that mentions it, `systemctl`, `service`, `launchctl`, `docker` or `podman` stopping it),
 writes to `.claude/settings*.json`, and pointing installers away from the proxy: an
 assignment (before the command or behind `env`, `sudo` and similar wrappers), `export`,
-`unset` or `env -u` of a variable `customs env` sets or of `YARN_REGISTRY`,
-`PIP_FIND_LINKS` or `UV_FIND_LINKS`, any assignment of a variable that loads another
-configuration file (`NPM_CONFIG_USERCONFIG`, `NPM_CONFIG_GLOBALCONFIG`, `PIP_CONFIG_FILE`,
-`UV_CONFIG_FILE`, `YARN_RC_FILENAME`), `npm|pnpm|yarn|bun config set|delete registry`
-(also `npm set`, scoped `@scope:registry` keys, and options anywhere: `config set -g
-registry`), `pip config set|unset *index*|*find-links*` (also `python -m pip`), or a
-registry or index line written into `.npmrc`, `pip.conf`, `pip.ini`, `.yarnrc(.yml)`,
-`bunfig.toml` or `uv.toml`. Program names are read without their directory or a Windows
+`declare`, `typeset`, `readonly`, `local`, `setx`, PowerShell `$env:`, `Set-Item env:`
+and `[Environment]::SetEnvironmentVariable`, `unset` or `env -u` of a variable `customs
+env` sets or of `YARN_REGISTRY`, `PIP_FIND_LINKS` or `UV_FIND_LINKS`, any assignment of a
+variable that loads another configuration file (`NPM_CONFIG_USERCONFIG`,
+`NPM_CONFIG_GLOBALCONFIG`, `PIP_CONFIG_FILE`, `UV_CONFIG_FILE`, `YARN_RC_FILENAME`) or
+moves where installers look for one (`HOME`, `XDG_CONFIG_HOME`, `APPDATA`,
+`NPM_CONFIG_PREFIX`), `npm|pnpm|yarn|bun config set|delete registry` (also `npm set`,
+scoped `@scope:registry` keys, and options anywhere: `config set -g registry`), `pip
+config set|unset *index*|*find-links*` (also `python -m pip`), or a registry, index or
+find-links line written into `.npmrc`, the global `npmrc`, pnpm's `rc` and
+`pnpm-workspace.yaml`, `pip.conf`, `pip.ini`, `.yarnrc(.yml)`, `bunfig.toml` or
+`uv.toml`. A shell's own command line (`bash -c`, `sh -c`, `pwsh -Command`, `cmd /c`) is
+checked the same way. Program names are read without their directory or a Windows
 `.exe`/`.cmd`/`.bat`/`.ps1` suffix. A value is not flagged when every URL in it parses to
 the Customs server: its host, or a loopback name, on its port. The address appearing
 elsewhere (a query string, userinfo, a `# localhost:7878` comment) does not count. The

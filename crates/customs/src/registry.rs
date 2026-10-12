@@ -20,12 +20,36 @@ use tokio::io::AsyncWriteExt;
 
 use crate::config::Upstream;
 use crate::metrics::Metrics;
-use crate::util::{ecosystem_str, normalize_name};
+use crate::util::{ecosystem_str, normalize_name, redact_url};
 
 const META_TTL: Duration = Duration::from_secs(300);
 /// A page, metadata or passthrough request that takes longer than this in all fails, so an
 /// upstream that drips bytes (each read inside the 60 s read timeout) cannot hold it forever.
 pub const PAGE_TIMEOUT: Duration = Duration::from_secs(120);
+/// The most an index page, metadata document or passed-through answer may hold in memory.
+/// The largest npm packuments run to tens of MB.
+pub const MAX_PAGE_BYTES: usize = 256 << 20;
+
+/// Read an upstream answer's body, refusing one longer than `cap` bytes.
+pub async fn read_capped(mut resp: reqwest::Response, cap: usize) -> Result<Bytes, FetchError> {
+    let too_large = || {
+        FetchError::Other(format!(
+            "upstream answer is larger than the {} MB limit",
+            cap >> 20
+        ))
+    };
+    if resp.content_length().is_some_and(|n| n > cap as u64) {
+        return Err(too_large());
+    }
+    let mut buf = Vec::new();
+    while let Some(chunk) = resp.chunk().await? {
+        if buf.len() + chunk.len() > cap {
+            return Err(too_large());
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(buf.into())
+}
 /// A cached document that was itself refetched for a missing version is served for this
 /// long before another miss refetches it, so requests for a version that does not exist
 /// cannot turn every lookup into an upstream request.
@@ -310,7 +334,7 @@ impl Registry {
                 .get(reqwest::header::CONTENT_TYPE)
                 .and_then(|v| v.to_str().ok())
                 .map(str::to_string);
-            let body = resp.bytes().await?;
+            let body = read_capped(resp, MAX_PAGE_BYTES).await?;
             Ok(Page {
                 status,
                 content_type,
@@ -322,7 +346,8 @@ impl Registry {
             .await
             .unwrap_or_else(|_| {
                 Err(FetchError::Transport(format!(
-                    "{url} took longer than {} s",
+                    "{} took longer than {} s",
+                    redact_url(url),
                     PAGE_TIMEOUT.as_secs()
                 )))
             });
@@ -333,8 +358,9 @@ impl Registry {
     async fn get_json(&self, url: &str, kind: &str) -> Result<Value, FetchError> {
         let page = self.get(url, Some("application/json"), kind).await?;
         match page.status {
-            200 => serde_json::from_slice(&page.body)
-                .map_err(|e| FetchError::Other(format!("invalid JSON from {url}: {e}"))),
+            200 => serde_json::from_slice(&page.body).map_err(|e| {
+                FetchError::Other(format!("invalid JSON from {}: {e}", redact_url(url)))
+            }),
             404 => Err(FetchError::NotFound),
             s => Err(FetchError::Status(s)),
         }
@@ -431,11 +457,11 @@ impl Registry {
         {
             Ok(p) if p.status == 200 => p,
             Ok(p) => {
-                tracing::debug!(url, status = p.status, "no JSON simple index");
+                tracing::debug!(url = %redact_url(&url), status = p.status, "no JSON simple index");
                 return;
             }
             Err(e) => {
-                tracing::debug!(url, error = %e, "JSON simple index lookup failed");
+                tracing::debug!(url = %redact_url(&url), error = %e, "JSON simple index lookup failed");
                 return;
             }
         };
@@ -530,7 +556,8 @@ impl Registry {
             .await
             .unwrap_or_else(|_| {
                 Err(FetchError::Transport(format!(
-                    "downloading {url} took longer than {} s",
+                    "downloading {} took longer than {} s",
+                    redact_url(url),
                     timeout.as_secs()
                 )))
             });
@@ -759,6 +786,32 @@ pub fn parse_npm_packument(v: &Value) -> Option<PackageMeta> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn answer(body: &'static [u8], length: bool) -> reqwest::Response {
+        let mut r = axum::http::Response::new(body);
+        if length {
+            r.headers_mut().insert(
+                reqwest::header::CONTENT_LENGTH,
+                body.len().to_string().parse().unwrap(),
+            );
+        }
+        reqwest::Response::from(r)
+    }
+
+    /// Upstream answers are read up to a cap, whether or not they declare their length.
+    #[tokio::test]
+    async fn upstream_answers_are_read_up_to_a_cap() {
+        for length in [true, false] {
+            let got = read_capped(answer(b"0123456789", length), 10)
+                .await
+                .unwrap();
+            assert_eq!(&got[..], b"0123456789");
+            let err = read_capped(answer(b"0123456789!", length), 10)
+                .await
+                .unwrap_err();
+            assert!(err.to_string().contains("larger than"), "{err}");
+        }
+    }
 
     #[test]
     fn the_metadata_cache_stays_bounded() {

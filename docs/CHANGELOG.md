@@ -69,6 +69,27 @@ First public release. Not tagged yet.
   Activity search and paging in the URL, handles bad verdict ids, accepts version ranges
   on the Check page, says what monitor mode and checks did with a blocked package, and
   no longer squeezes Policy rule labels to one word per line.
+- Hardening: upstream registry credentials no longer appear in the server log or in the
+  errors pip and npm show; every response carries a Content-Security-Policy,
+  `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff` and `Referrer-Policy:
+  no-referrer`; ten wrong admin tokens in a minute lock that address out of policy
+  changes for the rest of the minute; scans run at most one per CPU at a time, which
+  bounds memory under a burst of large packages; `GET /api/model` no longer names the
+  server's models directory.
+- Hardening: registry metadata that does not list a file, or cannot be read, no longer
+  skips the age rule (it counts as an unknown publish time); `/api/check` and
+  `/api/diff` refuse names that are not package names and fetch archives only from the
+  configured upstream hosts; the npm passthrough forwards only reads and audit queries,
+  never writes with the proxy's credentials; index pages, metadata and passthrough
+  answers are capped at 256 MB; scan summaries are cached per file name; the host check
+  also applies with `--allow-anonymous-policy-changes`; the scanner reads long lines of
+  unclosed regex literals and many U+2028 separators in linear time, and says so when a
+  file has more hidden imports than it follows; failed cache writes leave no partial
+  files; the GitHub Action's log summary cannot start a workflow command.
+- Hooks also flag `typeset`, `readonly`, `local`, `setx` and PowerShell variable forms,
+  `HOME`, `XDG_CONFIG_HOME`, `APPDATA` and `NPM_CONFIG_PREFIX`, find-links lines, the
+  global `npmrc` and pnpm's config files, and the same changes inside `bash -c`,
+  `pwsh -Command` and `cmd /c`.
 - Clearer startup errors: an empty admin token, a missing dashboard directory, an
   unwritable data directory, an unreadable `CUSTOMS_CA_FILE`, a malformed `--bind`, a
   models directory without a manifest, and no models found (the warning lists where it

@@ -21,6 +21,10 @@ services:
       # the port above is published on 127.0.0.1 only. Set CUSTOMS_ADMIN_TOKEN instead
       # when publishing it more widely.
       CUSTOMS_ALLOW_ANONYMOUS_POLICY_CHANGES: "true"
+      # With that, requests must name the server as localhost or an IP address (so a page
+      # whose host name was rebound to 127.0.0.1 cannot read the event log); Prometheus
+      # scrapes it as `customs`.
+      CUSTOMS_ALLOWED_HOSTS: "customs"
     restart: unless-stopped
     read_only: true
     tmpfs:

@@ -164,10 +164,11 @@ pub fn evaluate(policy: &Policy, ctx: &PolicyContext<'_>) -> PolicyOutcome {
                 )
             })
         }
-        // A version or file the metadata does not list may have been published a moment
-        // ago, so it is not given the benefit of the doubt.
+        // A version or file the metadata does not list (or metadata that could not be read)
+        // may have been published a moment ago, so it is not given the benefit of the doubt.
         None if ctx.age_unknown => Some((
-            "publish time unknown: the registry metadata does not list this file".to_string(),
+            "publish time unknown: the registry metadata does not list this file or could not be read"
+                .to_string(),
             "its publish time is unknown".to_string(),
         )),
         None => None,
@@ -720,7 +721,7 @@ mod tests {
         );
         assert_eq!(
             o.hits[0].detail,
-            "publish time unknown: the registry metadata does not list this file (policy: 3 days)"
+            "publish time unknown: the registry metadata does not list this file or could not be read (policy: 3 days)"
         );
         assert!(o.hits[1].detail.contains("its publish time is unknown"));
         assert_eq!(o.decide(Decision::Allow), Decision::Block);

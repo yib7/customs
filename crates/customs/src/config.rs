@@ -441,7 +441,7 @@ impl PackageRule {
 }
 
 /// A PyPI project name (PEP 508), or an npm name with an optional `@scope/`.
-fn valid_package_name(eco: Ecosystem, name: &str) -> bool {
+pub fn valid_package_name(eco: Ecosystem, name: &str) -> bool {
     let part = |s: &str, extra: &str| {
         !s.is_empty()
             && s.chars()
