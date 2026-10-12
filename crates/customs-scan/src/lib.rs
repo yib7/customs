@@ -159,7 +159,7 @@ pub struct ScanReport {
     pub hidden_code: Vec<String>,
 }
 
-/// Indicators that make a `.pth` file a startup hook worth blocking. Across the corpus none
+/// Indicators that make a `.pth` file a startup hook to block. Across the corpus none
 /// of these appears in a benign `.pth` file; `dyn_code`, `env_access`, `url` and `file_write`
 /// do (namespace-package shims, coverage, a fork that copies itself over urllib3).
 const STARTUP_HOOK_INDICATORS: [usize; 9] = [

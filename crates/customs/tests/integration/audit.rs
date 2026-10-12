@@ -325,5 +325,5 @@ fn cli_audit_lists_what_it_can_read_past_a_broken_config() {
     assert!(stdout.contains("1 unreadable file"), "{stdout}");
     assert!(stdout.contains("Could not read"), "{stdout}");
     assert!(stdout.contains("requirements.txt:1  flask>=2"), "{stdout}");
-    assert!(stdout.contains("launcher not recognised"), "{stdout}");
+    assert!(stdout.contains("launcher not recognized"), "{stdout}");
 }

@@ -10,11 +10,11 @@ Generated 2026-10-08T10:30:34+00:00 by `python -m customs_ml.report` from the ar
 | val | 2,048 | 2,172 |
 | test | 4,100 | 4,217 |
 
-* **Temporal split.** Test malware was discovered on or after 2026-02-13; validation malware between 2025-12-10 and that date; training malware before. The model never saw a sample from the test period.
-* **Second source.** Training malware also includes the dev half of MalRegistry (collected in 2022 and 2023, before the test period); its held-out half is a separate test, below. The training counts include augmented copies. **Caveat:** the dev half was de-duplicated against training malware only, not against validation or test malware, so any dev-half archive that near-duplicates test malware was trained on. Every in-domain test number from models trained with the dev half (the shipped models: headline, components, GuardDog, slices including `novel_campaigns`, misses, the *after* columns, end to end, retrain variance, calibration; and the *Plus MalRegistry dev half* in-domain columns) may be inflated by an amount not yet measured; measuring it needs the dataset and a retrain. The MalRegistry held-out numbers are not affected.
-* **Benign packages** are split at random by near-duplicate cluster in the same proportions, sampled across three popularity tiers (top, mid, long tail) of PyPI and npm.
-* **Near-duplicates.** MinHash LSH clusters (Jaccard about 0.7 on install-time token 5-grams) group malware campaigns. Clusters are the unit for benign splitting, sample weighting (1/sqrt(cluster size)) and for every confidence interval (cluster bootstrap, 1,000 resamples).
-* **Canonicalization.** Both classes are repacked into identical deterministic tarballs before scanning, so archive format cannot leak the label.
+* The split is temporal. Test malware was discovered on or after 2026-02-13; validation malware between 2025-12-10 and that date; training malware before. The model never saw a sample from the test period.
+* Training malware also includes a second source, the dev half of MalRegistry (collected in 2022 and 2023, before the test period); its held-out half is a separate test, below. The training counts include augmented copies. Caveat: the dev half was de-duplicated against training malware only, not against validation or test malware, so any dev-half archive that near-duplicates test malware was trained on. Every in-domain test number from models trained with the dev half (the shipped models: headline, components, GuardDog, slices including `novel_campaigns`, misses, the *after* columns, end to end, retrain variance, calibration; and the *Plus MalRegistry dev half* in-domain columns) may be inflated by an amount not yet measured; measuring it needs the dataset and a retrain. The MalRegistry held-out numbers are not affected.
+* Benign packages are split at random by near-duplicate cluster in the same proportions, sampled across three popularity tiers (top, mid, long tail) of PyPI and npm.
+* MinHash LSH clusters (Jaccard about 0.7 on install-time token 5-grams) group malware campaigns. Clusters are the unit for benign splitting, sample weighting (1/sqrt(cluster size)) and for every confidence interval (cluster bootstrap, 1,000 resamples).
+* Both classes are repacked into identical deterministic tarballs before scanning, so archive format cannot leak the label.
 
 ## Headline (ensemble)
 
@@ -22,9 +22,9 @@ Generated 2026-10-08T10:30:34+00:00 by `python -m customs_ml.report` from the ar
 |---|---|
 | ROC AUC | 0.974 (0.969 to 0.979) |
 | PR AUC | 0.979 (0.973 to 0.983) |
-| Detection rate at the **block** threshold (target FPR 0.1%) | 63.4% (59.2 to 67.4) |
+| Detection rate at the block threshold (target FPR 0.1%) | 63.4% (59.2 to 67.4) |
 | Realized test FPR at block | 0.05% (0.00 to 0.12) |
-| Detection rate at the **warn** threshold (target FPR 1%) | 78.6% (75.4 to 81.9) |
+| Detection rate at the warn threshold (target FPR 1%) | 78.6% (75.4 to 81.9) |
 | Realized test FPR at warn | 0.64% (0.40 to 0.91) |
 | Detection at exactly 0.1% FPR on the test ROC (threshold-free) | 70.5% (55.2 to 75.3) |
 | Detection at exactly 1% FPR on the test ROC (threshold-free) | 80.0% (76.6 to 83.2) |
@@ -48,7 +48,7 @@ Stacking weights on component logits: code GBDT 0.84, code CNN 0.45, name -0.04 
 
 ## Against GuardDog
 
-[GuardDog](https://github.com/DataDog/guarddog) (Datadog's open-source scanner, v3.2) on the same canonical test archives, a fixed random sample of 1,500 malicious and 1,500 benign. Note the bias: most samples in Datadog's dataset were originally found with GuardDog's rules, so this comparison favours GuardDog.
+[GuardDog](https://github.com/DataDog/guarddog) (Datadog's open-source scanner, v3.2) on the same canonical test archives, a fixed random sample of 1,500 malicious and 1,500 benign. Note the bias: most samples in Datadog's dataset were originally found with GuardDog's rules, so this comparison favors GuardDog.
 
 | | GuardDog | Customs |
 |---|---:|---:|
@@ -194,7 +194,7 @@ The time-split test above uses one collector's malware. MalRegistry (the PyPI ma
 
 Novel malware from another collector is much harder than the time-split test set. Thresholds move between retrains, so the comparisons below are made at matched false positive rates on the benign test split.
 
-**Dev-half error analysis.** Most dev misses carried clear behavior indicators, but none on the install surface: the payload sat in a module that `setup.py` imports, or after a long run of blanks on one line, or in decoded data executed on the line that decodes it. The scanner follows the package's own imports from setup-time files and has features for the other two. (Following imports from `__init__.py` as well lowers detection: it pulls each benign library onto the install surface.) The *before* columns are the same evaluation with the scanner as it was before these changes, kept with `python -m customs_ml.external evaluate --save-as baseline`.
+Error analysis on the dev half: most dev misses carried clear behavior indicators, but none on the install surface: the payload sat in a module that `setup.py` imports, or after a long run of blanks on one line, or in decoded data executed on the line that decodes it. The scanner follows the package's own imports from setup-time files and has features for the other two. (Following imports from `__init__.py` as well lowers detection: it pulls each benign library onto the install surface.) The *before* columns are the same evaluation with the scanner as it was before these changes, kept with `python -m customs_ml.external evaluate --save-as baseline`.
 
 | FPR | Dev, before | Dev, after | Held-out, before | Held-out, after |
 |---:|---:|---:|---:|---:|
@@ -204,9 +204,9 @@ Novel malware from another collector is much harder than the time-split test set
 
 The changes helped the half they were designed on and barely moved the half that was held out. Error analysis on a handful of campaigns fits those campaigns; it is the held-out column that says how a fix generalizes, and these did not much.
 
-**Name leakage check.** The name model is trained on OpenSSF malicious package names, and most MalRegistry names are among them (it is the same malware, reported). The in-domain test holds its names out of name-model training; here the binary was also run without the name model, using the ensemble's code-only fallback. Held-out recall at 0.1% / 0.5% / 1% FPR: 30.8% / 37.2% / 40.2% with the name model, 31.1% / 37.4% / 40.8% without. The name model carries almost no weight once code is scanned, so the leak does not inflate these numbers.
+Name leakage was checked as well. The name model is trained on OpenSSF malicious package names, and most MalRegistry names are among them (it is the same malware, reported). The in-domain test holds its names out of name-model training; here the binary was also run without the name model, using the ensemble's code-only fallback. Held-out recall at 0.1% / 0.5% / 1% FPR: 30.8% / 37.2% / 40.2% with the name model, 31.1% / 37.4% / 40.8% without. The name model carries almost no weight once code is scanned, so the leak does not inflate these numbers.
 
-**Training on the second source.** The dev half (8,658 archives in 853 clusters, novel or not) was added to the training split and every model retrained; the held-out half (2,174 novel archives, 660 clusters, none sharing a cluster with the added data) was scored code-only.
+To test training on the second source, the dev half (8,658 archives in 853 clusters, novel or not) was added to the training split and every model retrained; the held-out half (2,174 novel archives, 660 clusters, none sharing a cluster with the added data) was scored code-only.
 
 | | Held-out recall at 0.1% FPR | at 0.5% | at 1% | In-domain ROC AUC | In-domain block recall |
 |---|---:|---:|---:|---:|---:|
@@ -217,7 +217,7 @@ Held-out recall at 0.5% FPR by share of dev clusters added: 25% (213 clusters): 
 
 The shipped models include the dev half (pipeline stage `malregistry`). Rerun through the binary, they score the held-out half at 42.5% / 65.4% / 92.0% (code only, 0.1% / 0.5% / 1% FPR).
 
-**Read the campaign-weighted numbers.** Weighting each held-out campaign equally, the shipped models catch 67.7% / 79.9% / 83.1% at the same rates. One campaign holds 901 near-identical archives (41.4% of the held-out half) with code-only risk near 0.91, so per-archive recall jumps by that share whenever a retrain moves that score across a threshold; per-archive numbers between runs are only comparable when that campaign stays on the same side.
+Read the campaign-weighted numbers too. Weighting each held-out campaign equally, the shipped models catch 67.7% / 79.9% / 83.1% at the same rates. One campaign holds 901 near-identical archives (41.4% of the held-out half) with code-only risk near 0.91, so per-archive recall jumps by that share whenever a retrain moves that score across a threshold; per-archive numbers between runs are only comparable when that campaign stays on the same side.
 
 ## Experiment: release diff model
 
@@ -236,7 +236,7 @@ A hijacked release of a popular library is mostly the previous release plus a pa
 
 At 0.5% FPR the two models disagree often: 54 releases are caught by both, 60 only by the base model and 11 only by the diff model (among them litellm 1.82.7 and 1.82.8, which the base model scores far below its warn threshold). The diff model misses releases whose previous version was already compromised, since the payload is then not new.
 
-Combined at a matched false positive rate (each model's score turned into a tail probability on benign validation pairs, then the maximum), the pair gains -2.2 points at 0.1%, -5.1 points at 0.5%, -11.8 points at 1.0% FPR, on 178 releases. Taking the maximum of two scores spends the false positive budget on both, which costs recall at the block operating point (47.2% to 44.9% at 0.1%). The diff model is therefore not part of the shipped decision: the combination loses recall at every rate measured.
+Combined at a matched false positive rate (each model's score turned into a tail probability on benign validation pairs, then the maximum), the pair gains -2.2 points at 0.1%, -5.1 points at 0.5%, -11.8 points at 1.0% FPR, on 178 releases. Taking the maximum of two scores spends the false positive budget on both, which costs recall at the block operating point (47.2% to 44.9% at 0.1%). The diff model therefore does not ship: the combination loses recall at every rate measured.
 
 ## Release history rules on compromised npm releases
 
@@ -323,7 +323,7 @@ The model's two warns:
 * requests 2.34.2 (sdist, risk 0.89): the test suite has URLs on private IP addresses (`all_ip_url`), and `setup.py` runs `os.system` for its `publish` command, which puts process and network indicators on the install surface. requests 2.32.3 scores 0.99, over the block threshold.
 * postcss 8.5.29 (risk 0.98): a Chinese-language message on the install surface sets `inst_nonascii_ratio`, next to environment access.
 
-Both are known weak spots of the classifier rather than of these packages, and a fix belongs in training data (benign packages with test fixtures on private addresses and non-English messages), not in a per-package exception. A warn serves the package and records the verdict; only a block stops an install. Since this run, the default policy's established-release prior (DESIGN.md section 8) allows both `requests` releases: they are top-5000 PyPI releases older than 30 days. `postcss` 8.5.29, published three days before the run, keeps its warn until it is 30 days old. The model scores above are unchanged.
+Both are known weak spots of the classifier rather than of these packages, and a fix belongs in training data (benign packages with test fixtures on private addresses and non-English messages), not in a per-package exception. A warn serves the package and records the verdict; only a block stops an install. Since this run, the default policy's established-package prior (DESIGN.md section 8) allows both `requests` releases: they are top-5000 PyPI releases older than 30 days. `postcss` 8.5.29, published three days before the run, keeps its warn until it is 30 days old. The model scores above are unchanged.
 
 The `min_age_days` blocks are the cooldown the default policy sets on any release under three days old, and clear on their own. The history rules warn on releases inside their 90-day window after a quiet year (`dormant_revival`), a new publishing account (`publisher_changed`), or a release without the attestation its predecessor had (`provenance_dropped`); none of the 20 is malicious. The same run blocked fast-levenshtein 3.0.0, a 2020 release that added a dependency another author had published two hours earlier. `young_dependency_added` now applies within the history window like the other circumstantial rules, and that release is allowed.
 
@@ -343,7 +343,7 @@ The tree model and the CNN retrained with 5 seeds (7, 11, 23, 42, 101) on identi
 | PyPI malware vs all benign: ROC AUC | 0.941 | 0.007 | 0.935 | 0.952 |
 | PyPI malware: recall at block | 43.0% | 4.8 pts | 39.2% | 51.2% |
 
-ROC AUC and recall at warn barely move between seeds. Everything at 0.1% FPR is a tail statistic: the block threshold rests on the top 2 or 3 of 2,172 benign validation packages, and the threshold-free row on about 4 of 4,217 benign test packages, so both move several points between retrains: recall at block spans 8.4 points across these seeds, and a difference at the block rate between two runs needs to exceed that before it says anything about the model. Training is reproducible: the same seed in a fresh process (different string hash seed) produces bit-identical tree and CNN outputs (the CNN vocabulary breaks document-frequency ties by token, not by set order).
+ROC AUC and recall at warn barely move between seeds. Everything at 0.1% FPR is a tail statistic: the block threshold rests on the top 2 or 3 of 2,172 benign validation packages, and the threshold-free row on about 4 of 4,217 benign test packages, so both move several points between retrains. Recall at block spans 8.4 points across these seeds, and a difference at the block rate between two runs needs to exceed that before it says anything about the model. Training is reproducible: the same seed in a fresh process (different string hash seed) produces bit-identical tree and CNN outputs (the CNN vocabulary breaks document-frequency ties by token, not by set order).
 
 Averaging the tree and CNN logits of several seeds before stacking (seed bagging, `python -m customs_ml.variance bag`), over every subset of the seeds of each size:
 
@@ -388,8 +388,8 @@ Risk is calibrated (Platt scaling on out-of-fold validation scores) at the class
 
 ## Limitations
 
-* **Label source bias.** Malware comes from Datadog's dataset, mostly found by GuardDog's heuristics, so the positives over-represent what heuristics already catch. Novel techniques that neither GuardDog nor these features describe are under-represented in both training and test.
-* **Benign label noise.** Long-tail benign packages could include undiscovered malware. They were filtered against every OSSF malicious-package report and required to be at least 90 days old, which removes most of it but not all.
-* **Static analysis only.** Code that fetches its payload at runtime from a clean host, or hides logic in native binaries, gives little static signal. The policy rules (minimum age, nonexistent names, install scripts in new packages) are the backstop.
-* **Adaptive attackers.** The robustness table covers a handful of cheap evasions. An attacker who can query the model can do better; published work on prompt and malware detectors shows adaptive attacks break most static classifiers. Customs is one layer, not a guarantee.
+* Label source bias: malware comes from Datadog's dataset, mostly found by GuardDog's heuristics, so the positives over-represent what heuristics already catch. Novel techniques that neither GuardDog nor these features describe are under-represented in both training and test.
+* Benign label noise: long-tail benign packages could include undiscovered malware. They were filtered against every OSSF malicious-package report and required to be at least 90 days old, which removes most of it but not all.
+* Static analysis only: code that fetches its payload at runtime from a clean host, or hides logic in native binaries, gives little static signal. The policy rules (minimum age, nonexistent names, install scripts in new packages) are the backstop.
+* Adaptive attackers: the robustness table covers a handful of cheap evasions. An attacker who can query the model can search for an evasion that works, and no test here measures that. Customs is one layer, not a guarantee.
 

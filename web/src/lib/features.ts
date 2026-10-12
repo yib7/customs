@@ -90,7 +90,7 @@ const POLICY_RULES: Record<string, string> = {
   scan_error: 'Archive could not be scanned',
   deny: 'Matches the deny list',
   allow: 'Matches the allow list',
-  established: 'Established release of a popular package: the model verdict is set aside',
+  established: 'Established release of a popular package: the model decision is set aside',
   model: 'Model risk above threshold',
   warn_threshold: 'Model risk above the warn threshold',
   block_threshold: 'Model risk above the block threshold',

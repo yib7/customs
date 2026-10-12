@@ -524,7 +524,7 @@ mod tests {
 
     #[test]
     fn established_does_not_cover_young_releases() {
-        // Younger than established.min_age_days: the model decides as before.
+        // Younger than established.min_age_days: the model's decision stands.
         let o = evaluate(&Policy::default(), &popular(10));
         assert!(!o.established);
         assert!(established_hits(&o).is_empty());

@@ -174,7 +174,7 @@ const MAX_AGENT_BYPASS: usize = 20;
 /// `--approval-mode yolo`), Amazon Q (`--trust-all-tools`) and GitHub Copilot CLI
 /// (`--allow-all-tools`). The s1ngularity compromise of Nx (August 2025) ran the first,
 /// the Gemini and the Q forms from a postinstall script with a prompt to search the disk
-/// for secrets, turning the developer's own agent into the payload.
+/// for secrets, so the developer's own agent became the payload.
 static AGENT_BYPASS: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r"--(?:dangerously-skip-permissions|dangerously-bypass-approvals-and-sandbox|trust-all-tools|allow-all-tools|yolo|approval-mode[= ]+yolo|permission-mode[= ]+bypassPermissions)",
@@ -241,7 +241,7 @@ fn not_dev_null(hay: &str, start: usize, _end: usize) -> bool {
 
 /// Compile a rule with ASCII word boundaries. A Unicode `\b` makes the regex crate's
 /// lazy DFA give up at the first non-ASCII byte and fall back to an engine about 100x
-/// slower, so one accented character in a megabyte string literal cost a second per MB.
+/// slower, so one accented character in a megabyte string literal costs a second per MB.
 fn compile(pat: &str) -> Regex {
     Regex::new(&pat.replace(r"\b", r"(?-u:\b)")).expect("valid indicator regex")
 }
@@ -346,7 +346,7 @@ static STRING_RULES: LazyLock<RuleSet> = LazyLock::new(|| {
         ),
         // Code inside a string that runs decoded data, as handed to `python -c` or
         // `node -e`: both indicators on one line count as exec_decoded. ASCII classes only:
-        // a Unicode `\w` under a bounded repeat made the whole rule set scan 4x slower.
+        // a Unicode `\w` under a bounded repeat makes the whole rule set scan 4x slower.
         rule(DYN_CODE, EXEC_DECODED_IN_STRING),
         rule(DECODE_OBF, EXEC_DECODED_IN_STRING),
     ])

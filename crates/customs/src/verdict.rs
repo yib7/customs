@@ -176,7 +176,7 @@ mod tests {
             v.headline(),
             "deny: deny fired; model risk 0.97; Downloads and executes a payload at install time"
         );
-        // The established prior set the model aside, so it is not a cause.
+        // The established-package prior set the model aside, so it is not a cause.
         let v = verdict(vec![
             hit("established", Decision::Allow),
             hit("deny", Decision::Block),

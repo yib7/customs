@@ -236,7 +236,7 @@ pub fn parse(text: &str, path: &Path, out: &mut Parsed) -> Result<(), String> {
                 s.line,
                 &format!("{}: {cmd}", s.name),
                 SkipKind::Other,
-                "launcher not recognised; Customs could not tell what it installs",
+                "launcher not recognized; Customs could not tell what it installs",
             );
         }
     }
@@ -403,7 +403,7 @@ mod tests {
     }
 
     #[test]
-    fn unrecognised_launcher_gets_a_row() {
+    fn unrecognized_launcher_gets_a_row() {
         let cfg = r#"{
   "mcpServers": {
     "weird": { "command": "weird-launcher", "args": ["-y", "pkg"] },
@@ -424,15 +424,15 @@ mod tests {
             .collect();
         // Programs already on disk install nothing at start; a launcher Customs cannot read
         // could install anything, so it is listed rather than silently left out.
-        // `cmd /c npx -y pkg` and `npx.cmd` land here too until the hook's command parser
-        // unwraps them, and then become package targets.
+        // `cmd /c npx -y pkg` and `npx.cmd` never get a row: the hook's command parser
+        // unwraps them into package targets first.
         assert_eq!(rows.len(), 3, "{rows:?}");
         assert_eq!((rows[0].0, rows[0].2), (3, SkipKind::Other));
-        assert!(rows[0].1.contains("launcher not recognised"), "{rows:?}");
+        assert!(rows[0].1.contains("launcher not recognized"), "{rows:?}");
         assert_eq!(p.skipped[0].spec, "weird: weird-launcher -y pkg");
         assert!(p.skipped[0].fetched());
         assert_eq!(rows[1].0, 4);
-        assert!(rows[1].1.contains("launcher not recognised"), "{rows:?}");
+        assert!(rows[1].1.contains("launcher not recognized"), "{rows:?}");
         assert_eq!(rows[2].0, 10);
         assert!(rows[2].1.contains("container image"), "{rows:?}");
         assert!(p.deps.is_empty(), "{:?}", p.deps);

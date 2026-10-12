@@ -79,7 +79,7 @@ def render(scheme: str = SCHEME) -> str:
     ens = _load(f"ensemble_{scheme}.json")
     ext = _load("external_malregistry.json")
     ext_before = _load("external_malregistry_before_training.json")
-    # Older runs did not record it; then a before-training snapshot means it was trained on.
+    # Without the field, a before-training snapshot means the dev half was trained on.
     dev_in_training = bool(ext) and ext.get("dev_half_in_training", ext_before is not None)
     h = ev["headline"]
     c = ev["counts"]
@@ -190,7 +190,7 @@ def render(scheme: str = SCHEME) -> str:
             "v3.2) on the same canonical test archives, a fixed random sample of "
             f"{gd['n_malicious']:,} malicious and {gd['n_benign']:,} benign. Note the bias: "
             "most samples in Datadog's dataset were originally found with GuardDog's rules, "
-            "so this comparison favours GuardDog.\n"
+            "so this comparison favors GuardDog.\n"
         )
         add("| | GuardDog | Customs |\n|---|---:|---:|")
         add(
@@ -686,7 +686,7 @@ def render(scheme: str = SCHEME) -> str:
                 if gains[lo] < 0
                 else ""
             )
-            + ". The diff model is therefore not part of the shipped decision: "
+            + ". The diff model therefore does not ship: "
             + (
                 f"the only gain is {max(gains.values()) * 100:.1f} points at "
                 f"{pct(float(max(gains, key=gains.get)))} FPR on {rt['n_pos']} releases, "
@@ -929,7 +929,7 @@ def render(scheme: str = SCHEME) -> str:
             f"FPR is a tail statistic: the block threshold rests on the top {top} of "
             f"{n_val:,} benign validation packages, and the threshold-free row on about "
             f"{round(0.001 * n_test)} of {n_test:,} benign test packages, so both move "
-            "several points between retrains: recall at "
+            "several points between retrains. Recall at "
             f"block spans {100 * (sp['recall_block']['max'] - sp['recall_block']['min']):.1f} "
             "points across these seeds, and a difference at the block rate between two runs "
             "needs to exceed that before it says anything about the model. Training is "

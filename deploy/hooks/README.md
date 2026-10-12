@@ -21,7 +21,7 @@ The hook always exits 0 and speaks JSON on stdout, for example:
 ## Install
 
 1. Put `customs` on your `PATH` (`cargo install --path crates/customs`).
-2. Optionally start the proxy so verdicts are shared and shown in the dashboard:
+2. Optionally start the server so verdicts are shared and shown in the dashboard:
    `customs serve` (default `http://127.0.0.1:7878`). Without a running server the hook
    checks in-process, using `~/.cache/customs` for its cache.
 3. Merge [`claude-code-settings.json`](claude-code-settings.json) into
@@ -132,7 +132,7 @@ with the reason, so you confirm them:
 The matcher `Bash|PowerShell|Edit|Write|MultiEdit|NotebookEdit` in the settings above is what lets
 the hook see file edits. A command that builds itself at run time (`echo ... | base64 -d
 | sh`) is beyond any static check, so treat this as a tripwire for the obvious routes, not
-a sandbox; the proxy's own `PUT /api/policy` also refuses requests a browser page could
+a sandbox; the server's own `PUT /api/policy` also refuses requests a browser page could
 send. For a stronger guarantee, start the server with `CUSTOMS_ADMIN_TOKEN` and keep the
 token out of the agent's environment: policy changes then need it, however the request is
 built.

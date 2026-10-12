@@ -495,7 +495,7 @@ function PolicyForm({
               checked={draft.establishedEnabled}
               onChange={(v) => set('establishedEnabled', v)}
               label="Trust established releases of popular packages"
-              description="Hijacked releases are usually found and pulled within days, so the age below is the defence: a new release of a popular package still gets the model's verdict. Off: the model decides for every package."
+              description="Hijacked releases are usually found and pulled within days, so the age below is the defense: a new release of a popular package still gets the model's verdict. Off: the model decides for every package."
             />
           </div>
           <div className="mt-3 grid max-w-xl grid-cols-1 gap-4 border-t border-line pt-3 sm:grid-cols-2">

@@ -1,7 +1,7 @@
 //! Install-time code that the interpreter runs but the feature lexers do not see. The
 //! scanner reports it in `hidden_code` (or `unread_code` when it cannot tell what runs),
-//! while the model inputs (`features`, `tokens`) stay exactly what they were. The payloads
-//! are inert strings: they are only ever lexed.
+//! while the model inputs (`features`, `tokens`) stay exactly as the feature lexers read them.
+//! The payloads are inert strings: they are only ever lexed.
 
 mod common;
 
@@ -59,7 +59,7 @@ fn tokens(r: &ScanReport) -> Vec<&str> {
         .collect()
 }
 
-// ---- Line ends the lexers did not honour ----
+// ---- Line ends the feature lexers do not honor ----
 
 #[test]
 fn lone_cr_hides_nothing_from_hidden_code() {
@@ -178,7 +178,7 @@ fn plain_fstrings_produce_no_hidden_code() {
 fn fstring_field_naming_an_imported_module_is_not_hidden_code() {
     // requests 2.34.2's __init__ formats `{urllib3.__version__}` into a warning. The file
     // already uses the network module outside the field, so the field adds no new kind of
-    // behaviour.
+    // behavior.
     let r = sdist_setup(concat!(
         "import warnings\nimport urllib3\n",
         "warnings.warn(f\"urllib3 ({urllib3.__version__}) is not supported\")\n",
@@ -381,7 +381,7 @@ fn empty_install_script_still_runs_gyp() {
             "{scripts}"
         );
     }
-    // A real install script, or none at all, is read as before.
+    // A real install script, or none at all, reports no unread code.
     for scripts in [r#"{"install": "node-gyp rebuild"}"#, r#"{"test": "x"}"#] {
         let pj = format!(r#"{{"name": "gy", "version": "1.0.0", "scripts": {scripts}}}"#);
         let r = npm(&[
@@ -466,7 +466,7 @@ fn data_purelib_init_payload_is_hidden_code() {
     );
 }
 
-// Token streams of the files above as cde4f55 emitted them.
+// Token streams of the files above, pinned so the hidden-code pass cannot change model inputs.
 const PINNED_CR_TOKENS: &[&str] = &["<file>"];
 const PINNED_FSTRING_TOKENS: &[&str] = &["<file>", "v", "=", "<str>"];
 const PINNED_BOM_TOKENS: &[&str] = &[

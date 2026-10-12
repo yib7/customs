@@ -97,7 +97,7 @@ pub fn is_nonregistry_spec(spec: &str) -> bool {
     if PREFIXES.iter().any(|p| s.starts_with(p)) {
         return true;
     }
-    // Local paths, as npm-package-arg recognises them: `.`/`..` relative, `/` and `~/`
+    // Local paths, as npm-package-arg recognizes them: `.`/`..` relative, `/` and `~/`
     // absolute, Windows drive and UNC paths.
     let b = s.as_bytes();
     if s.starts_with(['.', '/', '\\'])

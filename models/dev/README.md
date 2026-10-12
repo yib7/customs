@@ -9,7 +9,7 @@ end before the training pipeline has produced real models:
 - `name_model.json`: one or two edits from a popular name, popular-name wrapping, a trailing
   digit. No n-gram weights.
 - `code_nn.json`: a constant network (all weights zero) that only exercises the code path.
-- `ensemble.json`: equal stacking of the tree and name logits; the CNN has weight zero.
+- `ensemble.json`: equal stacking of the tree and name logits; the code CNN has weight zero.
 - `popular_*.txt`: short hand-written lists (about 250 names each), not a download ranking.
 
 The manifest sets `"untrained": true` and `model_version` `dev-untrained`, and `/api/model`

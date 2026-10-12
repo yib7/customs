@@ -100,7 +100,7 @@ executed or installed. [EVALUATION.md](EVALUATION.md) has the numbers.
 | Policy | `customs.toml` (example in `deploy/customs.toml`), editable from the dashboard |
 | Models | `models/` in a checkout, `CUSTOMS_MODELS` or `--models` elsewhere |
 
-## Configuration knobs worth knowing
+## Common configuration knobs
 
 | Variable | Default | Effect |
 |---|---|---|

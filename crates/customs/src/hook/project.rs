@@ -161,7 +161,7 @@ fn package_key(eco: Ecosystem, name: &str) -> String {
 
 /// A locked version satisfies the manifest's `version` (an exact version or a range), so
 /// the install fetches what the lockfile pins rather than something new. A range Customs
-/// cannot read counts as satisfied, as it did when only names were compared.
+/// cannot read counts as satisfied, so that entry is matched by name alone.
 fn lock_satisfies(eco: Ecosystem, name: &str, version: Option<&str>, locked: &[String]) -> bool {
     let meta = PackageMeta {
         ecosystem: eco,

@@ -14,11 +14,11 @@ boundary (feature names, artifact formats, HTTP routes, JSON shapes) is defined 
 
 Coding agents now install dependencies on their own. Two threats follow:
 
-1. **Malicious packages.** Hundreds of thousands of malicious npm and PyPI packages have been
+1. Malicious packages: hundreds of thousands of malicious npm and PyPI packages have been
    reported (the OSSF malicious-packages dataset alone lists over 230K). Most execute at
    install time (`setup.py`, npm `preinstall`/`postinstall`) or import time, steal
    credentials, or download a second stage.
-2. **Slopsquatting.** LLMs hallucinate plausible package names. Attackers register those
+2. Slopsquatting: LLMs hallucinate plausible package names. Attackers register those
    names. An agent that trusts its own suggestion installs the attacker's package.
 
 Existing defenses are either commercial, rule-based heuristics, or vulnerability scanners
@@ -41,7 +41,7 @@ learned detector, registry-metadata policy rules, and agent integration in one l
 | Path | Language | Role |
 |---|---|---|
 | `crates/customs-scan` | Rust | Safe archive unpacking and static feature extraction. Library plus `customs-scan` CLI (batch JSONL mode for training). Single implementation of features used by training and serving, so there is no train/serve skew. |
-| `crates/customs-model` | Rust | Loads exported model artifacts and runs inference: gradient-boosted trees, the package-name model, and the code neural network. Produces calibrated risk plus per-feature contributions. |
+| `crates/customs-model` | Rust | Loads exported model artifacts and runs inference: the tree model (gradient-boosted trees), the name model, and the code CNN. Produces calibrated risk plus per-feature contributions. |
 | `crates/customs-py` | Rust (PyO3) | Python bindings for `customs-scan` (`import customs_scan`), built with maturin. |
 | `crates/customs` | Rust | The `customs` binary: proxy server, policy engine, REST API, Claude Code hook, MCP server, CLI. |
 | `python/customs_ml` | Python | Dataset pipeline, dedup and splits, training (LightGBM, PyTorch), evaluation, baselines, export. |
@@ -91,9 +91,9 @@ Every indicator is counted on two surfaces and emitted with a prefix:
   `scripts.preinstall|install|postinstall|prepare|preprepare|postprepare`, files those commands
   reference (`node x.js`, `bun x.js`, `bun run x.js`), scripts they invoke by name
   (`npm run setup`, `pnpm run setup`, `yarn setup`, `bun run setup`, `run-s a b`; up to
-  three levels and 16 scripts), and the `main` entry file (default `index.js`). Before this
-  was followed, a hook such as `bun run index.js` put a file named `run` on the surface and
-  missed `index.js`, and `postinstall: npm run setup` hid whatever `setup` runs. A root
+  three levels and 16 scripts), and the `main` entry file (default `index.js`). Without
+  this, a hook such as `bun run index.js` would put a file named `run` on the surface and
+  miss `index.js`, and `postinstall: npm run setup` would hide whatever `setup` runs. A root
   `binding.gyp` counts too: npm installs a package that has one and no `install` or
   `preinstall` hook (and no `"gypfile": false`) by running `node-gyp rebuild`, and node-gyp
   runs every command in the file's `<!(...)` and `<!@(...)` expansions while configuring, so
@@ -127,10 +127,10 @@ Implementation details (`customs-scan`, schema 1):
   or under `src/`). An import adds the module file, the `__init__.py` of each enclosing
   package, and imported names that are submodules, so a payload moved out of `setup.py`
   into a helper module stays on the install surface. Imports inside an `__init__.py` or a
-  `.pth` file are not followed. A first version followed them too (importing a package
-  does run them), but in a benign package they lead into the library itself: the share of
-  benign PyPI packages with network code on the install surface rose from 2.3% to 18%, and
-  detection of novel MalRegistry malware at a 1% false positive rate fell from 50.0% to
+  `.pth` file are not followed. Importing a package does run them, but in a benign package
+  they lead into the library itself: following them raised the share of
+  benign PyPI packages with network code on the install surface from 2.3% to 18%, and cut
+  detection of novel MalRegistry malware at a 1% false positive rate from 50.0% to
   45.3%. Imports of anything not in the archive (the standard library, dependencies) are
   ignored.
   Wheels use the same rules (their root is site-packages).
@@ -209,11 +209,11 @@ How indicators are counted (`customs-scan`, schema 1):
   and the file-level dropper rule sees the file and its literals together. A 2026 PyPI
   dropper campaign (`tlask`, `rlask`, `gpsea`, `pyphetools`, `nhmpy` and others) put the
   whole payload in an `exec('...')` string inside a `-setup.pth` file, which Python runs at
-  every interpreter start: the scanner had seen `dyn_code` and a URL only, and it now sees
-  the download, the write and the process launch. Bundler modules are left as strings (an
+  every interpreter start: read as a string it shows only `dyn_code` and a URL; read as code
+  it shows the download, the write and the process launch. Bundler modules are left as strings (an
   eval string that names itself with a `sourceURL` comment, as webpack's development builds
-  wrap every module): on the first try they put library behavior on the install surface of
-  two benign archives. On 6,000 corpus archives the change touched 70 malicious and 9 benign
+  wrap every module): reading them as code put library behavior on the install surface of
+  two benign archives. On 6,000 corpus archives, reading strings as code touched 70 malicious and 9 benign
   ones, and every indicator that appeared where there was none before was in malware.
   Three more forms are read the same way. A call over one base64 literal decoded in place
   (`exec(b64decode('...'))`, `eval(atob('...'))`, `eval(Buffer.from('...',
@@ -222,7 +222,7 @@ How indicators are counted (`customs-scan`, schema 1):
   the encoded literal keeps its length and entropy statistics. A literal after `'-c'` in a
   list that names `sys.executable` or a `python` program is Python code: litellm 1.82.8
   shipped its payload as `Popen([sys.executable, "-c", "import base64;
-  exec(base64.b64decode('...'))"])` in a `.pth` file, two layers this now reads through.
+  exec(base64.b64decode('...'))"])` in a `.pth` file, two layers the scanner reads through.
   `builtins.exec` and `__import__('builtins').exec` count as the builtin. On the 6,000
   corpus archives these forms and string-table reads together changed 29 malicious archives
   and no benign one, and every indicator that appeared was in malware; litellm 1.82.8 went
@@ -236,7 +236,7 @@ How indicators are counted (`customs-scan`, schema 1):
   `nohup` (proc_exec), `eval`/`iex`/`node -e`/`python -c` (dyn_code), `$env:`/`printenv`/
   `%VAR%` (env_access), redirection to a file (not `/dev/null`), `chmod`, `tee`,
   `Set-Content`, `Out-File` (file_write).
-- Every match counts once (counts, not booleans). Additions to the table: `exfil_endpoint`
+- Every match counts once (counts, not booleans). Beyond the table, `exfil_endpoint`
   also matches `interactsh`, `pipedream.com`, `dnslog.cn`, `ceye.io`, `hookbin.com`,
   `canarytokens`; `secret_paths` also matches `id_dsa|id_ecdsa|id_ed25519`, `.bash_profile`
   is `persistence`, and `decode_obf` also matches `base64 -d`, `FromBase64String`, `xxd -r`
@@ -302,9 +302,9 @@ over 500), `has_setup_py`, `has_pyproject`, `has_package_json`, `n_npm_install_s
 length over 30 with high entropy, over all identifiers), `inst_nonascii_ratio`,
 `inst_long_line_ratio` (lines over 1000 chars over all lines).
 
-Added in implementation (still schema 1): `inst_n_files` (number of install-surface units),
+Also in schema 1: `inst_n_files` (number of install-surface units),
 `n_links` (symlink and hardlink entries skipped), `n_unsafe_paths` (absolute or `..` entries
-skipped). Added after the MalRegistry error analysis (section 10.1):
+skipped). From the MalRegistry error analysis (section 10.1):
 `inst_hidden_ws_lines`/`all_hidden_ws_lines`, lines where code resumes after a run of 100 or
 more spaces or tabs (code pushed past the right edge of an editor or diff view; evidence
 snippets show such a line as `head [N blank columns] hidden code`), and
@@ -313,9 +313,9 @@ hit (`exec(b64decode(...))` on one line). The same call written inside a string 
 counts too (`subprocess.Popen([sys.executable, "-c", "import base64;
 exec(base64.b64decode('...'))"])`, `node -e "eval(Buffer.from(p, 'base64')...)"`), which is
 how the 2026 litellm and telnyx takeover releases started their payload in a child process;
-string contents are otherwise only matched against the string rules, so the call was
+string contents are otherwise only matched against the string rules, so the call would be
 invisible. The string rule needs the decoder within one run of identifier, dot, quote and
-bracket characters after `exec(`, so prose that mentions both does not match. Added for compromised releases of large
+bracket characters after `exec(`, so prose that mentions both does not match. For compromised releases of large
 libraries, where a payload is a small share of the code: `inst_max_file_kinds` and
 `all_max_file_kinds`, the most distinct behavior indicators (every indicator except `url`
 and `file_write`) present together in a single file, and `all_top_file_share`, the share of
@@ -422,12 +422,12 @@ into `outer!/inner` paths that count toward `all_` and the structural features o
 Exceeding the entry, total or ratio cap rejects the archive; a nested archive that would
 exceed one is left unexpanded instead (its entries are dropped, its decompressed bytes stay
 counted), since installers never unpack it: cmake's sdist bundles its own 20,000-file source
-tarball and was rejected whole before. Unsafe and link entries are skipped and counted.
+tarball, and rejecting the whole sdist over it would block cmake. Unsafe and link entries are skipped and counted.
 
 Content the scanner does not read cannot be judged, and an attacker controls what it does
-not read. Padding `setup.py` past the per-entry cap with comment lines turned a test
-payload scored 1.00 into 0.59 (allowed), and 20,001 empty files made any archive
-unscannable, which the proxy only warned about. Two policy rules close this, both
+not read. Without the rules below, padding `setup.py` past the per-entry cap with comment
+lines turns a test payload scored 1.00 into 0.59 (allowed), and 20,001 empty files make any
+archive unscannable, which earns only a warning. Two policy rules close this, both
 blocking by default: `unread_code` fires when a code file or manifest (source and script
 extensions, `binding.gyp`, `package.json`, `setup.cfg`, `pyproject.toml`, `PKG-INFO`,
 extensionless files starting with `#!`) was over the per-entry cap, and `scan_error` when
@@ -439,15 +439,15 @@ otherwise).
 
 The size cap is not the only way to keep the scanner from reading a file. A wheel whose
 module is stored with Zstandard (which Python 3.14's `zipfile` installs) or encrypted, or
-an entry whose data fails to decompress, used to be skipped with an error while the
-verdict allowed the rest; such entries of the scanned archive itself now count as
-`unread_code` when they are code. Nested archives are exempt, since installers do not
+an entry whose data fails to decompress, is skipped with an error, and an allow for the
+rest of the archive would let it through; such entries of the scanned archive itself count
+as `unread_code` when they are code. Nested archives are exempt, since installers do not
 unpack them and test suites ship deliberately broken ones: cookiecutter, patool and
 oletools carry encrypted fixture zips, inflate64 Deflate64 ones. A tarball that turns
-corrupt after its first entry was scanned up to the damage and allowed; node-tar skips a
-header with a bad checksum and keeps extracting, so what followed could be installed
-unseen. At depth 0 that is now a rejection (`scan_error`). Rescanning all 51,404 corpus
-archives (22,258 benign) with these changes found no rejection and no `unread_code` hit,
+corrupt after its first entry can be scanned only up to the damage, while node-tar skips a
+header with a bad checksum and keeps extracting, so what follows could be installed
+unseen. At depth 0 such a tarball is rejected (`scan_error`). Rescanning all 51,404 corpus
+archives (22,258 benign) with these rules found no rejection and no `unread_code` hit,
 and neither did 1,488 benign archives downloaded again as published (the corpus stores
 benign packages repacked, which would hide top-level damage).
 
@@ -511,7 +511,7 @@ A fifth rule, `hidden_code`, covers install-time code that the interpreter reads
 differently from the feature lexers. Those lexers end lines only at `\n`, keep a
 byte-order mark glued to the first token, and read a Python f-string as one string;
 CPython and Node also end lines at a bare `\r` (Node also at U+2028 and U+2029 outside
-literals), drop the mark, honour a backslash-CRLF continuation inside quotes, and run the
+literals), drop the mark, honor a backslash-CRLF continuation inside quotes, and run the
 code in f-string fields. Changing the feature lexers would change the model inputs of
 ordinary files that merely hold a stray `\r`, a mark or an f-string, so for each
 install-surface Python or JavaScript file where the readings can differ the scanner
@@ -544,14 +544,14 @@ top level holds a package directory beside something else), the shallowest direc
 holds a manifest or a `*.dist-info/` directory becomes the root, provided it is unique; a
 tie between a built distribution and a source checkout goes to the one with `PKG-INFO`,
 `package.json` or a `*.dist-info/` (an unpacked wheel).
-Files outside the new root keep their paths and are still scanned. Before this rule,
-69 malicious and 6 benign PyPI archives in the corpus had their manifest below such a level
+Files outside the new root keep their paths and are still scanned. Without this rule,
+69 malicious and 6 benign PyPI archives in the corpus have their manifest below such a level
 and so no install surface at all (one campaign stored each release beside a `sources/`
 git checkout of the same project). Recent entries of the Datadog dataset store an
 unpacked wheel (`name/`, with its `.dist-info`) beside such a checkout; the wheel has no
-manifest file, so until `.dist-info` counted, the checkout became the root and the clean
-upstream source was scanned in place of the published package. That hid the payload of
-44 PyPI archives (3 benign), among them the 2026 durabletask, mistralai and telnyx
+manifest file, so if `.dist-info` did not count, the checkout would become the root and the
+clean upstream source would be scanned in place of the published package. That hides the
+payload of 44 PyPI archives (3 benign), among them the 2026 durabletask, mistralai and telnyx
 takeover releases. Paths whose trailing components repeat
 (`pkg/mod.py/pkg/mod.py`, an artifact of re-extracted wheels in that dataset) collapse to
 `pkg/mod.py`. Ecosystem detection: an explicit argument wins; otherwise a stripped
@@ -587,16 +587,16 @@ mutations splice tokens that sit on parser decision points (quotes, comment open
 saved for replay. `examples/scale.rs` then times one file holding a token repeated at
 doubling counts: a ratio near 2 per row is linear, near 4 is quadratic.
 
-The repetition mutation found two slow paths, both since fixed:
+The repetition mutation found two slow paths:
 
 - Line numbers for matches inside a string literal were computed by counting newlines from
   the start of the string for each match. A 780 KB string holding 55K copies of
-  `~/.ssh/id_rsa` took 115 s, and a larger one 8 minutes. Each string now builds a
-  line index once, on its first match.
+  `~/.ssh/id_rsa` took 115 s, and a larger one 8 minutes. The fix builds a line index once
+  per string, on its first match.
 - A Unicode `\b` stops the regex crate's lazy DFA at the first non-ASCII byte, which falls
   back to an engine about 100x slower. One accented character in a long string literal or
-  shell script cost about 1 s per MB (7 s for one 7.6 MB line). Indicator rules now
-  compile with ASCII word boundaries. On 6,000 random corpus archives the features are
+  shell script cost about 1 s per MB (7 s for one 7.6 MB line). The fix compiles indicator
+  rules with ASCII word boundaries. On 6,000 random corpus archives the features are
   identical for 5,997, and the batch ran 4.2x faster (50 to 213 archives a second). The
   other 3 are malware that gain hits where an indicator word touches CJK text
   (`获取whoami失败`): CJK characters count as word characters under Unicode rules, so
@@ -736,7 +736,7 @@ rule hits still count). `risk` and component scores are `null` when that part of
 effective ones (policy overrides applied). Policy `severity` is `allow` for informational
 hits (`allow`, `established`, `not_scanned` from the proxy, `also_checked`), else `warn`
 or `block`. Rules: `deny`, `allow`,
-`established` (an established release of a popular package, section 8),
+`established` (the established-package prior, section 8),
 `block_nonexistent`, `min_age_days`, `block_install_scripts_from_new`, the release history
 rules of section 8 (`provenance_dropped`, `install_script_added`, `publisher_changed`,
 `dormant_revival`, `version_anomaly`, `nonregistry_dependency_added`,
@@ -873,7 +873,7 @@ enforcement off.
   every client shares the proxy's address, so a flood of wrong tokens holds off policy
   changes (not checks or installs) for everyone until the minute is up; `X-Forwarded-For`
   is not trusted, since any client can set it. Without a token, a server listening on
-  loopback accepts changes as before, while one listening on any other address refuses
+  loopback accepts changes, while one listening on any other address refuses
   them with 403 `policy_changes_disabled`: anyone who can reach a team server could
   otherwise put it
   in monitor mode or allow-list a package. `--allow-anonymous-policy-changes` lifts that
@@ -1009,7 +1009,7 @@ allow-listing a package turns protection off for everyone using the server. The 
 then one line per field (`mode: enforce -> monitor`, `allow: added npm:left-pad`), and the
 policy page link. It says "loosened" instead when a change can let through what the old
 policy stopped: monitor mode, a lower rule severity, a higher threshold, a shorter age
-limit, a switch turned off, the `established` prior switched on or widened, an allow-list
+limit, a switch turned off, the established-package prior (`established`) switched on or widened, an allow-list
 entry added or a deny-list entry removed, or a new upstream. The JSON body is `{ "text", "policy_change", "loosened" }`.
 
 ## 8. Policy (`customs.toml`)
@@ -1075,7 +1075,7 @@ defaults, and its models are `--models`/`CUSTOMS_MODELS`, else the paths relativ
 binary (`./models` counts for `serve` only). An installed binary finds no models next to
 it unless they were installed to `<prefix>/share/customs/models`; set `CUSTOMS_MODELS`.
 
-**Established releases.** The classifier has false positives on popular packages that look
+Established-package prior: the classifier has false positives on popular packages that look
 like malware for ordinary reasons: the `requests` sdist has test fixtures full of raw IP
 URLs and a `setup.py` that runs `os.system`, and scores 0.99. Retraining is the real fix;
 until then the policy layer carries a prior. A release whose exact name is among the
@@ -1085,15 +1085,15 @@ yanked (PyPI) or deprecated (npm), gets an `established` hit with severity `allo
 the model decision drops out of the combination. The model still runs and its scores and
 reasons stay in the verdict. The deny list wins over it, and every rule hit (cooldown,
 release history, scanner rules) still counts, so a release that adds an install script or
-ships a `.pth` startup hook is blocked as before. The tradeoff: against a hijacked release
-of a popular package whose code the rules miss, the age gate is the defence. Such releases
+ships a `.pth` startup hook is still blocked. The tradeoff: against a hijacked release
+of a popular package whose code the rules miss, the age gate is the defense. Such releases
 are usually found and pulled within days (310 of the 327 compromised npm releases in the
 corpus have since been unpublished; EVALUATION.md, "Release history rules on compromised
 npm releases"), and a release younger than the gate still gets the model's verdict. One
 that stays on the registry for 30 days and trips no rule is allowed. Set
 `established.enabled = false` to let the model decide for every package.
 
-**Resolving past young releases.** A minimum age that only blocks breaks every unpinned
+Resolving past young releases: a minimum age that only blocks breaks every unpinned
 install for days after each upstream release: `pip install foo` and `npm install foo` pick
 the newest version, which is the one being refused. With `hide_young_versions` (the
 default), the proxy holds back versions younger than `min_age_days`. On the PyPI simple
@@ -1129,7 +1129,7 @@ passed over; `"resolve": "upstream"` checks against the full list. The hooks and
 check` use `served` only when the installers in their environment point at the server
 (the variables `customs env` prints), since otherwise the installer sees upstream.
 
-**Release history rules.** Account takeovers (the 2025 chalk/debug compromise, the
+Release history rules: account takeovers (the 2025 chalk/debug compromise, the
 Shai-Hulud worm) publish new versions of established libraries with a payload inside
 legitimate code, the classifier's weakest slice. These rules compare the requested version
 with the releases published before it, using only the registry metadata Customs already
@@ -1186,9 +1186,9 @@ threshold. On the compromised npm releases of the test period it raises the shar
 from 44% to at least 78%. Comparing with the settled release (the newest one at least 24
 hours older) as well as the previous one matters here: attackers publish several malicious
 versions within hours, and against the previous release alone the second one shows no
-change. Before that comparison, and before an added root `binding.gyp` counted as an added
-install script (npm runs `node-gyp rebuild` for it), the rule fired on 38% of compromised
-releases; now it fires on 69%, while legitimate releases went from 3 to 4. The others warn (and `version_anomaly`, which fires on releases
+change. Without that comparison, and without counting an added root `binding.gyp` as an
+added install script (npm runs `node-gyp rebuild` for it), the rule fires on 38% of
+compromised releases instead of 69%, and on 3 legitimate releases instead of 4. The others warn (and `version_anomaly`, which fires on releases
 the model already flags, is off); the model still judges the archive itself, and `block` is
 available for teams that would rather review such releases first. Provenance is weaker
 evidence than it looks: an attacker who takes over the project's CI publishes with valid
@@ -1274,7 +1274,7 @@ message on stderr) unless run with `--fail-closed`, which denies. A check that c
 start at all (no server and no in-process engine, for example a broken `customs.toml`)
 fails only the registry packages: tampering and specs that need no check still ask. Setup: `deploy/hooks/README.md`.
 
-**Downloaded scripts.** A script fetched and run in one step never reaches the registry
+Downloaded scripts: a script fetched and run in one step never reaches the registry
 proxy: `curl -fsSL URL | sh`, `wget -qO- URL | sudo bash`, `curl URL | python3 -`,
 `bash <(curl URL)`, `source <(wget -qO- URL)`, `/bin/bash -c "$(curl -fsSL URL)"`, `eval
 "$(curl URL)"`, `uv run URL`, `curl URL | uv run -`, `pipx run URL`, and PowerShell's `irm
@@ -1292,7 +1292,7 @@ reading it (`cat install.sh`) passes. Downloads piped into a parser
 (`| python3 -m json.tool`, `| jq`, `| tar xz`) and scripts already on disk (`cat x.sh |
 bash`) are left alone.
 
-**Project installs.** `npm install` or `npm ci` with no package (also `--prefix`), `pnpm
+Project installs: `npm install` or `npm ci` with no package (also `--prefix`), `pnpm
 install` (`-C`), bare `yarn` or `yarn install` (`--cwd`), `bun install` (`--cwd`), `deno
 install` with no package and `deno ci`, `uv sync`
 (`--directory`, `--project`), `poetry install|sync` (`-C`) and `pipenv install|sync`
@@ -1442,34 +1442,35 @@ any static reading, so this is a tripwire, not a sandbox.
 
 As implemented; results are in `docs/EVALUATION.md` and `models/metrics.json`.
 
-- **Data.** Datadog malicious-software-packages-dataset (real npm and PyPI samples, capped
+- Data: Datadog malicious-software-packages-dataset (real npm and PyPI samples, capped
   per discovery date so one worm cannot dominate), OSSF malicious-packages (names, for the
   name model and to filter the benign set), and benign archives downloaded from PyPI and
   npm in three popularity tiers: top (most downloaded), mid (further down the popularity
   lists), and tail (uniform draws from the PyPI index, npm keyword search and dependency
   crawling), tail packages at least 90 days old.
-- **Canonicalization.** Both classes are repacked into the same deterministic tarball
+- Canonicalization: both classes are repacked into the same deterministic tarball
   layout before scanning (`malicious.canonicalize`), so packaging cannot leak the label.
-- **Dedup.** MinHash (128 permutations) over install-surface token 5-grams with LSH (16
+- Dedup: MinHash (128 permutations) over install-surface token 5-grams with LSH (16
   bands of 8 rows), confirmed at estimated Jaccard 0.7; short documents group only with
   exact copies and empty ones stay singletons.
-- **Splits.** Temporal (headline): malware by discovery date, 70/10/20 quantiles; benign at
-  random by cluster in the same proportions. Cluster-grouped random split as a reference.
+- Splits: the headline split is temporal, with malware by discovery date in 70/10/20
+  quantiles and benign at random by cluster in the same proportions. A cluster-grouped
+  random split is the reference.
   The name model only learns from OSSF names reported before the validation cutoff, and
   never from a name present in the code dataset.
-- **Weights.** 1/sqrt(cluster size), classes balanced within the split being fit.
-- **Models.** LightGBM (small grid on validation PR AUC), a PyTorch CNN over install-time
+- Weights: 1/sqrt(cluster size), classes balanced within the split being fit.
+- Models: LightGBM (small grid on validation PR AUC), a PyTorch CNN over install-time
   tokens (early stopping on validation PR AUC), the name model, and a logistic stacker fit
   on validation with 5-fold cluster-grouped cross-fitting; Platt calibration and the
   warn and block thresholds (target FPR 1% and 0.1%) come from out-of-fold scores.
-- **CNN input length.** The CNN reads the first 768 install-surface tokens; the stream
+- CNN input length: the CNN reads the first 768 install-surface tokens; the stream
   itself stops at 4,096, and 55% of compromised-library releases in test run past 768
   (22% of benign packages do). Scoring the same trained CNN on the full stream (its
   global max-pool accepts any length) lowered its own test ROC AUC from 0.912 to 0.909,
   and on compromised releases longer than 768 tokens from 0.707 to 0.668: over more
   legitimate code the max-pool finds more payload-like fragments in benign packages too.
   Restacked, the headline and compromised-library numbers stayed within seed noise.
-- **Bounded stacking.** Component logits are clipped to `[-c, c]` before stacking, with `c`
+- Bounded stacking: component logits are clipped to `[-c, c]` before stacking, with `c`
   chosen from {none, 16, 12, 8, 6, 4, 3, 2} by out-of-fold recall averaged over every
   validation threshold up to 1% FPR. The block threshold sits at the 0.1% FPR point of
   2,172 validation benign packages, so two or three of them set it. Unclipped, those were
@@ -1477,23 +1478,23 @@ As implemented; results are in `docs/EVALUATION.md` and `models/metrics.json`.
   stricter than intended: 0.024% FPR on test and 53% recall, against 71% at a true 0.1%.
   The gap was found by comparing the realized test FPR with its target; the bound itself
   is chosen on validation only.
-- **Metrics.** ROC AUC, PR AUC, detection rate and realized FPR at the frozen thresholds,
+- Metrics: ROC AUC, PR AUC, detection rate and realized FPR at the frozen thresholds,
   Brier score and expected calibration error, all with 1,000-resample cluster-bootstrap
   95% CIs. Slices: ecosystem, novel versus seen campaigns, compromised libraries, benign
   popularity tiers, and benign-tercile size strata.
-- **Baseline.** GuardDog 3.2 on a fixed random sample of the test set (1,500 per class),
+- Baseline: GuardDog 3.2 on a fixed random sample of the test set (1,500 per class),
   compared at its own operating points (any finding, `high_risk`) with a paired cluster
   bootstrap.
-- **Ablation.** The tree model retrained on behavior features only (no manifest metadata,
+- Ablation: the tree model retrained on behavior features only (no manifest metadata,
   sizes, or file counts).
-- **Robustness and augmentation.** Text-level evasions applied to held-out malware and
+- Robustness and augmentation: text-level evasions applied to held-out malware and
   re-scored: string splitting, hex and Unicode escapes, character codes, reversed literals,
   joined literal lists, a string table, base64 wrapping, burial in a real library, install-surface indirection, metadata mimicry,
   starjacking. The augmentation stage then adds starjacked
   and buried copies of training malware (benign training donors only) and everything is
   retrained; the report shows before and after, separating evasion families used in
   training from unseen ones.
-- **Starjacking and the repository link.** Starjacked malware was blocked 11 points less
+- Starjacking and the repository link: starjacked malware was blocked 11 points less
   often than clean malware: the copied README and repository link look like a real
   project, and the code alone did not make up the difference. `meta_repo_mismatch` is
   set when every forge repository the manifest links (npm `repository`, `homepage`,
@@ -1505,7 +1506,7 @@ As implemented; results are in `docs/EVALUATION.md` and `models/metrics.json`.
   common. A first retrain closed the starjacking gap but learned the converse: a link
   naming the package itself read as a real project, and metadata mimicry (a README plus
   `github.com/<owner>/<own-name>`) fell from 63.2% to 48.9% blocked. Such a link costs
-  nothing, so the augmentation stage now also writes `starjack_self` copies, starjacked
+  nothing, so the augmentation stage also writes `starjack_self` copies, starjacked
   with every forge link renamed to the sample's own name. Against the same data and CNN
   without the feature, starjacked malware went from 6.6 points below clean malware to
   5.2 points above, mimicry from 8.5 points below to 7.5, and MalRegistry
@@ -1520,17 +1521,17 @@ different team. Archives are fetched, canonicalized like the corpus, and scored 
 shipped binary at its shipped thresholds. A sample is *novel* when its normalized name
 never appears in the training data and its token stream does not share a MinHash cluster
 with any training malware. Novel clusters are split in half by a hash of the cluster id:
-the **dev** half is for error analysis and training (and holds every cluster any sample of
-which was looked at), the **held-out** half is only ever reported. Rates are given per
+the *dev* half is for error analysis and training (and holds every cluster any sample of
+which was looked at), the *held-out* half is only ever reported. Rates are given per
 archive and per cluster (one sample each), since one campaign can contribute hundreds of
 copies.
 
-- **Frozen sets.** Cluster ids shift when a scanner change alters token streams, so the
+- Frozen sets: cluster ids shift when a scanner change alters token streams, so the
   first run's halves, novelty and clusters are stored by archive hash
   (`external_malregistry_split.json`) and reused by every later run.
-- **Matched FPR.** Shipped thresholds move with every retrain, so runs are compared at
+- Matched FPR: shipped thresholds move with every retrain, so runs are compared at
   thresholds giving the same false positive rate on the benign test split.
-- **Code-only scores.** Most MalRegistry names are in the OSSF name list the name model
+- Code-only scores: most MalRegistry names are in the OSSF name list the name model
   trains on. The binary is also run with the name model left out of the manifest, so the
   ensemble uses its code-only fallback weights.
 
@@ -1598,7 +1599,7 @@ a pull request before anything is installed. PATHS are lockfiles or directories
 | `yarn.lock` | classic: entry headers with `version` and `resolved`; berry: `resolution` names the package and version Yarn fetches (a different `version` field is a mismatch) and its `__archiveUrl` is checked like `resolved` |
 | `bun.lock` | `packages` entries: `name@version` first (the real name for aliases), then the tarball URL, empty for the default registry; trailing commas allowed. `bun.lockb` is binary and refused with a hint to write `bun.lock` |
 | `deno.lock` | v4/v5 `npm` map (v3: `packages.npm`, v2: `npm.packages`; other versions are an error), keys `name@version` with `_peer@version` suffixes, `tarball` when the registry is not the default; `jsr` packages and `remote` modules listed as not checked |
-| MCP server configurations | `mcpServers` in `.mcp.json`, `.cursor/mcp.json`, `.gemini/settings.json`, `claude_desktop_config.json`, `mcp_config.json` (Windsurf) and `~/.claude.json` (also per project); `servers` in `.vscode/mcp.json`; `[mcp_servers.*]` in `.codex/config.toml`. `command` and `args` go through the hook's command parser, so `npx`, `bunx`, `pnpm dlx`, `uvx` and `pipx run` name their packages; `docker` servers are listed as not checked, and so are `uv run --directory` projects (audit that project's lockfile) and any server whose launcher Customs does not recognise, so no server goes unlisted. Only a program on disk (a path, or `node`, `python`, `deno`, `bun` and similar running a local file or `python -m`) is skipped silently |
+| MCP server configurations | `mcpServers` in `.mcp.json`, `.cursor/mcp.json`, `.gemini/settings.json`, `claude_desktop_config.json`, `mcp_config.json` (Windsurf) and `~/.claude.json` (also per project); `servers` in `.vscode/mcp.json`; `[mcp_servers.*]` in `.codex/config.toml`. `command` and `args` go through the hook's command parser, so `npx`, `bunx`, `pnpm dlx`, `uvx` and `pipx run` name their packages; `docker` servers are listed as not checked, and so are `uv run --directory` projects (audit that project's lockfile) and any server whose launcher Customs does not recognize, so no server goes unlisted. Only a program on disk (a path, or `node`, `python`, `deno`, `bun` and similar running a local file or `python -m`) is skipped silently |
 
 A directory search also looks in `.cursor`, `.vscode`, `.gemini` and `.codex` without
 `--recursive`. An agent starts its MCP servers itself, before any tool call, so the hook
@@ -1659,6 +1660,6 @@ SARIF 2.1.0 with one run (driver `Customs`), rules `customs/model-block`,
 or blocked package, or mismatched entry, at its lockfile line (a percent-encoded path relative to the working directory under `%SRCROOT%`, or a `file://` URI for a file outside it) with
 `partialFingerprints.customsPackage/v1 = <ecosystem>/<name>/<version>`, so GitHub keeps one
 alert per package version across runs. Not-checked entries that fetch code (git, URL,
-custom index, unrecognised MCP launcher; not local paths or unpinned ranges) are
+custom index, unrecognized MCP launcher; not local paths or unpinned ranges) are
 note-level results under `customs/unchecked-source`, which never affect `--fail-on`. `action.yml` wraps this for GitHub Actions
 (`docs/github-action.md`).

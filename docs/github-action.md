@@ -2,7 +2,7 @@
 
 The `action.yml` at the root of this repository runs `customs audit` on the lockfiles in
 your repository and uploads the result to GitHub code scanning. Every pinned package is
-checked with the malware classifier and the policy rules (nonexistent names, deny list,
+checked with the malware classifier and the policy rules (names that do not exist, deny list,
 minimum age, install scripts in young packages), and npm, Yarn and pnpm entries whose
 `resolved` tarball URL names a different package or version than the entry are blocked as
 lockfile injection. Blocked and warned packages show up as
@@ -16,7 +16,7 @@ also gets a note-level alert (`customs/unpinned-mcp-server`), since each agent s
 whatever release is newest.
 
 Entries that fetch code Customs cannot check (git and URL dependencies, packages from a
-custom index, MCP servers with a launcher it does not recognise) get a note-level alert
+custom index, MCP servers with a launcher it does not recognize) get a note-level alert
 (`customs/unchecked-source`) at their line. Notes never fail the job, whatever `fail-on`
 says.
 

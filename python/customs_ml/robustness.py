@@ -29,8 +29,8 @@ and the rewritten archive is re-scanned and re-scored with the exported models:
 ``indirection``       move install-time Python code into a helper module that setup.py
                       imports, so it leaves the scanned install surface.
 
-The point is to find out where the model is brittle and say so, not to show a perfect
-number. Results go into the evaluation report.
+The point is to find out where the model is brittle and say so. Results go into the
+evaluation report.
 """
 
 from __future__ import annotations

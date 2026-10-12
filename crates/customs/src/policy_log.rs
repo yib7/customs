@@ -121,7 +121,7 @@ pub fn loosens(c: &FieldChange) -> bool {
         ("allow", Value::Array(a), Value::Array(b)) => b.iter().any(|v| !a.contains(v)),
         ("deny", Value::Array(a), Value::Array(b)) => a.iter().any(|v| !b.contains(v)),
         (f, _, _) if f.starts_with("upstream") => true,
-        // The established prior sets the model aside: switching it on, or widening it to
+        // The established-package prior sets the model aside: switching it on, or widening it to
         // more names or younger releases, loosens.
         ("established.enabled", Value::Bool(a), Value::Bool(b)) => !*a && *b,
         ("established.top", a, b) => match (a.as_u64(), b.as_u64()) {

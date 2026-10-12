@@ -738,7 +738,7 @@ pub async fn check_targets(
 }
 
 /// [`check_targets`], stopping after `budget`: whatever is left is reported as one
-/// unverified result, so results no longer line up with `targets` then.
+/// unverified result, so the results then do not line up one-to-one with `targets`.
 pub async fn check_targets_within(
     targets: &[Target],
     checker: Option<&Checker>,

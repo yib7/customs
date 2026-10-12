@@ -202,10 +202,10 @@ fn default_established_age() -> u32 {
     30
 }
 
-/// The established-release prior: a release of one of the `top` most popular packages of
+/// The established-package prior: a release of one of the `top` most popular packages of
 /// its ecosystem (the name model's popularity list), published at least `min_age_days`
 /// ago and not yanked or deprecated, is allowed whatever the model scores it. Hijacked
-/// releases are found and pulled within days, so the age is the defence: a fresh release
+/// releases are found and pulled within days, so the age is the defense: a fresh release
 /// of a popular package still gets the model's verdict. The deny list and every other
 /// rule still apply.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

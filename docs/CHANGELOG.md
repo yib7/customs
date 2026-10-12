@@ -30,8 +30,9 @@ Released 2026-10-12. First public release.
     byte-order mark, or in f-string fields).
   - `startup_hook`: `.pth` files that run code, `sitecustomize.py` and
     `usercustomize.py`, including wheel `.data` copies.
-  - Install-time code that starts an AI coding CLI with its permission checks off.
-- An established-release prior (`[established]`): a release of one of the 5,000 most
+  - `agent_bypass`: install-time code that starts an AI coding CLI with its permission
+    checks off.
+- An established-package prior (`[established]`): a release of one of the 5,000 most
   popular PyPI or npm packages, at least 30 days old and not yanked, is allowed over the
   model. This clears the model's false positives on `requests` 2.32.3 (block) and 2.34.2
   (warn). The deny list and every other rule still apply.
@@ -63,7 +64,7 @@ Released 2026-10-12. First public release.
 
 - `customs audit` checks every pin in nine lockfile formats and in MCP server configs
   (JSONC included), blocks lockfile injection, lists MCP servers whose launcher it does
-  not recognise, and writes SARIF for GitHub code scanning. `action.yml` wraps it as a
+  not recognize, and writes SARIF for GitHub code scanning. `action.yml` wraps it as a
   GitHub Action.
 - `customs diff` shows what a release adds over an earlier one.
 

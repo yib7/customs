@@ -626,8 +626,8 @@ DIFF_FPR_BLOCK = 0.001
 
 
 # Features left out of the diff model. A delta omits unchanged files, so which delta
-# files an install hook reaches (the inst_ surface) is not well defined, and these two were
-# added to the scanner after the deltas were scanned.
+# files an install hook reaches (the inst_ surface) is not well defined, and the cached
+# delta scans predate these two scanner features.
 DIFF_EXCLUDE = ("f_inst_", "f_all_hidden_ws_lines", "f_all_exec_decoded")
 
 

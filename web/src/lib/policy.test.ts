@@ -129,7 +129,7 @@ describe('validateDraft', () => {
     expect(r.policy).toMatchObject({ young_dependency_days: 30, young_dependency_added: 'warn', nonregistry_dependency_added: 'block' });
   });
 
-  it('validates the established-release prior', () => {
+  it('validates the established-package prior', () => {
     const d = policyToDraft(POLICY);
     expect(d).toMatchObject({ establishedEnabled: true, establishedTop: '5000', establishedMinAgeDays: '30' });
     expect(validateDraft({ ...d, establishedTop: '0' }).errors['established.top']).toMatch(/at least 1/);

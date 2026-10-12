@@ -77,7 +77,7 @@ def build_vocab(docs: Sequence[Sequence[str]], cfg: Config) -> dict[str, int]:
 
     Ties break by token. ``Counter.most_common`` would break them by insertion order, which
     follows ``set`` iteration and so changes with each process's string hash seed: the
-    same data and seed then gave a different vocabulary, and a different model, per run.
+    same data and seed would give a different vocabulary, and a different model, per run.
     """
     df = Counter()
     for d in docs:

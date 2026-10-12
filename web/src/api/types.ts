@@ -114,7 +114,7 @@ export interface Stats {
 
 export type Threshold = 'model' | number;
 export type PolicyMode = 'enforce' | 'monitor';
-/** Severity of a rule that can be switched off (the release history rules). */
+/** Severity of a rule that can be switched off (the release history and scanner rules). */
 export type RuleSeverity = 'off' | 'warn' | 'block';
 
 /** Policy keys of the release history rules. */
@@ -128,7 +128,7 @@ export type HistoryRule =
   | 'young_dependency_added';
 
 /**
- * The established-release prior: a release of one of the `top` most popular names, published
+ * The established-package prior: a release of one of the `top` most popular names, published
  * at least `min_age_days` ago and not yanked, is allowed whatever the model scores it.
  */
 interface EstablishedPolicy {

@@ -198,7 +198,7 @@ async fn new_versions_hit_min_age() {
 #[tokio::test(flavor = "multi_thread")]
 async fn established_releases_of_popular_packages_skip_the_model() {
     let h = Harness::start(|_| {}).await;
-    // Through the proxy: the model blocks, the established prior serves it.
+    // Through the proxy: the model blocks, the established-package prior serves it.
     let r = h.get(&pypi_file_path("six", "1.16.0")).await;
     assert_eq!(r.status(), 200);
     assert_eq!(r.headers()["x-customs-decision"], "allow");

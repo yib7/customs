@@ -91,7 +91,7 @@ def fit_platt(raw: np.ndarray, y: np.ndarray, w: np.ndarray | None = None) -> di
     packages into one plateau, so a strict threshold (0.1% FPR) has to sit above the whole
     plateau and throws away detections. Platt scaling is strictly increasing, so ranking
     is preserved and thresholds are as fine-grained as the scores. Encoding it as knots
-    keeps the artifact format (and the Rust interpolation code) unchanged.
+    lets it share the isotonic map's artifact format and Rust interpolation code.
     """
     from sklearn.linear_model import LogisticRegression
 

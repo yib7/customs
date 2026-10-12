@@ -168,7 +168,7 @@ fn rule(id: &str) -> Rule {
         "customs/unchecked-source" => (
             "UncheckedSource",
             "Dependency is fetched from a source Customs did not check",
-            "The entry installs code from a git repository, a URL, a custom package index or a launcher Customs does not recognise, so no verdict covers it. Check where it comes from, or install it from the public registry.",
+            "The entry installs code from a git repository, a URL, a custom package index or a launcher Customs does not recognize, so no verdict covers it. Check where it comes from, or install it from the public registry.",
             "note",
         ),
         _ => ("", "", "", "warning"),

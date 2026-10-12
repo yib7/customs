@@ -803,8 +803,8 @@ fn a_missing_models_dir_says_where_to_point() {
 async fn checks_download_only_from_the_configured_upstream_hosts() {
     let elsewhere = dead_server();
     let h = Harness::start(|p| {
-        // The metadata still comes from the mock and lists files on the mock's host,
-        // which is no longer where archives are fetched from.
+        // The metadata comes from the mock and lists files on the mock's host, which is
+        // not among the hosts archives are fetched from in this setup.
         p.upstream.pypi_files = format!("{elsewhere}/files");
         p.upstream.pypi_simple = format!("{elsewhere}/simple");
     })
@@ -821,7 +821,7 @@ async fn checks_download_only_from_the_configured_upstream_hosts() {
     let file = format!("packages/ab/cd/{}", file_name("goodpkg", "1.0.0"));
     assert_eq!(h.mock.hits(&file), 0);
     h.stop().await;
-    // Files on the upstream host are fetched as before.
+    // With the default upstreams the same file is on a configured host and is fetched.
     let h = Harness::start(|_| {}).await;
     let (s, v) = h.check("pypi", "goodpkg", Some("1.0.0")).await;
     assert_eq!(s, 200, "{v}");

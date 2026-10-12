@@ -1,6 +1,6 @@
 # Customs dashboard
 
-The web UI for Customs: what your package managers and coding agents tried to install, and why something was blocked. It is a static React app served by `customs serve` at `/` and talks to the JSON API on the same origin (see `docs/DESIGN.md`, sections 6 to 8).
+The dashboard shows what your package managers and coding agents tried to install, and why something was blocked. It is a static React app served by `customs serve` at `/` and talks to the JSON API on the same origin (see `docs/DESIGN.md`, sections 6 to 8).
 
 ![Overview page with mock data: install counts, blocks per day, decisions by ecosystem and the live feed](screenshots/overview-light-desktop.png)
 
@@ -10,12 +10,12 @@ The web UI for Customs: what your package managers and coding agents tried to in
 
 ## Pages
 
-- **Overview** (`/`): headline tiles, blocked installs per day, decisions by ecosystem, top reasons, and a live feed over Server-Sent Events.
-- **Activity** (`/activity`): filterable, paginated event table. Filters live in the URL.
-- **Verdict** (`/verdicts/:id`): risk gauge with warn and block thresholds, component model scores, policy hits, signed feature contributions, evidence with file and line, and next steps.
-- **Check a package** (`/check`): runs `POST /api/check` and shows the verdict inline.
-- **Policy** (`/policy`): edit mode, thresholds, registry rules, and allow and deny lists. Saves with `PUT /api/policy`.
-- **Model** (`/model`): model version, held-out metrics, GuardDog comparison, and how scoring works.
+- Overview (`/`): headline tiles, blocked installs per day, decisions by ecosystem, top reasons, and a live feed over Server-Sent Events.
+- Activity (`/activity`): filterable, paginated event table. Filters live in the URL.
+- Verdict (`/verdicts/:id`): risk gauge with warn and block thresholds, component model scores, policy hits, signed feature contributions, evidence with file and line, and next steps.
+- Check a package (`/check`): runs `POST /api/check` and shows the verdict inline.
+- Policy (`/policy`): edit mode, thresholds, registry rules, and allow and deny lists. Saves with `PUT /api/policy`.
+- Model (`/model`): model version, held-out metrics, GuardDog comparison, and how scoring works.
 
 ## Scripts
 
@@ -40,7 +40,7 @@ Two scripts work against a running `customs serve` instead of the mock: `node sc
 
 ## Handling untrusted content
 
-Package names, versions, file paths, snippets, and labels come from packages and registries, so they are attacker-controlled. The UI renders them only as text (ESLint forbids `dangerouslySetInnerHTML` and `innerHTML`), truncates long values, and shows invisible and bidirectional control characters as `<U+XXXX>` markers. The only outbound links are registry pages built from a validated name with `encodeURIComponent`. Commands offered for copying are shell-quoted.
+Package names, versions, file paths, snippets, and labels come from packages and registries, so they are attacker-controlled. The dashboard renders them only as text (ESLint forbids `dangerouslySetInnerHTML` and `innerHTML`), truncates long values, and shows invisible and bidirectional control characters as `<U+XXXX>` markers. The only outbound links are registry pages built from a validated name with `encodeURIComponent`. Commands offered for copying are shell-quoted.
 
 ## API shapes assumed beyond DESIGN.md
 

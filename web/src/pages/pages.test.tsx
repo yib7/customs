@@ -125,7 +125,7 @@ describe('Policy page', () => {
     });
   });
 
-  it('edits the established-release prior', async () => {
+  it('edits the established-package prior', async () => {
     const user = userEvent.setup();
     renderApp('/policy');
     const trust = await screen.findByRole('switch', { name: /Trust established releases of popular packages/ });

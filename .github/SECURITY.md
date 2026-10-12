@@ -26,7 +26,7 @@ happened. Expect a first reply within a week.
 - Policy changes that skip the admin token, and secrets that leak into logs, verdicts or
   webhook messages.
 
-A malicious package that the model scores as safe is a detection gap, not a
+A malicious package that the classifier scores as safe is a detection gap, not a
 vulnerability. Those are still useful: open an ordinary issue with the package name,
 version and registry. Do not attach the archive, since registries remove malware and a
 name and version are enough to find it in public datasets.

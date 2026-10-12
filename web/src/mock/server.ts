@@ -281,7 +281,7 @@ export class MockServer {
 
   private putPolicy(body: unknown, auth: 'token' | 'none' = 'none'): MockResponse {
     if (!isRec(body)) return json(400, { error: 'body must be a JSON object' });
-    // PUT replaces the whole policy, so a body that leaves a key out is refused (F104).
+    // PUT replaces the whole policy, so a body that leaves a key out is refused, as config.rs does.
     const missing = missingKeys(INITIAL_POLICY, body);
     if (missing.length > 0) {
       const message = 'missing: PUT replaces the whole policy, so send every key GET /api/policy returns';
@@ -303,7 +303,7 @@ export class MockServer {
     if (typeof age !== 'number' || !Number.isInteger(age) || age < 0) {
       errors.push({ field: 'min_age_days', message: 'min_age_days must be a non-negative integer' });
     } else if (age > 365) {
-      // A server-side limit the form does not know about, so the UI's handling of server
+      // A server-side limit the form does not know about, so the dashboard's handling of server
       // validation errors can be exercised.
       errors.push({ field: 'min_age_days', message: 'min_age_days must be at most 365 (server limit)' });
     }

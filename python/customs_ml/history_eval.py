@@ -622,7 +622,7 @@ def summarize(comp: dict, ben: list[dict]) -> dict:
             "model_block": float(mb.mean()),
             "block_with_install_rule_low": float((mb | isa_lo).mean()),
             "block_with_install_rule_high": float((mb | isa_hi).mean()),
-            # Blocks under the default policy now: the model or any blocking rule.
+            # Blocks under the default policy: the model's block verdict or any blocking rule.
             "block_with_rules_low": float((mb | blk_lo).mean()),
             "block_with_rules_high": float((mb | blk_hi).mean()),
             # Releases the model does not warn on caught by a dependency rule; "strict" leaves

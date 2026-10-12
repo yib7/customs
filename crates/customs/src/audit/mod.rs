@@ -75,7 +75,7 @@ pub enum SkipKind {
     /// A package index or registry Customs does not check.
     CustomIndex,
     /// Anything else that installs code Customs did not check: an entry it could not read,
-    /// a JSR package, a container image, a launcher it does not recognise.
+    /// a JSR package, a container image, a launcher it does not recognize.
     Other,
 }
 
@@ -867,7 +867,7 @@ pub enum Outcome {
         url: Option<String>,
     },
     /// The registry has no such version (or no files for it). Counted as a warning: a
-    /// pinned version that disappeared is worth a look.
+    /// pinned version that disappeared needs someone to check why.
     Unavailable(String),
     /// Customs itself failed (network, server error).
     Failed(String),
@@ -1516,7 +1516,7 @@ pub(crate) mod tests {
             std::fs::create_dir_all(d.join(sub)).unwrap();
             std::fs::write(d.join(sub).join("requirements.txt"), "a==1.0\n").unwrap();
         }
-        // A virtual environment under any name is recognised by its marker file.
+        // A virtual environment under any name is recognized by its marker file.
         std::fs::write(d.join("myenv/pyvenv.cfg"), "home = /usr/bin\n").unwrap();
         std::fs::create_dir_all(d.join(".vscode")).unwrap();
         std::fs::write(d.join(".vscode/mcp.json"), r#"{"servers": {}}"#).unwrap();

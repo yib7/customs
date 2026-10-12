@@ -2,7 +2,7 @@ import AxeBuilder from '@axe-core/playwright';
 import { expect, test, type Page } from '@playwright/test';
 
 // axe-core over every page in both themes: WCAG 2.1 A and AA, including text contrast and
-// links told apart from the text around them by more than colour.
+// links told apart from the text around them by more than color.
 
 test.beforeEach(async ({ page }) => {
   await page.addInitScript(() => {

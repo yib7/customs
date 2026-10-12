@@ -1,7 +1,7 @@
 // Realistic fixtures for development and tests. Shapes follow the Rust server's types
 // (`Verdict` and `Event` in crates/customs/src/verdict.rs, `Stats` in store.rs). Snippets
 // imitate real malware but are inert strings; some deliberately contain HTML and bidi
-// control characters to prove the UI renders them as text.
+// control characters to prove the dashboard renders them as text.
 
 type Decision = 'allow' | 'warn' | 'block';
 
