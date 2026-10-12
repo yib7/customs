@@ -111,6 +111,10 @@ pub struct ServeArgs {
     /// for a container whose published port is itself bound to loopback.
     #[arg(long, env = "CUSTOMS_ALLOW_ANONYMOUS_POLICY_CHANGES", value_parser = BoolishValueParser::new())]
     pub allow_anonymous_policy_changes: bool,
+    /// Host names (comma-separated) under which the dashboard may change the policy, and a
+    /// loopback server answers, besides localhost and IP addresses.
+    #[arg(long, env = "CUSTOMS_ALLOWED_HOSTS", value_delimiter = ',')]
+    pub allowed_hosts: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -472,6 +476,7 @@ async fn serve(a: ServeArgs) -> anyhow::Result<()> {
     let opts = ServeOptions {
         admin_token,
         allow_anonymous_policy_changes: a.allow_anonymous_policy_changes,
+        allowed_hosts: a.allowed_hosts,
     };
     tracing::info!(%addr, "customs listening; run `customs env` for client settings");
     serve_with(listener, engine, ui, opts, shutdown_signal()).await

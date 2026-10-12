@@ -2805,20 +2805,30 @@ async fn policy_changes_need_the_admin_token_when_one_is_set() {
     h.stop().await;
 }
 
+/// A server listening beyond loopback without a token refuses policy changes. Which servers
+/// those are is `server::policy_auth_for` (unit-tested there); this serves the resulting
+/// state on loopback, so the test never listens on the network.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_network_facing_server_without_a_token_refuses_policy_changes() {
-    let h = Harness::start_serving(
-        |_| {},
+    use customs::server::{AppState, PolicyAuth};
+    let h = Harness::start(|_| {}).await;
+    let (_shutdown, rx) = tokio::sync::watch::channel(false);
+    let app = customs::server::router(
+        AppState {
+            engine: h.engine.clone(),
+            shutdown: rx,
+            policy_auth: PolicyAuth::Disabled,
+            allowed_hosts: Arc::from(Vec::new()),
+        },
         None,
-        Limits::default(),
-        "0.0.0.0:0",
-        ServeOptions::default(),
-    )
-    .await;
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await });
     let p: Value = h.get("/api/policy").await.json().await.unwrap();
     let r = h
         .http
-        .put(format!("{}/api/policy", h.base))
+        .put(format!("{base}/api/policy"))
         .json(&p)
         .send()
         .await
@@ -2830,22 +2840,7 @@ async fn a_network_facing_server_without_a_token_refuses_policy_changes() {
         .as_str()
         .unwrap()
         .contains("CUSTOMS_ADMIN_TOKEN"));
-    h.stop().await;
-
-    // The explicit opt-out restores anonymous changes.
-    let opts = ServeOptions {
-        allow_anonymous_policy_changes: true,
-        ..Default::default()
-    };
-    let h = Harness::start_serving(|_| {}, None, Limits::default(), "0.0.0.0:0", opts).await;
-    let r = h
-        .http
-        .put(format!("{}/api/policy", h.base))
-        .json(&p)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(r.status(), 200);
+    server.abort();
     h.stop().await;
 }
 
@@ -3441,5 +3436,37 @@ async fn upstream_credentials_are_redacted_but_kept() {
     let log = h.get("/api/policy/changes").await.text().await.unwrap();
     assert!(!log.contains("s3cret") && !log.contains("pw-two"), "{log}");
     assert!(log.contains("https://***@npm.example/registry"), "{log}");
+    h.stop().await;
+}
+
+/// `--allowed-hosts` (`CUSTOMS_ALLOWED_HOSTS`) comes in through the server's options, so
+/// the developer's own environment does not change what these tests see.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_allowed_host_name_may_change_the_policy() {
+    let opts = ServeOptions {
+        allowed_hosts: vec!["Customs".into()],
+        ..Default::default()
+    };
+    let h = Harness::start_serving(|_| {}, None, Limits::default(), "127.0.0.1:0", opts).await;
+    let p: Value = h.get("/api/policy").await.json().await.unwrap();
+    for (host, status) in [("customs:7878", 200), ("other.example:7878", 403)] {
+        let r = h
+            .http
+            .put(format!("{}/api/policy", h.base))
+            .header("host", host)
+            .json(&p)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), status, "{host}");
+    }
+    let r = h
+        .http
+        .get(format!("{}/api/events", h.base))
+        .header("host", "customs:7878")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
     h.stop().await;
 }

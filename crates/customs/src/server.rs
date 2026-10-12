@@ -1,7 +1,7 @@
 //! HTTP server assembly: routes, middleware, static dashboard, graceful shutdown.
 
 use std::future::Future;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -25,6 +25,9 @@ pub struct AppState {
     /// Flips to `true` when the server begins shutting down.
     pub shutdown: watch::Receiver<bool>,
     pub policy_auth: PolicyAuth,
+    /// Host names, beyond loopback names and IP literals, under which the policy may be
+    /// changed (lowercase, no port); see [`ServeOptions::allowed_hosts`].
+    pub allowed_hosts: Arc<[String]>,
 }
 
 /// Who may change the policy through `PUT /api/policy`.
@@ -103,6 +106,10 @@ pub struct ServeOptions {
     pub admin_token: Option<String>,
     /// Accept policy changes without a token on a server reachable from the network.
     pub allow_anonymous_policy_changes: bool,
+    /// Host names, beyond loopback names and IP literals, under which the policy may be
+    /// changed and a loopback server answers (`--allowed-hosts`, `CUSTOMS_ALLOWED_HOSTS`;
+    /// ports and case ignored).
+    pub allowed_hosts: Vec<String>,
 }
 
 /// Shortest admin token accepted.
@@ -134,7 +141,7 @@ pub fn router(state: AppState, ui_dir: Option<&Path>) -> Router {
         .route("/npm/{*rest}", any(npm::npm_any))
         .nest(
             "/api",
-            crate::api::router().layer(middleware::from_fn(guard_api)),
+            crate::api::router().layer(middleware::from_fn_with_state(state.clone(), guard_api)),
         )
         .route("/metrics", get(metrics))
         .route("/healthz", get(healthz));
@@ -152,18 +159,13 @@ pub fn router(state: AppState, ui_dir: Option<&Path>) -> Router {
         .with_state(state)
 }
 
-/// Host names, beyond loopback names and IP literals, under which the policy may be
-/// changed (`CUSTOMS_ALLOWED_HOSTS`, comma-separated, ports ignored).
-fn allowed_hosts() -> &'static [String] {
-    static HOSTS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
-    HOSTS.get_or_init(|| {
-        std::env::var("CUSTOMS_ALLOWED_HOSTS")
-            .unwrap_or_default()
-            .split(',')
-            .map(|h| strip_port(h.trim()).to_ascii_lowercase())
-            .filter(|h| !h.is_empty())
-            .collect()
-    })
+/// `names` as [`host_allowed`] compares them: trimmed, lowercase, without a port.
+fn normalize_hosts(names: &[String]) -> Arc<[String]> {
+    names
+        .iter()
+        .map(|h| strip_port(h.trim()).to_ascii_lowercase())
+        .filter(|h| !h.is_empty())
+        .collect()
 }
 
 fn strip_port(host: &str) -> &str {
@@ -202,7 +204,7 @@ pub fn origin_allowed(origin: &str, host: &str) -> bool {
 /// origins cannot read responses, but a cross-site form or fetch can still send one, and DNS
 /// rebinding makes the page same-origin: its host name resolves to 127.0.0.1, so the
 /// browser sends `Host: attacker.example`. Non-browser clients send no `Origin`.
-async fn guard_api(req: Request, next: Next) -> Response {
+async fn guard_api(State(state): State<AppState>, req: Request, next: Next) -> Response {
     if matches!(*req.method(), Method::GET | Method::HEAD | Method::OPTIONS) {
         return next.run(req).await;
     }
@@ -233,7 +235,7 @@ async fn guard_api(req: Request, next: Next) -> Response {
     }
     // Changing the policy can switch enforcement off, so it also needs a Host that DNS
     // rebinding cannot produce. Checks stay reachable under any name (team servers).
-    if is_policy && !host_allowed(&host, allowed_hosts()) {
+    if is_policy && !host_allowed(&host, &state.allowed_hosts) {
         return refuse(format!(
             "policy changes are accepted only on localhost, an IP address, or a host in \
              CUSTOMS_ALLOWED_HOSTS (got {host:?})"
@@ -247,7 +249,11 @@ async fn guard_api(req: Request, next: Next) -> Response {
 /// rebound to 127.0.0.1. Without this, such a page could read the event log (what this
 /// machine installs) and the policy. Requests without a `Host` (HTTP/2 carries the
 /// authority in the URI) are judged by the URI's authority.
-async fn guard_loopback_host(req: Request, next: Next) -> Response {
+async fn guard_loopback_host(
+    State(allowed): State<Arc<[String]>>,
+    req: Request,
+    next: Next,
+) -> Response {
     let host = req
         .headers()
         .get(header::HOST)
@@ -255,7 +261,7 @@ async fn guard_loopback_host(req: Request, next: Next) -> Response {
         .map(str::to_string)
         .or_else(|| req.uri().authority().map(|a| a.to_string()));
     if let Some(h) = host {
-        if !host_allowed(&h, allowed_hosts()) {
+        if !host_allowed(&h, &allowed) {
             tracing::warn!(host = %h, "request for a foreign host name refused");
             return (
                 StatusCode::FORBIDDEN,
@@ -311,17 +317,30 @@ async fn healthz(State(state): State<AppState>) -> Response {
         .into_response()
 }
 
-/// Serve until `shutdown` resolves, then drain in-flight requests.
-pub async fn serve_on(
-    listener: TcpListener,
-    engine: Arc<Engine>,
-    ui_dir: Option<PathBuf>,
-    shutdown: impl Future<Output = ()> + Send + 'static,
-) -> anyhow::Result<()> {
-    serve_with(listener, engine, ui_dir, ServeOptions::default(), shutdown).await
+/// Who may change the policy on a server listening on `ip`: with a token, its holders;
+/// without one, anyone on loopback (or with the opt-out), and nobody on a server the
+/// network can reach.
+pub fn policy_auth_for(ip: IpAddr, opts: &ServeOptions) -> anyhow::Result<PolicyAuth> {
+    Ok(match &opts.admin_token {
+        Some(t) => {
+            anyhow::ensure!(
+                t.len() >= MIN_ADMIN_TOKEN_LEN,
+                "the admin token must be at least {MIN_ADMIN_TOKEN_LEN} characters"
+            );
+            PolicyAuth::Token(t.as_str().into())
+        }
+        None if ip.is_loopback() || opts.allow_anonymous_policy_changes => PolicyAuth::Open,
+        None => {
+            tracing::warn!(
+                %ip,
+                "policy changes over the API are off: this server is reachable from the network                  and has no CUSTOMS_ADMIN_TOKEN"
+            );
+            PolicyAuth::Disabled
+        }
+    })
 }
 
-/// [`serve_on`] with [`ServeOptions`].
+/// Serve on `listener` until `shutdown` resolves, then drain in-flight requests.
 pub async fn serve_with(
     listener: TcpListener,
     engine: Arc<Engine>,
@@ -330,33 +349,21 @@ pub async fn serve_with(
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<()> {
     let addr = listener.local_addr()?;
-    let policy_auth = match opts.admin_token {
-        Some(t) => {
-            anyhow::ensure!(
-                t.len() >= MIN_ADMIN_TOKEN_LEN,
-                "the admin token must be at least {MIN_ADMIN_TOKEN_LEN} characters"
-            );
-            PolicyAuth::Token(t.into())
-        }
-        None if addr.ip().is_loopback() || opts.allow_anonymous_policy_changes => PolicyAuth::Open,
-        None => {
-            tracing::warn!(
-                %addr,
-                "policy changes over the API are off: this server is reachable from the network \
-                 and has no CUSTOMS_ADMIN_TOKEN"
-            );
-            PolicyAuth::Disabled
-        }
-    };
+    let policy_auth = policy_auth_for(addr.ip(), &opts)?;
+    let allowed_hosts = normalize_hosts(&opts.allowed_hosts);
     let (tx, rx) = watch::channel(false);
     let state = AppState {
         engine,
         shutdown: rx,
         policy_auth,
+        allowed_hosts: allowed_hosts.clone(),
     };
     let mut app = router(state, ui_dir.as_deref());
     if addr.ip().is_loopback() {
-        app = app.layer(middleware::from_fn(guard_loopback_host));
+        app = app.layer(middleware::from_fn_with_state(
+            allowed_hosts,
+            guard_loopback_host,
+        ));
     }
     axum::serve(
         listener,
@@ -453,6 +460,45 @@ mod tests {
             Some(StatusCode::FORBIDDEN)
         );
         assert!(!constant_time_eq(b"abc", b"abcd"));
+    }
+
+    #[test]
+    fn only_a_reachable_server_without_a_token_refuses_changes() {
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        let open = ServeOptions::default();
+        let opt_out = ServeOptions {
+            allow_anonymous_policy_changes: true,
+            ..Default::default()
+        };
+        let token = ServeOptions {
+            admin_token: Some("0123456789abcdef".into()),
+            ..Default::default()
+        };
+        for a in ["127.0.0.1", "::1"] {
+            assert!(
+                matches!(policy_auth_for(ip(a), &open), Ok(PolicyAuth::Open)),
+                "{a}"
+            );
+        }
+        for a in ["0.0.0.0", "192.0.2.1", "::"] {
+            assert!(
+                matches!(policy_auth_for(ip(a), &open), Ok(PolicyAuth::Disabled)),
+                "{a}"
+            );
+            assert!(
+                matches!(policy_auth_for(ip(a), &opt_out), Ok(PolicyAuth::Open)),
+                "{a}"
+            );
+            assert!(
+                matches!(policy_auth_for(ip(a), &token), Ok(PolicyAuth::Token(_))),
+                "{a}"
+            );
+        }
+        let short = ServeOptions {
+            admin_token: Some("short".into()),
+            ..Default::default()
+        };
+        assert!(policy_auth_for(ip("127.0.0.1"), &short).is_err());
     }
 
     #[test]

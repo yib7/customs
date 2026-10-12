@@ -35,7 +35,7 @@ pub fn now() -> DateTime<Utc> {
     Utc::now()
 }
 
-pub fn ts(t: DateTime<Utc>) -> String {
+fn ts(t: DateTime<Utc>) -> String {
     t.to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 

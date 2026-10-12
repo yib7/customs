@@ -764,7 +764,7 @@ proxies `/api` with the browser's `Host`, so its dashboard is same-origin as wel
 - `GET /api/policy`, `PUT /api/policy`: the active policy as JSON with the `customs.toml`
   keys (thresholds are `"model"` or a number). `PUT` switches enforcement off when asked,
   so it is accepted only with a `Host` that DNS rebinding cannot produce: an IP address,
-  `localhost` or `*.localhost`, or a name in `CUSTOMS_ALLOWED_HOSTS` (comma-separated;
+  `localhost` or `*.localhost`, or a name in `--allowed-hosts`/`CUSTOMS_ALLOWED_HOSTS` (comma-separated;
   set it for a team server reached by name). A page that resolves its own host name to
   127.0.0.1 is same-origin to the browser, so CORS alone would not stop it. Any
   state-changing API request carrying a browser `Origin` other than the dashboard's own
