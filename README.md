@@ -89,9 +89,18 @@ flowchart LR
 
 ## Setup
 
-Customs runs on Linux and macOS. You need git, [rustup](https://rustup.rs) (it installs
-the Rust version pinned in `rust-toolchain.toml`) and [Node.js 24](https://nodejs.org)
-with npm. The first build takes a few minutes.
+**Requirements**
+
+* Linux or macOS. Windows is not supported: nothing is built or tested there.
+* git and a C compiler (`build-essential` on Debian and Ubuntu, the Xcode Command Line
+  Tools on macOS).
+* [rustup](https://rustup.rs). The first `cargo` command installs Rust 1.99.0, the version
+  pinned in `rust-toolchain.toml`.
+* [Node.js 24](https://nodejs.org) with npm (pinned in `web/.nvmrc`).
+* No accounts and no API keys. Customs only talks to the public PyPI and npm registries.
+
+Python is not needed to run Customs; it is only for retraining the models (see
+[Development](#development)). The first build takes a few minutes.
 
 **Step 1.** Clone the repository.
 
@@ -100,37 +109,37 @@ git clone https://github.com/yib7/customs.git customs
 cd customs
 ```
 
-**Step 2.** Build the dashboard.
+**Step 2.** Build the dashboard and the binary.
 
 ```sh
 npm --prefix web ci
 npm --prefix web run build
-```
-
-**Step 3.** Build the binary.
-
-```sh
 cargo build --release -p customs
 ```
 
-**Step 4.** Start the firewall and leave it running. It serves the registry proxy, the API
-and the dashboard on http://127.0.0.1:7878.
+**Step 3.** Start the firewall and leave it running. It logs a `customs listening` line
+ending in `addr=127.0.0.1:7878`, and serves the registry proxy, the API and the dashboard
+there.
 
 ```sh
 ./target/release/customs serve
 ```
 
-**Step 5.** In a second terminal, from the same directory, check a package name that an
+**Step 4.** In a second terminal, from the same directory, check a package name that an
 LLM might invent.
 
 ```sh
 ./target/release/customs check pypi reqeusts
 ```
 
-It prints `BLOCK` with the reason: `reqeusts` does not exist on PyPI. Open
-http://127.0.0.1:7878 to see the verdict in the dashboard.
+It prints `BLOCK`, because `reqeusts` does not exist on PyPI.
+
+**Step 5.** Open http://127.0.0.1:7878 in a browser. The check from Step 4 is at the top of
+the live feed; click it for the reasons.
 
 ## Usage
+
+Run these in the second terminal, from the repository directory, while the server is up.
 
 ```sh
 eval "$(./target/release/customs env)"   # route pip, uv, pipenv, PDM, npm, pnpm, Yarn, Bun and Deno through it
@@ -140,10 +149,7 @@ eval "$(./target/release/customs env)"   # route pip, uv, pipenv, PDM, npm, pnpm
 ./target/release/customs diff npm axios              # what the newest release changes since the one before
 ```
 
-`cargo install --path crates/customs` puts `customs` on your `PATH` instead. To run the
-server in Docker with Prometheus beside it: `docker compose -f deploy/docker-compose.yml up`.
-
-**Claude Code:** install the binary (`cargo install --path crates/customs`), then merge
+**Claude Code:** put the binary on your `PATH` (`cargo install --path crates/customs`), then merge
 [`deploy/hooks/claude-code-settings.json`](deploy/hooks/claude-code-settings.json) into
 `~/.claude/settings.json`. Before the agent runs any shell command, the hook finds
 package installs in it (`pip install`, `uv add`, `npm i`, `npx`, requirement files,
@@ -163,7 +169,8 @@ confirmation. A server set up for a team takes policy changes only with its admi
 reverse proxy or ingress that terminates TLS, and that token never crosses the network in
 the clear. See [`deploy/hooks/README.md`](deploy/hooks/README.md).
 
-`python/scripts/demo.sh` runs the whole tour against the live registries. It and the
+`python/scripts/demo.sh` runs the whole tour against the live registries and needs Python 3
+and curl. It starts its own server on port 7878, so stop the one from Step 3 first. It and the
 `python/scripts/replay.py` and `python/scripts/loadtest.py` harnesses run `$CUSTOMS_BIN` when it is set,
 else `target/release/customs` (under `$CARGO_TARGET_DIR` when that is set).
 
@@ -394,13 +401,19 @@ methodology, is in [`docs/EVALUATION.md`](docs/EVALUATION.md).
 
 ## Development
 
-The Python side uses [uv](https://docs.astral.sh/uv/) and its lockfile.
+The Python side uses [uv](https://docs.astral.sh/uv/), which installs Python 3.14 (pinned in
+`python/.python-version`) and the locked dependencies, with the CPU build of PyTorch on
+Linux. Run each line from the repository root:
 
 ```sh
 cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings
-cd python && uv sync --extra dev --extra nn && uv run pytest
-cd web && npm ci && npm run lint && npm run test && npm run e2e
+(cd python && uv sync --extra dev && uv run pytest)
+(cd web && npm ci && npx playwright install --with-deps chromium && npm run lint && npm run test && npm run e2e)
 ```
+
+`cargo build --workspace` also builds the Python bindings in `crates/customs-py`, which
+link libpython and need the Python development files (`python3-dev` on Debian and Ubuntu).
+Plain `cargo build` leaves that crate out, and the test and lint commands above never link it.
 
 Rebuilding the dataset and models from scratch (downloads about 9 GB, a few hours on
 4 cores; everything lands in `$CUSTOMS_DATA`, never in the repository):

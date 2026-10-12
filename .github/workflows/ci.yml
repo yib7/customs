@@ -61,10 +61,9 @@ jobs:
       - uses: astral-sh/setup-uv@v10.2.0
         with:
           enable-cache: true
-      # Fails when uv.lock is out of date with pyproject.toml.
+      # Fails when uv.lock is out of date with pyproject.toml. The lock resolves torch to
+      # the CPU build on Linux (pyproject.toml, [tool.uv.sources]).
       - run: uv sync --locked --extra dev
-      # The CPU build of torch; the locked default pulls several GB of CUDA libraries.
-      - run: uv pip install torch --index-url https://download.pytorch.org/whl/cpu
       - run: uv run --no-sync ruff check customs_ml tests scripts
       - run: uv run --no-sync ruff format --check customs_ml tests scripts
       - run: uv run --no-sync pytest -q
@@ -159,6 +158,11 @@ jobs:
                           time.sleep(0.2)
                   else:
                       sys.exit("the server did not come up")
+                  # The README says the server prints its address.
+                  log = open("serve.log").read()
+                  print(log, flush=True)
+                  if "127.0.0.1:7878" not in log:
+                      sys.exit("customs serve did not print its address")
                   continue
               r = subprocess.run(cmd, shell=True, capture_output=True, text=True)
               print(r.stdout + r.stderr, flush=True)

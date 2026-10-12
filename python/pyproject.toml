@@ -19,10 +19,21 @@ dependencies = [
 
 [project.optional-dependencies]
 nn = ["torch>=2.4"]
-dev = ["pytest>=8", "ruff>=0.6"]
+# The tests exercise the CNN, so dev includes torch.
+dev = ["pytest>=8", "ruff>=0.6", "torch>=2.4"]
 
 [project.scripts]
 customs-ml = "customs_ml.cli:main"
+
+# On Linux, torch comes from the CPU-only index: the PyPI wheel pulls several GB of CUDA
+# libraries. The macOS wheel on PyPI is already CPU-only.
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
 
 [build-system]
 requires = ["setuptools>=69"]

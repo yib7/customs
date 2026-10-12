@@ -1,6 +1,9 @@
 [workspace]
 resolver = "2"
 members = ["crates/customs-scan", "crates/customs-model", "crates/customs", "crates/customs-py"]
+# A plain `cargo build` leaves out the Python bindings, whose library links libpython (the
+# Python development files); maturin builds them, and `--workspace` still includes them.
+default-members = ["crates/customs-scan", "crates/customs-model", "crates/customs"]
 
 [workspace.package]
 version = "0.9.0"
