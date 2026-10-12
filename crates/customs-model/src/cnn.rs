@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use base64::Engine as _;
 use serde::Deserialize;
 
-use crate::{sigmoid, ModelError};
+use crate::ModelError;
 
 const WHAT: &str = "code_nn";
 pub const PAD_ID: u32 = 0;
@@ -328,10 +328,6 @@ impl CodeCnn {
     /// Output logit for a token stream.
     pub fn logit<S: AsRef<str>>(&self, tokens: &[S]) -> f32 {
         self.logit_ids(&self.encode(tokens))
-    }
-
-    pub fn prob<S: AsRef<str>>(&self, tokens: &[S]) -> f64 {
-        sigmoid(self.logit(tokens) as f64)
     }
 
     /// Forward pass over already-encoded ids (`ids.len()` at least the largest kernel).

@@ -15,7 +15,7 @@ The hook always exits 0 and speaks JSON on stdout, for example:
 
 ```json
 {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
-  "permissionDecisionReason": "Customs blocked this install:\n- pypi:reqeusts: 'reqeusts' does not exist on PyPI (possibly a hallucinated or mistyped name); model risk 0.83 (1 edit from popular package 'requests') [http://127.0.0.1:7878/api/verdicts/12]\n..."}}
+  "permissionDecisionReason": "Customs blocked this install:\n- pypi:reqeusts: 'reqeusts' does not exist on PyPI (possibly a hallucinated or mistyped name); name: 1 edit from popular package 'requests' [http://127.0.0.1:7878/api/verdicts/12]\n..."}}
 ```
 
 ## Install

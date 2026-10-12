@@ -451,8 +451,8 @@ archives (22,258 benign) with these changes found no rejection and no `unread_co
 and neither did 1,488 benign archives downloaded again as published (the corpus stores
 benign packages repacked, which would hide top-level damage).
 
-Archives above the 256 MiB scan limit are scored on name and metadata only
-(`not_scanned`): large legitimate wheels are common, PyPI caps uploads at 100 MB by
+Archives above the 256 MiB scan limit are not scored by the models (`not_scanned`, no
+risk) and are judged on metadata and the policy rules: large legitimate wheels are common, PyPI caps uploads at 100 MB by
 default, and age and history rules still apply. What such an archive would run at
 install is still read, by streaming entry headers from disk: an npm install hook or a
 root `binding.gyp` (the implicit `node-gyp rebuild`), any sdist (its build runs code), a
@@ -651,12 +651,20 @@ logit). A component is unavailable when its artifact is not shipped or its input
 (no features, no tokens, no name). `z = bias + sum_c w_c * logit_c` over available
 components, with each logit first bounded to `[-clip, clip]` when `clip` is set, using the
 fallback whose `missing` set equals the unavailable set (a fallback
-may carry its own `calibration`); when none matches, the primary weights are applied to
-the components that ran (`weight_set` `"partial:<missing>"`). `risk = calibrate(sigmoid(z))`;
-`risk >= block` blocks, `risk >= warn` warns. Verdict `scores` are per-component
+may carry its own `calibration`). When none matches there is no risk (`null`): weights
+fitted with the code models present say nothing about, say, a name scored alone. A file
+can opt in with `"partial": true` to apply the primary weights to the components that ran
+instead (`weight_set` `"partial:<missing>"`); the equal-weight stacker used when no
+`ensemble.json` is shipped does this. The shipped ensemble has fallbacks for a missing CNN,
+a missing name, or both, so a package that was not scanned (nonexistent, above the size
+limits, or rejected by the scanner) has no model risk and is judged by the policy rules. `risk = calibrate(sigmoid(z))`;
+`risk >= block` blocks, `risk >= warn` warns; a non-finite `z` or risk fails closed
+(risk 1, `weight_set` `"non_finite:<set>"`), and name n-gram weights must be finite to load.
+Verdict `scores` are per-component
 probabilities: the gbdt calibrated probability, sigmoid of the CNN and name logits.
 
-`metrics.json`: the evaluation summary served by `/api/model` (section 7).
+`metrics.json`: the evaluation summary served by `/api/model` (section 7). It is informational:
+an unreadable or malformed file is logged and ignored, never a load error.
 
 ## 6. Verdict
 
@@ -695,7 +703,9 @@ rules of section 8 (`provenance_dropped`, `install_script_added`, `publisher_cha
 block by default), `not_scanned`
 (archive above the scan size limit).
 `reasons` mix model features (positive contributions to the stacked logit, largest first)
-and name signals (`name_dist1`, `name_contains_popular_token`, ...). In `monitor` mode the
+and name signals (`name_dist1`, `name_contains_popular_token`, ...). A name signal that
+explains a lookalike ("1 edit from popular package 'requests'") is always listed, with its
+true stacked contribution, which can be zero or negative. In `monitor` mode the
 proxy records the verdict and serves the artifact anyway (`mode` says which applied).
 
 ## 7. HTTP interface of `customs serve`

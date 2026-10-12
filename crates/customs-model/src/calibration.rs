@@ -54,6 +54,15 @@ impl Calibration {
                 "calibration contains a non-finite value",
             ));
         }
+        if self.y.windows(2).any(|w| w[1] < w[0]) {
+            return Err(ModelError::invalid(
+                what,
+                "calibration y is not non-decreasing",
+            ));
+        }
+        if self.y.iter().any(|v| !(0.0..=1.0).contains(v)) {
+            return Err(ModelError::invalid(what, "calibration y is outside [0, 1]"));
+        }
         Ok(())
     }
 
@@ -127,5 +136,14 @@ mod tests {
             y: vec![0.2, 0.8],
         };
         assert!(c.validate("t").is_ok());
+        // y must be a non-decreasing probability.
+        for y in [vec![0.5, 0.2], vec![0.0, 1.5], vec![-0.1, 0.5]] {
+            let c = Calibration {
+                method: "isotonic".into(),
+                x: vec![0.1, 0.9],
+                y,
+            };
+            assert!(c.validate("t").is_err(), "{:?}", c.y);
+        }
     }
 }

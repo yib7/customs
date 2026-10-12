@@ -53,6 +53,9 @@ pub struct Models {
     /// False when `ensemble.json` was absent and equal weights are in use.
     pub ensemble_shipped: bool,
     pub metrics: Option<serde_json::Value>,
+    /// Why `metrics` is `None` although a metrics file was named or present. The file is
+    /// informational, so a bad one is reported here instead of failing the load.
+    pub metrics_error: Option<String>,
 }
 
 /// Inputs for one assessment. Any of them may be absent.
@@ -122,6 +125,7 @@ impl Models {
             ensemble: Ensemble::unweighted(),
             ensemble_shipped: false,
             metrics: None,
+            metrics_error: None,
         }
     }
 
@@ -153,6 +157,26 @@ impl Models {
             .as_deref()
             .map(|f| TreeEnsemble::from_json(&read("code_gbdt", f)?))
             .transpose()?;
+        if let Some(m) = &code_gbdt {
+            // An absent feature takes each split's missing-value branch, which training
+            // (LightGBM with `use_missing: False`) never used, so require every one.
+            let produced = customs_scan::feature_names();
+            let unknown: Vec<&str> = m
+                .feature_names()
+                .iter()
+                .map(String::as_str)
+                .filter(|n| !produced.contains(n))
+                .collect();
+            if !unknown.is_empty() {
+                return Err(ModelError::invalid(
+                    "code_gbdt",
+                    format!(
+                        "features not produced by customs-scan: {}",
+                        unknown.join(", ")
+                    ),
+                ));
+            }
+        }
         let name_model = manifest
             .name_model
             .as_deref()
@@ -172,12 +196,13 @@ impl Models {
                 .exists()
                 .then(|| "metrics.json".to_string())
         });
-        let metrics = match metrics_file {
-            Some(f) => Some(
-                serde_json::from_str(&read("metrics", &f)?)
-                    .map_err(|e| ModelError::parse("metrics", e))?,
-            ),
-            None => None,
+        let (metrics, metrics_error) = match metrics_file.map(|f| {
+            read("metrics", &f)
+                .and_then(|t| serde_json::from_str(&t).map_err(|e| ModelError::parse("metrics", e)))
+        }) {
+            Some(Ok(m)) => (Some(m), None),
+            Some(Err(e)) => (None, Some(e.to_string())),
+            None => (None, None),
         };
         Ok(Self {
             dir,
@@ -188,6 +213,7 @@ impl Models {
             ensemble,
             ensemble_shipped,
             metrics,
+            metrics_error,
         })
     }
 
@@ -284,17 +310,20 @@ impl Models {
                 });
             }
         }
+        let mut lookalike = None;
         if let Some(ns) = &name {
             let w = self.ensemble.weight_for(&logits, "name") * self.ensemble.clip_scale(ns.logit);
-            // Prefer the human explanation (edit distance to a popular name, typo, scope)
-            // when the name model leans malicious; otherwise report its largest term.
+            // The human explanation (edit distance to a popular name, typo, scope) is always
+            // shown with its true stacked contribution, which may be zero or negative: it is
+            // what names the package a typosquat imitates, whatever weight the stacker gives
+            // the name model (the shipped one gives it about none). Otherwise report the
+            // name model's largest term when it raised the risk.
             let explained = ns
                 .explanation
                 .as_ref()
-                .zip(ns.features.explanation_feature())
-                .filter(|_| w * ns.logit > 0.0);
+                .zip(ns.features.explanation_feature());
             if let Some((text, (feat, value))) = explained {
-                reasons.push(Reason {
+                lookalike = Some(Reason {
                     feature: format!("name_{feat}"),
                     value: Some(value),
                     contribution: w * ns.logit,
@@ -316,12 +345,18 @@ impl Models {
                 }
             }
         }
-        reasons.sort_by(|a, b| {
+        let by_contribution = |a: &Reason, b: &Reason| {
             b.contribution
                 .partial_cmp(&a.contribution)
                 .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        reasons.truncate(6);
+        };
+        reasons.sort_by(by_contribution);
+        // Six reasons at most, and the lookalike explanation always keeps its place.
+        reasons.truncate(if lookalike.is_some() { 5 } else { 6 });
+        if let Some(r) = lookalike {
+            let at = reasons.partition_point(|x| by_contribution(x, &r).is_le());
+            reasons.insert(at, r);
+        }
 
         Assessment {
             risk,

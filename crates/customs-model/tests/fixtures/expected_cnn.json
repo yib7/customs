@@ -1335,6 +1335,65 @@
     ".",
     "ID"
    ]
+  },
+  {
+   "ids": [
+    1,
+    5,
+    1,
+    15,
+    27,
+    6,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "logit": 0.2823103931997704,
+   "tokens": [
+    "setup",
+    "(",
+    "author_email",
+    "=",
+    "maintainer@example.com",
+    ")"
+   ]
+  },
+  {
+   "ids": [
+    23,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "logit": 0.036776251410029166,
+   "tokens": [
+    "dev@example.org",
+    "Dev@Example.org",
+    "other@example.org",
+    "a@b",
+    "x@y.c",
+    "user@host.co.uk",
+    "dev@example.org."
+   ]
   }
  ]
 }
