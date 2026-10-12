@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'rea
 import { api } from '../api/client';
 import type { FileChange, ReleaseDiff, Verdict } from '../api/types';
 import { formatDateTime, safeLabel } from '../lib/format';
-import { btn, errorMessage, inputCls } from './styles';
+import { btn, errorMessage, fieldCls } from './styles';
 import { Card } from './ui';
 import { EvidenceList } from './VerdictParts';
 
@@ -168,7 +168,7 @@ export function ReleaseDiffCard({ verdict }: { verdict: Verdict }) {
         <label className="flex min-w-0 flex-col gap-1 text-xs text-ink-2">
           Earlier version
           <input
-            className={`${inputCls} w-44 font-mono`}
+            className={`${fieldCls} w-44 font-mono`}
             value={from}
             onChange={(e) => setFrom(e.target.value)}
             placeholder="the previous release"

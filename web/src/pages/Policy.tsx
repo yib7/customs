@@ -3,7 +3,7 @@ import { ApiError, api } from '../api/client';
 import type { HistoryRule, ModelInfo, Policy, RuleSeverity } from '../api/types';
 import { ChipInput } from '../components/ChipInput';
 import { IconCheck } from '../components/Icons';
-import { btn, errorMessage, inputCls } from '../components/styles';
+import { btn, errorMessage, fieldCls, inputCls } from '../components/styles';
 import { Card, ErrorBox, Loading, PageHeader } from '../components/ui';
 import { formatDateTime, relativeTime, safeLabel } from '../lib/format';
 import { describeFieldChange } from '../lib/policyLog';
@@ -133,7 +133,7 @@ function SeverityField({
       </span>
       <select
         id={id}
-        className={`${inputCls} w-28 shrink-0 pr-8`}
+        className={`${fieldCls} w-28 shrink-0 pr-8`}
         value={value}
         onChange={(e) => {
           const v = e.target.value;
@@ -207,7 +207,7 @@ function ThresholdField({
           <input
             type="text"
             inputMode="decimal"
-            className={`${inputCls} w-28 font-mono`}
+            className={`${fieldCls} w-28 font-mono`}
             aria-label={`${label}, custom value between 0 and 1`}
             value={value}
             placeholder={modelValue !== null ? modelValue.toFixed(2) : '0.50'}
@@ -420,7 +420,7 @@ function PolicyForm({
             id="min-age"
             type="text"
             inputMode="numeric"
-            className={`${inputCls} mt-2 w-28 font-mono`}
+            className={`${fieldCls} mt-2 w-28 font-mono`}
             value={draft.minAgeDays}
             onChange={(e) => set('minAgeDays', e.target.value, 'min_age_days')}
             aria-invalid={errors.min_age_days ? true : undefined}
@@ -479,7 +479,7 @@ function PolicyForm({
               id="established-top"
               type="text"
               inputMode="numeric"
-              className={`${inputCls} mt-2 w-28 font-mono`}
+              className={`${fieldCls} mt-2 w-28 font-mono`}
               value={draft.establishedTop}
               onChange={(e) => set('establishedTop', e.target.value, 'established.top')}
               aria-invalid={errors['established.top'] ? true : undefined}
@@ -496,7 +496,7 @@ function PolicyForm({
               id="established-age"
               type="text"
               inputMode="numeric"
-              className={`${inputCls} mt-2 w-28 font-mono`}
+              className={`${fieldCls} mt-2 w-28 font-mono`}
               value={draft.establishedMinAgeDays}
               onChange={(e) => set('establishedMinAgeDays', e.target.value, 'established.min_age_days')}
               aria-invalid={errors['established.min_age_days'] ? true : undefined}
@@ -579,7 +579,7 @@ function PolicyForm({
             id="dormant-days"
             type="text"
             inputMode="numeric"
-            className={`${inputCls} mt-2 w-28 font-mono`}
+            className={`${fieldCls} mt-2 w-28 font-mono`}
             value={draft.dormantDays}
             onChange={(e) => set('dormantDays', e.target.value, 'dormant_days')}
             aria-invalid={errors.dormant_days ? true : undefined}
@@ -599,7 +599,7 @@ function PolicyForm({
             id="history-window-days"
             type="text"
             inputMode="numeric"
-            className={`${inputCls} mt-2 w-28 font-mono`}
+            className={`${fieldCls} mt-2 w-28 font-mono`}
             value={draft.historyWindowDays}
             onChange={(e) => set('historyWindowDays', e.target.value, 'history_window_days')}
             aria-invalid={errors.history_window_days ? true : undefined}
@@ -616,7 +616,7 @@ function PolicyForm({
             id="young-dependency-days"
             type="text"
             inputMode="numeric"
-            className={`${inputCls} mt-2 w-28 font-mono`}
+            className={`${fieldCls} mt-2 w-28 font-mono`}
             value={draft.youngDependencyDays}
             onChange={(e) => set('youngDependencyDays', e.target.value, 'young_dependency_days')}
             aria-invalid={errors.young_dependency_days ? true : undefined}

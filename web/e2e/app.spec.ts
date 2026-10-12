@@ -192,6 +192,19 @@ test('policy edits are validated and saved', async ({ page }) => {
   await expect(page.getByRole('radio', { name: /Monitor/ })).toBeChecked();
 });
 
+test('rule selects and short number fields keep their width, leaving the text room', async ({ page }) => {
+  await page.goto('/policy');
+  const select = page.getByRole('combobox', { name: 'Code the interpreter reads differently from the scanner' });
+  const label = page.locator('label[for="rule-hidden_code"]');
+  const selectBox = await select.boundingBox();
+  const labelBox = await label.boundingBox();
+  expect(selectBox?.width ?? 0).toBeLessThan(160);
+  // The label sits on one line, not one word per line.
+  expect(labelBox?.height ?? 0).toBeLessThan(30);
+  const age = await page.getByLabel('Minimum age (days)').boundingBox();
+  expect(age?.width ?? 0).toBeLessThan(160);
+});
+
 test('theme toggle persists and follows the system by default', async ({ page }) => {
   await page.emulateMedia({ colorScheme: 'dark' });
   await page.goto('/model');

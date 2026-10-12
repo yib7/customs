@@ -9,8 +9,12 @@ export const btn = {
     'inline-flex items-center justify-center gap-1.5 rounded-md px-2 py-1 text-sm text-ink-2 hover:bg-surface-2 hover:text-ink disabled:opacity-50',
 };
 
-export const inputCls =
-  'w-full rounded-lg border border-line-strong bg-surface px-3 py-2 text-sm text-ink placeholder:text-muted focus:border-focus focus:outline-none focus-visible:outline-2 focus-visible:outline-focus aria-[invalid=true]:border-block';
+/** Input styling without a width, for fields that set their own (`w-28`). */
+export const fieldCls =
+  'rounded-lg border border-line-strong bg-surface px-3 py-2 text-sm text-ink placeholder:text-muted focus:border-focus focus:outline-none focus-visible:outline-2 focus-visible:outline-focus aria-[invalid=true]:border-block';
+
+/** A full-width input. Tailwind orders `w-full` after `w-28`, so a width cannot be added to this. */
+export const inputCls = `${fieldCls} w-full`;
 
 export function errorMessage(e: unknown): string {
   if (e instanceof ApiError) return e.message;
