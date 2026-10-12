@@ -501,6 +501,7 @@ fn fake_scanner(calls: Arc<AtomicUsize>) -> ScanFn {
             } else {
                 vec![]
             },
+            hidden_code: vec![],
         })
     })
 }

@@ -15,6 +15,7 @@ mod installer;
 mod large;
 mod lexer;
 mod manifest;
+mod shadow;
 mod surface;
 mod tokens;
 
@@ -146,6 +147,14 @@ pub struct ScanReport {
     /// developer's own agent as its payload (the s1ngularity compromise of Nx).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agent_bypass: Vec<String>,
+    /// Install-time code the interpreter runs but the feature lexers do not see, each as
+    /// `file:line: indicator, ... (why)`: code after a bare carriage return, a Unicode
+    /// line separator or a backslash-CRLF continuation, code inside Python f-string
+    /// fields, modules imported past a byte-order mark, and wheel `.data` package files
+    /// that install as top-level packages. Found by a second, interpreter-faithful pass
+    /// over install-surface files; never a model input.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hidden_code: Vec<String>,
 }
 
 /// Indicators that make a `.pth` file a startup hook worth blocking. Across the corpus none
@@ -460,6 +469,10 @@ struct Scanner<'a> {
     install_surface: Vec<String>,
     errors: Vec<String>,
     n_npm_install_scripts: u32,
+    /// `unread_code` labels found while building the install surface.
+    unread: Vec<String>,
+    /// JavaScript files whose relative requires the install surface follows.
+    follows_js: HashSet<usize>,
 }
 
 impl<'a> Scanner<'a> {
@@ -480,6 +493,8 @@ impl<'a> Scanner<'a> {
             install_surface: Vec::new(),
             errors: Vec::new(),
             n_npm_install_scripts: 0,
+            unread: Vec::new(),
+            follows_js: HashSet::new(),
         }
     }
 
@@ -648,6 +663,27 @@ impl<'a> Scanner<'a> {
                 &mut script_files,
             );
         }
+        // npm tests the hooks for truth, after dropping any that are not strings, so an
+        // empty or non-string `install` still gets `node-gyp rebuild`. The surface above
+        // keys on presence, which no npm tooling writes otherwise; flag the gap rather than
+        // change what is read.
+        let truthy = |h: &str| {
+            scripts
+                .and_then(|s| s.get(h))
+                .and_then(|v| v.as_str())
+                .is_some_and(|c| !c.is_empty())
+        };
+        if gypfile
+            && (has_hook("install") || has_hook("preinstall"))
+            && !truthy("install")
+            && !truthy("preinstall")
+        {
+            self.unread.push(
+                "binding.gyp (npm runs node-gyp rebuild: the install script is empty or not a \
+                 string)"
+                    .into(),
+            );
+        }
         if gypfile && runs_gyp {
             let gyp = self.text_of("binding.gyp").unwrap_or_default();
             for (cmd, line) in surface::gyp_commands(&gyp) {
@@ -686,6 +722,7 @@ impl<'a> Scanner<'a> {
             }
             frontier = next;
         }
+        self.follows_js = seen;
         let main = pj
             .get("main")
             .and_then(|m| m.as_str())
@@ -912,6 +949,209 @@ impl<'a> Scanner<'a> {
     }
 }
 
+impl<'a> Scanner<'a> {
+    /// Archive files that run at install, import or interpreter start: the install
+    /// surface, plus wheel `.data/purelib` and `.data/platlib` files that install as a
+    /// top-level package or site hook. Pairs of (entry, unit), in entry order.
+    fn runs_early(&self) -> Vec<(usize, usize)> {
+        let mut out: Vec<(usize, usize)> = self
+            .entry_unit
+            .iter()
+            .filter(|(&i, &u)| {
+                self.units[u].inst
+                    || (self.eco == Ecosystem::Pypi
+                        && wheel_data_path(&self.c.entries[i].path)
+                            .is_some_and(|p| top_level_init(p).is_some() || is_site_hook(p)))
+            })
+            .map(|(&i, &u)| (i, u))
+            .collect();
+        out.sort_unstable();
+        out
+    }
+
+    /// Python files that run early and declare a coding Python decodes differently from
+    /// the bytes the scanner lexed, as `unread_code` labels.
+    fn coding_unread(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for (i, u) in self.runs_early() {
+            if self.units[u].lang != Lang::Python {
+                continue;
+            }
+            let e = &self.c.entries[i];
+            for codec in shadow::coding_cookies(&self.units[u].text) {
+                if !shadow::ascii_transparent(&codec, &e.data) {
+                    out.push(format!(
+                        "{} (declares coding {codec}; Python decodes it differently)",
+                        e.path
+                    ));
+                    break;
+                }
+            }
+        }
+        out
+    }
+
+    /// Install-time code the feature pass missed (see the `shadow` module), as
+    /// `hidden_code` labels: indicators that only the interpreter's reading of a file has,
+    /// modules imported only in that reading, and wheel `.data` files that install as a
+    /// top-level package.
+    fn hidden_code(&self, analyses: &[FileAnalysis]) -> Vec<String> {
+        const MAX_FOLLOWED: usize = 16;
+        let mut out = Vec::new();
+        let mut followed: HashSet<usize> = HashSet::new();
+        for (idx, u) in self.runs_early() {
+            let unit = &self.units[u];
+            if unit.lang == Lang::Shell {
+                continue;
+            }
+            let path = &self.c.entries[idx].path;
+            let view = shadow::view(&unit.text, unit.lang);
+            let seen = view.as_ref().map(|v| {
+                let text = v.text.as_deref().unwrap_or(&unit.text);
+                indicators::analyze_with(text, unit.lang, v.mode)
+            });
+            if let (Some(v), Some(seen)) = (&view, &seen) {
+                let main = &analyses[u];
+                let found = if v.mode.fstring_fields {
+                    let plain = v
+                        .text
+                        .as_deref()
+                        .map(|t| indicators::analyze_with(t, unit.lang, lexer::LexMode::default()));
+                    shadow::more_with_fields(main, plain.as_ref().unwrap_or(main), seen)
+                } else {
+                    shadow::more(main, seen)
+                };
+                if let Some((line, names)) = found {
+                    out.push(format!("{path}:{line}: {names} {}", v.label()));
+                }
+            }
+            if let Some(pkg) = wheel_data_path(path).and_then(top_level_init) {
+                if let Some((line, names)) = shadow::any(seen.as_ref().unwrap_or(&analyses[u])) {
+                    out.push(format!(
+                        "{path}:{line}: {names} (installs as {pkg}/__init__.py, which runs on \
+                         import)"
+                    ));
+                }
+            }
+            // Imports that only the interpreter's reading has, from files whose imports
+            // the install surface follows.
+            let (Some(v), Some(seen)) = (&view, &seen) else {
+                continue;
+            };
+            let Some(text) = v.text.as_deref().filter(|_| unit.inst) else {
+                continue;
+            };
+            let cause = format!("(imported by {path} {})", v.import_cause());
+            let mut frontier = match unit.lang {
+                Lang::Python if self.follows_imports(idx) => {
+                    let had = indicators::python_imports(&unit.text);
+                    let dir = path.rsplit_once('/').map_or("", |(d, _)| d);
+                    indicators::python_imports(text)
+                        .into_iter()
+                        .filter(|imp| !had.contains(imp))
+                        .flat_map(|imp| self.python_module_files(dir, &imp))
+                        .filter_map(|p| self.index.get(p.as_str()).copied())
+                        .collect()
+                }
+                Lang::Js if self.follows_js.contains(&idx) => {
+                    let had = &analyses[u].relative_imports;
+                    let fresh: Vec<String> = seen
+                        .relative_imports
+                        .iter()
+                        .filter(|r| !had.contains(r))
+                        .cloned()
+                        .collect();
+                    self.js_requires(path, &fresh)
+                }
+                _ => Vec::new(),
+            };
+            // Follow on from there in each file's own interpreter reading, up to the
+            // surface's own hop limit.
+            for _ in 0..3 {
+                let mut next = Vec::new();
+                for i in frontier {
+                    let on_surface = self.entry_unit.get(&i).is_some_and(|&w| self.units[w].inst);
+                    let e = &self.c.entries[i];
+                    if on_surface
+                        || !e.full
+                        || followed.len() >= MAX_FOLLOWED
+                        || !followed.insert(i)
+                    {
+                        continue;
+                    }
+                    let raw = String::from_utf8_lossy(&e.data);
+                    let lang = unit.lang;
+                    let view = shadow::view(&raw, lang);
+                    let text = view
+                        .as_ref()
+                        .and_then(|v| v.text.as_deref())
+                        .unwrap_or(&raw);
+                    let mode = view.as_ref().map(|v| v.mode).unwrap_or_default();
+                    let a = indicators::analyze_with(text, lang, mode);
+                    if let Some((line, names)) = shadow::any(&a) {
+                        out.push(format!("{}:{line}: {names} {cause}", e.path));
+                    }
+                    let dir = e.path.rsplit_once('/').map_or("", |(d, _)| d);
+                    match lang {
+                        Lang::Python => next.extend(
+                            indicators::python_imports(text)
+                                .iter()
+                                .flat_map(|imp| self.python_module_files(dir, imp))
+                                .filter_map(|p| self.index.get(p.as_str()).copied()),
+                        ),
+                        _ => next.extend(self.js_requires(&e.path, &a.relative_imports)),
+                    }
+                }
+                frontier = next;
+            }
+        }
+        out
+    }
+
+    /// Archive entries that relative `require`/`import` specifiers in the file at `path`
+    /// load, as Node resolves them.
+    fn js_requires(&self, path: &str, specs: &[String]) -> Vec<usize> {
+        let dir = path.rsplit_once('/').map_or("", |(d, _)| d);
+        specs
+            .iter()
+            .filter_map(|spec| surface::resolve_relative(dir, spec))
+            .filter(|t| !t.to_ascii_lowercase().ends_with(".json"))
+            .filter_map(|t| {
+                surface::node_candidates(&t)
+                    .iter()
+                    .find_map(|c| self.index.get(c.as_str()).copied())
+            })
+            .collect()
+    }
+}
+
+/// Where a wheel's `<name>.data/purelib/<p>` or `<name>.data/platlib/<p>` file installs,
+/// relative to site-packages.
+fn wheel_data_path(path: &str) -> Option<&str> {
+    let (dir, rest) = path.split_once('/')?;
+    if !dir.ends_with(".data") {
+        return None;
+    }
+    rest.strip_prefix("purelib/")
+        .or_else(|| rest.strip_prefix("platlib/"))
+}
+
+/// The package name when `path` (relative to site-packages) is a top-level `__init__.py`.
+fn top_level_init(path: &str) -> Option<&str> {
+    match path.split('/').collect::<Vec<_>>().as_slice() {
+        [pkg, "__init__.py"] => Some(pkg),
+        _ => None,
+    }
+}
+
+/// A `sitecustomize.py` or `usercustomize.py` that Python imports at every start: at the
+/// archive root, under `src/`, or under a wheel's `.data/purelib` or `.data/platlib`.
+fn is_site_hook(path: &str) -> bool {
+    let p = wheel_data_path(path).unwrap_or(path).to_ascii_lowercase();
+    let top = p.strip_prefix("src/").unwrap_or(&p);
+    matches!(top, "sitecustomize.py" | "usercustomize.py")
+}
+
 /// Whether pip runs a file at this package-root path while installing or at interpreter
 /// start: the build files, `.pth` files, site customization hooks and top-level package
 /// `__init__.py` files.
@@ -1128,11 +1368,19 @@ impl<'a> Scanner<'a> {
         }
 
         let evidence = self.select_evidence(&analyses);
+        let site_hooks: HashSet<usize> = self
+            .entry_unit
+            .iter()
+            .filter(|(&i, _)| self.eco == Ecosystem::Pypi && is_site_hook(&self.c.entries[i].path))
+            .map(|(_, &u)| u)
+            .collect();
         let startup_hooks = self
             .units
             .iter()
             .zip(&analyses)
-            .filter(|(u, _)| u.inst && u.label.ends_with(".pth"))
+            .enumerate()
+            .filter(|(i, (u, _))| (u.inst && u.label.ends_with(".pth")) || site_hooks.contains(i))
+            .map(|(_, ua)| ua)
             .filter_map(|(u, a)| {
                 let found: Vec<&str> = STARTUP_HOOK_INDICATORS
                     .iter()
@@ -1177,7 +1425,10 @@ impl<'a> Scanner<'a> {
             .map(|e| e.path.clone())
             .chain(self.c.unread.iter().cloned())
             .chain(self.installer_unread())
+            .chain(self.unread.iter().cloned())
+            .chain(self.coding_unread())
             .collect();
+        let hidden_code = self.hidden_code(&analyses);
         let mut errors = self.c.errors.clone();
         errors.append(&mut self.errors);
         const MAX_ERRORS: usize = 100;
@@ -1202,6 +1453,7 @@ impl<'a> Scanner<'a> {
             unread_code,
             startup_hooks,
             agent_bypass,
+            hidden_code,
         }
     }
 
@@ -1457,29 +1709,6 @@ mod tests {
     }
 
     #[test]
-    fn snippet_truncates() {
-        let long = "x".repeat(500);
-        assert_eq!(snippet(&format!("a\n  {long}  \n"), 2).chars().count(), 160);
-        assert_eq!(snippet("a\nb", 9), "");
-        let hidden = format!("import os{};exec(x)", " ".repeat(250));
-        assert_eq!(
-            snippet(&hidden, 1),
-            "import os [250 blank columns] ;exec(x)"
-        );
-    }
-
-    #[test]
-    fn json_key_line() {
-        assert_eq!(
-            line_of_key(
-                "{\n  \"scripts\": {\n    \"postinstall\": \"x\"\n}}",
-                "postinstall"
-            ),
-            3
-        );
-    }
-
-    #[test]
     fn io_errors_print_their_cause_once() {
         let io = std::io::Error::new(std::io::ErrorKind::NotFound, "no such file");
         let e = anyhow::Error::from(ScanError::from(io));
@@ -1508,6 +1737,29 @@ mod tests {
             let e = diff_archives(prev, cur, &opts).unwrap_err();
             assert!(e.to_string().contains(side), "{e}");
         }
+    }
+
+    #[test]
+    fn snippet_truncates() {
+        let long = "x".repeat(500);
+        assert_eq!(snippet(&format!("a\n  {long}  \n"), 2).chars().count(), 160);
+        assert_eq!(snippet("a\nb", 9), "");
+        let hidden = format!("import os{};exec(x)", " ".repeat(250));
+        assert_eq!(
+            snippet(&hidden, 1),
+            "import os [250 blank columns] ;exec(x)"
+        );
+    }
+
+    #[test]
+    fn json_key_line() {
+        assert_eq!(
+            line_of_key(
+                "{\n  \"scripts\": {\n    \"postinstall\": \"x\"\n}}",
+                "postinstall"
+            ),
+            3
+        );
     }
 
     #[test]

@@ -7,8 +7,8 @@
 //! text for shell scripts and npm script commands.
 
 use crate::lexer::{
-    decoded_strings, joined_literals, lex, reversed_literals, strip_shell_comments, unescape_code,
-    with_decoded, with_reversed, with_tables, Lang, TokKind, Token,
+    decoded_strings, joined_literals, lex, lex_with, reversed_literals, strip_shell_comments,
+    unescape_code, with_decoded, with_reversed, with_tables, Lang, LexMode, TokKind, Token,
 };
 use regex::{Regex, RegexSet};
 use std::cell::OnceCell;
@@ -582,13 +582,19 @@ fn make_fold(toks: &[Token<'_>], lits: &[usize]) -> Fold {
 
 /// Analyze one source file or command string.
 pub fn analyze(text: &str, lang: Lang) -> FileAnalysis {
+    analyze_with(text, lang, LexMode::default())
+}
+
+/// [`analyze`] with a non-default lexer, for the second pass over install-time code
+/// (`crate::shadow`). Only the default mode may feed features or tokens.
+pub fn analyze_with(text: &str, lang: Lang, mode: LexMode) -> FileAnalysis {
     let mut fa = FileAnalysis::default();
     text_stats(&mut fa, text);
     match lang {
         Lang::Shell => analyze_shell(text, &mut fa),
         Lang::Python | Lang::Js => {
             let mut budget = INFLATE_BUDGET.min(INFLATE_RATIO * text.len() as u64);
-            analyze_source(text, lang, &mut fa, 0, &mut budget)
+            analyze_source(text, lang, mode, &mut fa, 0, &mut budget)
         }
     }
     fa
@@ -600,8 +606,15 @@ const MAX_LITERAL_CODE_DEPTH: u32 = 3;
 /// Lex, decode and fold Python or JavaScript source, then run the rules over it. Code
 /// handed to `exec`/`eval` as a literal (see [`literal_code`]) is analyzed as code, not as
 /// a string, with its hits on the literal's line.
-fn analyze_source(text: &str, lang: Lang, fa: &mut FileAnalysis, depth: u32, budget: &mut u64) {
-    let raw = lex(text, lang);
+fn analyze_source(
+    text: &str,
+    lang: Lang,
+    mode: LexMode,
+    fa: &mut FileAnalysis,
+    depth: u32,
+    budget: &mut u64,
+) {
+    let raw = lex_with(text, lang, mode);
     let decoded = decoded_strings(text, &raw, lang);
     let dec = with_decoded(&raw, &decoded);
     let revs = reversed_literals(&dec, lang);
@@ -611,7 +624,7 @@ fn analyze_source(text: &str, lang: Lang, fa: &mut FileAnalysis, depth: u32, bud
     let toks = with_tables(&joined, lang);
     let runs = fold_runs(&toks, lang);
     if runs.is_empty() {
-        let skip = nested_code(&toks, lang, fa, depth, budget);
+        let skip = nested_code(&toks, lang, mode, fa, depth, budget);
         analyze_code(&toks, &[], &skip, lang, fa, depth == 0);
     } else {
         let folds: Vec<Fold> = runs.iter().map(|r| make_fold(&toks, &r.2)).collect();
@@ -635,7 +648,7 @@ fn analyze_source(text: &str, lang: Lang, fa: &mut FileAnalysis, depth: u32, bud
             code.push(*t);
             fold_of.push(None);
         }
-        let skip = nested_code(&code, lang, fa, depth, budget);
+        let skip = nested_code(&code, lang, mode, fa, depth, budget);
         analyze_code(&code, &fold_of, &skip, lang, fa, depth == 0);
     }
 }
@@ -645,6 +658,7 @@ fn analyze_source(text: &str, lang: Lang, fa: &mut FileAnalysis, depth: u32, bud
 fn nested_code(
     toks: &[Token<'_>],
     lang: Lang,
+    mode: LexMode,
     fa: &mut FileAnalysis,
     depth: u32,
     budget: &mut u64,
@@ -687,7 +701,7 @@ fn nested_code(
             }
         };
         let mut inner = FileAnalysis::default();
-        analyze_source(&code, lang, &mut inner, depth + 1, budget);
+        analyze_source(&code, lang, mode, &mut inner, depth + 1, budget);
         // A literal written over several lines keeps its lines; one written on a single
         // line (with `\n` escapes) or encoded puts every hit on that line.
         let spans_lines = enc == Encoding::Plain && t.text.contains('\n');
