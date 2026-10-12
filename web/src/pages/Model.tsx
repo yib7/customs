@@ -71,7 +71,7 @@ const STEPS: { title: string; body: string }[] = [
   },
   {
     title: 'Apply thresholds and policy',
-    body: 'The risk is compared with the warn and block thresholds, then policy rules (package age, nonexistent names, allow and deny lists) can make the decision stricter. The final decision is the most severe of all of them.',
+    body: 'The risk is compared with the warn and block thresholds, then policy rules such as package age and nonexistent names can make the decision stricter. Three rules override the model instead: the deny list always blocks, the allow list always allows, and an established release of a popular package sets the model score aside.',
   },
 ];
 

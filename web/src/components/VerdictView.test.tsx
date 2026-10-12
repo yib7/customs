@@ -79,4 +79,22 @@ describe('VerdictView', () => {
     renderVerdict({ ...BLOCKED_TYPOSQUAT, mode: 'enforce' }, 'check');
     expect(screen.getByText('Customs would block this package.')).toBeInTheDocument();
   });
+
+  it('explains how the rules combine with the model, including the lists that override it', () => {
+    const allowHit = { rule: 'allow', severity: 'allow', detail: 'on the allow list (pypi:reqeusts)' };
+    const allowed = renderVerdict({ ...BLOCKED_TYPOSQUAT, decision: 'allow', model_decision: 'block', policy_hits: [allowHit] });
+    expect(screen.getByText(/The allow list allows this package outright/)).toBeInTheDocument();
+    expect(screen.queryByText(/most severe/)).toBeNull();
+    allowed.unmount();
+    const denyHit = { rule: 'deny', severity: 'block', detail: 'on the deny list' };
+    const denied = renderVerdict({ ...BLOCKED_TYPOSQUAT, decision: 'block', model_decision: 'allow', policy_hits: [denyHit] });
+    expect(screen.getByText(/The deny list blocks this package outright/)).toBeInTheDocument();
+    denied.unmount();
+    const estHit = { rule: 'established', severity: 'allow', detail: 'popular and 400 days old' };
+    const est = renderVerdict({ ...BLOCKED_TYPOSQUAT, decision: 'allow', model_decision: 'warn', policy_hits: [estHit] });
+    expect(screen.getByText(/sets the model decision aside/)).toBeInTheDocument();
+    est.unmount();
+    renderVerdict(BLOCKED_TYPOSQUAT);
+    expect(screen.getByText(/The final decision \(block\) is the most severe of the model decision and every rule above/)).toBeInTheDocument();
+  });
 });

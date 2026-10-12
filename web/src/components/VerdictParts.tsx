@@ -74,11 +74,20 @@ export function PolicyHits({ hits, decision }: { hits: PolicyHit[]; decision: De
           </div>
         </li>
       ))}
-      <li className="text-xs text-muted">
-        The final decision ({decision}) is the most severe of the model decision and every rule above.
-      </li>
+      <li className="text-xs text-muted">{precedence(hits, decision)}</li>
     </ul>
   );
+}
+
+/** How the server combined the rules with the model (`PolicyOutcome::decide_with` in policy.rs). */
+function precedence(hits: PolicyHit[], decision: Decision): string {
+  const has = (rule: string) => hits.some((h) => h.rule === rule);
+  if (has('deny')) return 'The deny list blocks this package outright, whatever the model and the other rules say.';
+  if (has('allow')) return 'The allow list allows this package outright, whatever the model and the other rules say.';
+  if (has('established')) {
+    return `The established-release rule sets the model decision aside; the final decision (${decision}) is the most severe of the rules above.`;
+  }
+  return `The final decision (${decision}) is the most severe of the model decision and every rule above.`;
 }
 
 export function ContributionBars({ reasons, limit = 10 }: { reasons: Reason[]; limit?: number }) {
