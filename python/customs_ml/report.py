@@ -421,10 +421,10 @@ def render(scheme: str = SCHEME) -> str:
     if rep:
         add("## End to end through the Rust firewall\n")
         add(
-            "`scripts/replay.py` serves held-out test archives from a local fake registry and "
-            "requests each one through the real `customs serve` binary (nothing is installed "
-            "or executed). This exercises the shipped scanner, Rust inference and policy "
-            "engine together, and checks them against the Python evaluation.\n"
+            "`python/scripts/replay.py` serves held-out test archives from a local fake "
+            "registry and requests each one through the real `customs serve` binary (nothing "
+            "is installed or executed). This exercises the shipped scanner, Rust inference and "
+            "policy engine together, and checks them against the Python evaluation.\n"
         )
         add("| | Value |\n|---|---:|")
         add(f"| Requests | {rep['requests']:,} |")
@@ -447,7 +447,7 @@ def render(scheme: str = SCHEME) -> str:
     if lt:
         add("### Latency under concurrent installs\n")
         add(
-            f"`scripts/loadtest.py` serves {lt['archives']:,} test archives (median "
+            f"`python/scripts/loadtest.py` serves {lt['archives']:,} test archives (median "
             f"{lt['archive_kb']['p50']:.0f} KB, 95th percentile "
             f"{lt['archive_kb']['p95']:.0f} KB) from a local fake registry and requests "
             f"them through the firewall in enforce mode on a {lt['cpus']}-core machine. "
@@ -854,8 +854,8 @@ def render(scheme: str = SCHEME) -> str:
         add("## Prospective study: live PyPI traffic\n")
         add(
             "Every number above is about malware someone already found. Here the frozen "
-            "models ran forward in time: `scripts/live_watch.py` followed PyPI's changelog "
-            "and sent every new release published during the window through a running "
+            "models ran forward in time: `python/scripts/live_watch.py` followed PyPI's "
+            "changelog and sent every new release published during the window through a running "
             "`customs serve` (downloaded and scanned in memory, never installed). Outcomes "
             "were read off later from PyPI itself (the project was removed) and from OpenSSF "
             "malicious-package reports.\n"

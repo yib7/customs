@@ -4,7 +4,7 @@
 //   node scripts/demo-gif.mjs [baseUrl] [out.webm]
 //   ffmpeg -i out.webm -vf "fps=10,scale=960:-1:flags=lanczos,split[a][b];[a]palettegen=max_colors=128:stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle" demo.gif
 //
-// Expects blocked installs to exist already (scripts/replay.py --keep produces them) and
+// Expects blocked installs to exist already (python/scripts/replay.py --keep produces them) and
 // the release binary in ../target/release.
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readdirSync, renameSync } from 'node:fs';
@@ -18,7 +18,7 @@ const size = { width: 1280, height: 800 };
 
 const events = await (await fetch(`${base}/api/events?limit=200`)).json();
 const blocked = events.find((e) => e.decision === 'block' && e.kind === 'install');
-if (!blocked) throw new Error(`no blocked install at ${base}; run scripts/replay.py --keep first`);
+if (!blocked) throw new Error(`no blocked install at ${base}; run python/scripts/replay.py --keep first`);
 
 // A visible cursor and a caption bar, since the recording shows neither on its own.
 const overlay = () => {

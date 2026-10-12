@@ -3,7 +3,7 @@
 //
 //   node scripts/live-screenshots.mjs [baseUrl] [outDir]
 //
-// Expects some traffic to exist already (scripts/demo.sh with KEEP=1 produces it).
+// Expects some traffic to exist already (python/scripts/demo.sh with KEEP=1 produces it).
 import { mkdirSync } from 'node:fs';
 import { chromium } from '@playwright/test';
 

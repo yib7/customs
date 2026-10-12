@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # End-to-end demo of Customs against the live registries.
 #
-#   scripts/demo.sh            build, start the server, run every scenario, stop
-#   KEEP=1 scripts/demo.sh     leave the server running so you can open the dashboard
+#   python/scripts/demo.sh            build, start the server, run every scenario, stop
+#   KEEP=1 python/scripts/demo.sh     leave the server running so you can open the dashboard
 #
 # The binary is $CUSTOMS_BIN, else target/release/customs (under $CARGO_TARGET_DIR when set).
 #
 # Nothing here executes package code. The "malicious" package below is an inert string
 # fixture that is only packed and scanned.
 set -euo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 
 BIN="${CUSTOMS_BIN:-${CARGO_TARGET_DIR:-target}/release/customs}"
 PORT=${PORT:-7878}

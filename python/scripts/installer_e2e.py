@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Real installers through Customs, against a local fake registry.
 
-    python3 scripts/installer_e2e.py [--bin target/debug/customs]
+    python3 python/scripts/installer_e2e.py [--bin target/debug/customs]
 
 Starts a fake PyPI (simple index in HTML and JSON, JSON API, files) and a fake npm
 registry on 127.0.0.1, both serving wheels and tarballs built here, then `customs serve`
@@ -41,7 +41,7 @@ from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 NOW = datetime.now(UTC)
 
 

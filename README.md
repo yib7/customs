@@ -163,8 +163,8 @@ confirmation. A server set up for a team takes policy changes only with its admi
 reverse proxy or ingress that terminates TLS, and that token never crosses the network in
 the clear. See [`deploy/hooks/README.md`](deploy/hooks/README.md).
 
-`scripts/demo.sh` runs the whole tour against the live registries. It and the
-`scripts/replay.py` and `scripts/loadtest.py` harnesses run `$CUSTOMS_BIN` when it is set,
+`python/scripts/demo.sh` runs the whole tour against the live registries. It and the
+`python/scripts/replay.py` and `python/scripts/loadtest.py` harnesses run `$CUSTOMS_BIN` when it is set,
 else `target/release/customs` (under `$CARGO_TARGET_DIR` when that is set).
 
 ### Beyond the proxy
@@ -231,7 +231,7 @@ days; the install script and git or URL dependency rules apply at any age.
 
 ![Walkthrough: an agent's pip install of a misspelled package is denied by the hook, a blocked malware sample is opened to show its reasons and code, the package checker reports that the misspelled name does not exist, and the model page shows the held-out results](docs/media/demo.gif)
 
-The recording (34 seconds) runs against `customs serve` after `scripts/replay.py --keep`
+The recording (34 seconds) runs against `customs serve` after `python/scripts/replay.py --keep`
 sent held-out test packages through the proxy. `web/scripts/demo-gif.mjs` records it.
 
 ## Results
@@ -359,12 +359,12 @@ methodology, is in [`docs/EVALUATION.md`](docs/EVALUATION.md).
   benign package in the corpus shares a name with an OpenSSF malware report.
 * **Red-teamed.** Held-out malware is rewritten with evasions and re-scanned; evasions used
   in augmentation are reported separately from unseen ones.
-* **Verified end to end.** `scripts/replay.py` serves held-out malware from a fake
+* **Verified end to end.** `python/scripts/replay.py` serves held-out malware from a fake
   registry and requests it through the real binary. It caught four train/serve skews
   that unit tests missed (a name-encoding label leak in the source data, CNN pooling over
   batch padding, the CNN skipped on empty token streams in Rust, and a feature derived
   from the archive file name); after the fixes the binary matches the evaluation to 1e-7.
-  `scripts/installer_e2e.py`, run in CI, drives real pip, uv, npm, pnpm, yarn and bun
+  `python/scripts/installer_e2e.py`, run in CI, drives real pip, uv, npm, pnpm, yarn and bun
   through the proxy against a fake registry: dependency resolution, the release cooldown,
   and blocks by the startup-hook and install-script rules.
 * **Popular packages checked.** The 300 most-downloaded packages of each ecosystem, at
@@ -386,10 +386,10 @@ methodology, is in [`docs/EVALUATION.md`](docs/EVALUATION.md).
 | `crates/customs-model` | Inference: tree ensemble with Saabas attributions, CNN forward pass, name model, stacking |
 | `crates/customs` | The `customs` binary: proxy, policy, API, hook, CLI |
 | `python/customs_ml` | Dataset build, dedup, splits, training, evaluation, robustness, export |
+| `python/scripts` | Demo, installer end-to-end test, replay and load tests, live PyPI study |
 | `web/` | Dashboard |
 | `models/` | Trained artifacts (JSON) and parity fixtures |
 | `deploy/` | Dockerfile, Docker Compose with Prometheus, Kubernetes manifests, example policy, agent hook configs |
-| `scripts/` | Demo, installer end-to-end test, replay and load tests, live PyPI study |
 | `docs/` | [Architecture](docs/ARCHITECTURE.md), [design](docs/DESIGN.md), [evaluation](docs/EVALUATION.md), [changelog](docs/CHANGELOG.md), [credits](docs/CREDITS.md) |
 
 ## Development

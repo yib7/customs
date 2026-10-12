@@ -49,7 +49,7 @@ jobs:
       - if: runner.os == 'Linux'
         run: npm install --global pnpm@12.10.1 yarn@1.22.22
       - if: runner.os == 'Linux'
-        run: python3 scripts/installer_e2e.py --bin target/debug/customs --require pip,uv,npm,pnpm,yarn,bun
+        run: python3 python/scripts/installer_e2e.py --bin target/debug/customs --require pip,uv,npm,pnpm,yarn,bun
 
   python:
     runs-on: ubuntu-latest
@@ -65,8 +65,8 @@ jobs:
       - run: uv sync --locked --extra dev
       # The CPU build of torch; the locked default pulls several GB of CUDA libraries.
       - run: uv pip install torch --index-url https://download.pytorch.org/whl/cpu
-      - run: uv run --no-sync ruff check customs_ml tests ../scripts
-      - run: uv run --no-sync ruff format --check customs_ml tests ../scripts
+      - run: uv run --no-sync ruff check customs_ml tests scripts
+      - run: uv run --no-sync ruff format --check customs_ml tests scripts
       - run: uv run --no-sync pytest -q
 
   web:

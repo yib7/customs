@@ -13,7 +13,7 @@ at it, and measures:
 * single flight: many clients requesting the same uncached archive at once, which should
   cost one scan.
 
-    CUSTOMS_DATA=/path/to/data python scripts/loadtest.py --n 150 --concurrency 1 4 16
+    CUSTOMS_DATA=/path/to/data python python/scripts/loadtest.py --n 150 --concurrency 1 4 16
 
 Writes `$CUSTOMS_DATA/work/loadtest.json`. The firewall binary is `$CUSTOMS_BIN`, else
 `target/release/customs` (under `$CARGO_TARGET_DIR` when set).
@@ -41,9 +41,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 
-_spec = importlib.util.spec_from_file_location("replay", ROOT / "scripts" / "replay.py")
+_spec = importlib.util.spec_from_file_location("replay", Path(__file__).with_name("replay.py"))
 replay = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(replay)
 

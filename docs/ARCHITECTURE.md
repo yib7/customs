@@ -18,10 +18,10 @@ or block from a policy engine plus a malware classifier trained offline in Pytho
 | `crates/customs` | Rust | The `customs` binary: registry proxy, policy engine, REST API, agent hooks, MCP server, lockfile audit and the CLI. |
 | `crates/customs-py` | Rust | Python bindings for the scanner, so the training pipeline extracts features with the same code the proxy runs. |
 | `python/customs_ml` | Python | Builds the dataset, trains and evaluates the models, and exports them to JSON in `models/`. |
+| `python/scripts` | Python, shell | The demo, the installer end-to-end test, the replay and load tests, and the live PyPI study. They drive a running `customs serve` from outside. |
 | `web/` | TypeScript | The dashboard, a static React app that the binary serves. |
 | `models/` | JSON | The trained models the binary loads at startup. `models/dev/` holds small placeholders for tests. |
 | `deploy/` | Docker, YAML | Container image, Compose and Kubernetes files, an example policy, and the hook configs for each agent. |
-| `scripts/` | Python, shell | The demo, the installer end-to-end test, the replay and load tests, and the live PyPI study. |
 
 ## What happens on `pip install foo`
 
@@ -103,18 +103,20 @@ executed or installed. [EVALUATION.md](EVALUATION.md) has the numbers.
 |---|---|---|
 | `CUSTOMS_BIND` | `127.0.0.1:7878` | Address the server listens on |
 | `CUSTOMS_DATA_DIR` | `.customs` for the server, the user cache directory for the hook and CLI | Database and archive cache |
-| `CUSTOMS_MODELS` | `./models`, then paths next to the binary | Model directory |
+| `CUSTOMS_MODELS` | `./models` for the server, then paths next to the binary | Model directory |
 | `CUSTOMS_UI_DIR` | `./web/dist`, then paths next to the binary | Dashboard files |
 | `CUSTOMS_SERVER` | `http://127.0.0.1:7878` | Server the hook and CLI talk to |
 | `CUSTOMS_ADMIN_TOKEN` | unset | Required for policy changes when set |
 
 Every flag and variable is listed by `customs serve --help`, and every variable in
-[`.env.example`](../.env.example).
+[`deploy/.env.example`](../deploy/.env.example).
 
 ## Where to start reading
 
 - `crates/customs/src/engine.rs`: one function turns archive bytes into a verdict.
 - `crates/customs/src/proxy/`: the PyPI and npm routes.
 - `crates/customs/src/hook/parse.rs`: how a shell command becomes a list of packages.
+- `crates/customs/tests/integration/`: end-to-end tests, one file per surface (proxy, API,
+  CLI, hook, audit, MCP), against a mock registry in `main.rs`.
 - `crates/customs-scan/src/indicators.rs`: what the scanner looks for in code.
 - `python/customs_ml/pipeline.py`: the training run from end to end.

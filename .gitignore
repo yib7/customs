@@ -1,6 +1,5 @@
-# Build output
+# Build output (web/dist is in web/.gitignore)
 /target
-web/dist
 *.egg-info/
 # The Python binding when built in place (maturin develop)
 *.so
@@ -12,10 +11,8 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .ruff_cache/
-.mypy_cache/
-.coverage
-htmlcov/
-coverage/
+# Server and script logs from local runs
+*.log
 
 # Data directory that `customs serve` creates in the working directory
 /.customs/
@@ -28,7 +25,7 @@ coverage/
 # Vite settings for the mock API (no secrets)
 !web/.env.mock
 # Documented placeholders only
-!.env.example
+!deploy/.env.example
 *.pem
 *.key
 *.p12
@@ -36,13 +33,12 @@ coverage/
 id_rsa*
 id_ed25519*
 
-# Editors and OS files
+# Contributors' editor and OS files (the project itself configures no editor)
 .vscode/
 .idea/
 .DS_Store
 Thumbs.db
 *.swp
-*.log
 
 # Local agent and release-checklist files
 .claude/

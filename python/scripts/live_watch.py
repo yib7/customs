@@ -9,9 +9,9 @@ release published to PyPI during the watch window goes through a running `custom
 off later from the registry itself (a release that PyPI removed) and from the OpenSSF
 malicious-packages reports.
 
-    python scripts/live_watch.py watch  --out work/live [--server http://127.0.0.1:7878]
-    python scripts/live_watch.py follow --out work/live          # re-check takedowns
-    python scripts/live_watch.py report --out work/live          # summary JSON + table
+    python python/scripts/live_watch.py watch  --out work/live [--server http://127.0.0.1:7878]
+    python python/scripts/live_watch.py follow --out work/live          # re-check takedowns
+    python python/scripts/live_watch.py report --out work/live          # summary JSON + table
 
 `watch` follows PyPI's changelog serial (XML-RPC `changelog_since_serial`), which lists
 every release event, so nothing is sampled. A release is scanned a few minutes after it

@@ -45,7 +45,7 @@ select = ["E", "F", "W", "I", "B", "UP", "SIM", "PLW1514", "T20"]
 [tool.ruff.lint.per-file-ignores]
 # Library code logs through pipeline.log; only command-line entry points print.
 "customs_ml/{cli,history_eval,misses,pipeline,popular_check,report,variance}.py" = ["T201"]
-"../scripts/*.py" = ["T201"]
+"scripts/*.py" = ["T201"]
 "tests/*.py" = ["T201"]
 
 [tool.pytest.ini_options]

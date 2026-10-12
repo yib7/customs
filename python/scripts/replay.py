@@ -11,7 +11,7 @@ It then compares the proxy's verdicts with the Python pipeline's scores for the 
 which checks that the shipped binary (scanner + Rust inference + policy) reproduces the
 evaluation end to end.
 
-    CUSTOMS_DATA=/path/to/data python scripts/replay.py --n 300 [--keep]
+    CUSTOMS_DATA=/path/to/data python python/scripts/replay.py --n 300 [--keep]
 
 Requires the dataset built by `customs-ml` (see README). The firewall binary is
 `$CUSTOMS_BIN`, else `target/release/customs` (under `$CARGO_TARGET_DIR` when set).
@@ -40,7 +40,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 OLD = "2025-01-01T00:00:00.000Z"  # older than any min-age policy: the model decides
 
 

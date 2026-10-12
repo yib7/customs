@@ -1113,7 +1113,7 @@ release's: a wheel uploaded today to a two-year-old release is a day-old file an
 `[established]`. A version or file that fresh metadata still does not list (or a file name
 that names no version of the package) has no known publish time and hits `min_age_days`
 (and `block_install_scripts_from_new`) as if it were young.
-`scripts/installer_e2e.py` checks this with real pip, uv, npm, pnpm, yarn and bun.
+`python/scripts/installer_e2e.py` checks this with real pip, uv, npm, pnpm, yarn and bun.
 
 `POST /api/check` resolves an unpinned or ranged version the same way by default
 (`"resolve": "served"`) and adds a `min_age_resolution` hit naming the newer version it

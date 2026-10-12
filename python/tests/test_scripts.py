@@ -1,4 +1,4 @@
-"""The helper scripts in scripts/ (loaded from their files; they are not a package)."""
+"""The helper scripts in python/scripts/ (loaded from their files; they are not a package)."""
 
 import importlib.util
 import json
@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-SCRIPTS = Path(__file__).resolve().parents[2] / "scripts"
+SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 
 
 def _load(name: str):

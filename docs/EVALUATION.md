@@ -154,7 +154,7 @@ The name model was meant for the pre-download check (typosquats and names an age
 
 ## End to end through the Rust firewall
 
-`scripts/replay.py` serves held-out test archives from a local fake registry and requests each one through the real `customs serve` binary (nothing is installed or executed). This exercises the shipped scanner, Rust inference and policy engine together, and checks them against the Python evaluation.
+`python/scripts/replay.py` serves held-out test archives from a local fake registry and requests each one through the real `customs serve` binary (nothing is installed or executed). This exercises the shipped scanner, Rust inference and policy engine together, and checks them against the Python evaluation.
 
 | | Value |
 |---|---:|
@@ -169,7 +169,7 @@ The name model was meant for the pre-download check (typosquats and names an age
 
 ### Latency under concurrent installs
 
-`scripts/loadtest.py` serves 470 test archives (median 12 KB, 95th percentile 1670 KB) from a local fake registry and requests them through the firewall in enforce mode on a 4-core machine. Cold requests fetch, scan, score and decide; warm requests hit the verdict and artifact cache. Each concurrency level gets its own archives.
+`python/scripts/loadtest.py` serves 470 test archives (median 12 KB, 95th percentile 1670 KB) from a local fake registry and requests them through the firewall in enforce mode on a 4-core machine. Cold requests fetch, scan, score and decide; warm requests hit the verdict and artifact cache. Each concurrency level gets its own archives.
 
 | Run | Clients | Requests/s | p50 ms | p95 ms | p99 ms |
 |---|---:|---:|---:|---:|---:|
@@ -293,7 +293,7 @@ The Python replay agrees with the proxy's own `customs check` on 107 of 107 beni
 
 ## Prospective study: live PyPI traffic
 
-Every number above is about malware someone already found. Here the frozen models ran forward in time: `scripts/live_watch.py` followed PyPI's changelog and sent every new release published during the window through a running `customs serve` (downloaded and scanned in memory, never installed). Outcomes were read off later from PyPI itself (the project was removed) and from OpenSSF malicious-package reports.
+Every number above is about malware someone already found. Here the frozen models ran forward in time: `python/scripts/live_watch.py` followed PyPI's changelog and sent every new release published during the window through a running `customs serve` (downloaded and scanned in memory, never installed). Outcomes were read off later from PyPI itself (the project was removed) and from OpenSSF malicious-package reports.
 
 Window: 2026-10-07T07:56:21Z to 2026-10-08T01:05:27Z (UTC, models 2026.10.07).
 
