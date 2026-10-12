@@ -294,17 +294,29 @@ async fn put_policy(
         }
         return resp;
     }
-    let policy = match Policy::from_json(&body) {
+    let policy = match Policy::from_json_replacing(&body) {
         Ok(p) => p,
-        Err(e) => {
+        Err(errs) => {
+            let error = match errs.as_slice() {
+                [e] => e.to_string(),
+                _ => format!(
+                    "the policy is missing {}: PUT replaces the whole policy, so send every \
+                     key GET /api/policy returns",
+                    errs.iter()
+                        .map(|e| e.key.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            };
+            let errors: Vec<Value> = errs
+                .iter()
+                .map(|e| json!({ "field": e.key, "message": e.message }))
+                .collect();
             return (
                 StatusCode::BAD_REQUEST,
-                Json(json!({
-                    "error": e.to_string(),
-                    "errors": [{ "field": e.key, "message": e.message }],
-                })),
+                Json(json!({ "error": error, "errors": errors })),
             )
-                .into_response()
+                .into_response();
         }
     };
     let who = PolicyChange {

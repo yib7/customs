@@ -3363,3 +3363,42 @@ async fn bad_query_and_path_parameters_get_json_errors() {
     }
     h.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_partial_policy_put_is_refused_with_the_missing_keys() {
+    let h = Harness::start(|p| p.deny = vec!["npm:evil-js".into()]).await;
+    let r = h
+        .http
+        .put(format!("{}/api/policy", h.base))
+        .body(r#"{"mode": "enforce"}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 400);
+    let e: Value = r.json().await.unwrap();
+    let msg = e["error"].as_str().unwrap();
+    assert!(msg.contains("deny") && msg.contains("upstream"), "{msg}");
+    assert!(e["errors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|x| x["field"] == "allow"));
+    // A nested table must be whole too.
+    let mut p: Value = h.get("/api/policy").await.json().await.unwrap();
+    p["established"] = json!({"enabled": false});
+    let r = h
+        .http
+        .put(format!("{}/api/policy", h.base))
+        .json(&p)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 400);
+    let e: Value = r.json().await.unwrap();
+    assert!(
+        e["error"].as_str().unwrap().contains("established.top"),
+        "{e}"
+    );
+    assert_eq!(h.engine.policy().deny, vec!["npm:evil-js".to_string()]);
+    h.stop().await;
+}

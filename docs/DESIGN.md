@@ -772,9 +772,10 @@ proxies `/api` with the browser's `Host`, so its dashboard is same-origin as wel
   When the server listens on a loopback address, the same `Host` check applies to every
   request, reads and package downloads included, since only a rebound page would name a
   loopback listener by another host name; without it such a page could read the event log
-  and learn what this machine installs. `PUT` takes the full policy (omitted keys
-  take their defaults), validates, persists to the policy file, and returns it; invalid
-  input returns 400 `{ "error", "errors": [ { "field", "message" } ] }`. A 500 means
+  and learn what this machine installs. `PUT` takes the full policy, as `GET` returns it
+  (a body missing a key, such as `deny` or `established.top`, is refused with one error
+  per missing key rather than resetting it), validates, persists to the policy file, and
+  returns it; invalid input returns 400 `{ "error", "errors": [ { "field", "message" } ] }`. A 500 means
   nothing changed; a policy that is live but could not be written to the change log is a
   200 with an `x-customs-warning` header, and is still counted and announced.
   Who may `PUT` depends on how the server was started. With an admin token

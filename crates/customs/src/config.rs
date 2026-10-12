@@ -475,6 +475,30 @@ fn check_url(key: &str, v: &str) -> Result<(), ConfigError> {
     Ok(())
 }
 
+/// Push onto `out` the dotted path of every key of `full` that `got` lacks, descending
+/// into tables both have. A `got` that is not an object is left to the parser to reject.
+fn missing_keys(
+    full: &serde_json::Value,
+    got: &serde_json::Value,
+    prefix: &str,
+    out: &mut Vec<String>,
+) {
+    let (Some(full), Some(got)) = (full.as_object(), got.as_object()) else {
+        return;
+    };
+    for (k, fv) in full {
+        let path = if prefix.is_empty() {
+            k.clone()
+        } else {
+            format!("{prefix}.{k}")
+        };
+        match got.get(k) {
+            None => out.push(path),
+            Some(gv) => missing_keys(fv, gv, &path, out),
+        }
+    }
+}
+
 impl Policy {
     /// Parse TOML text and validate it.
     pub fn from_toml(text: &str) -> Result<Self, ConfigError> {
@@ -490,6 +514,31 @@ impl Policy {
         let p: Policy =
             serde_json::from_str(text).map_err(|e| ConfigError::new("", e.to_string()))?;
         p.validated()
+    }
+
+    /// Parse a JSON body that replaces the whole policy (`PUT /api/policy`). Unlike
+    /// [`Policy::from_json`], every key `GET /api/policy` returns must be present: a partial
+    /// body would otherwise reset the keys it leaves out, the deny list among them. Each
+    /// missing key (a dotted path such as `established.top`) is its own error.
+    pub fn from_json_replacing(text: &str) -> Result<Self, Vec<ConfigError>> {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(text) {
+            let full = serde_json::to_value(Policy::default()).unwrap_or_default();
+            let mut missing = Vec::new();
+            missing_keys(&full, &v, "", &mut missing);
+            if !missing.is_empty() {
+                return Err(missing
+                    .into_iter()
+                    .map(|k| {
+                        ConfigError::new(
+                            k,
+                            "missing: PUT replaces the whole policy, so send every key \
+                             GET /api/policy returns",
+                        )
+                    })
+                    .collect());
+            }
+        }
+        Self::from_json(text).map_err(|e| vec![e])
     }
 
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
