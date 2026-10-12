@@ -2982,16 +2982,36 @@ mod tests {
         pkg(Ecosystem::Npm, name, v)
     }
 
+    /// An empty directory to run the commands in, so no test reads files of the machine it
+    /// runs on (a real `/nonexistent/app/pyproject.toml`, or `C:\w\...` on Windows).
+    fn root() -> &'static Path {
+        static DIR: OnceLock<tempfile::TempDir> = OnceLock::new();
+        DIR.get_or_init(|| tempfile::tempdir().unwrap()).path()
+    }
+
+    /// A directory the tests write as `/nonexistent/...` or `/w/...`, under [`root`].
+    fn at_root(dir: &str) -> PathBuf {
+        let rest = ["/nonexistent", "/w"].iter().find_map(|p| {
+            dir.strip_prefix(p)
+                .filter(|r| r.is_empty() || r.starts_with('/'))
+        });
+        match rest {
+            Some("") => root().to_path_buf(),
+            Some(r) => root().join(&r[1..]),
+            None => PathBuf::from(dir),
+        }
+    }
+
     /// All targets of all installs in `cmd`.
     fn targets(cmd: &str) -> Vec<Target> {
-        parse_command(cmd, Path::new("/nonexistent"))
+        parse_command(cmd, root())
             .into_iter()
             .flat_map(|i| i.targets)
             .collect()
     }
 
     fn tools(cmd: &str) -> Vec<String> {
-        parse_command(cmd, Path::new("/"))
+        parse_command(cmd, root())
             .into_iter()
             .map(|i| i.tool)
             .collect()
@@ -3227,7 +3247,7 @@ mod tests {
     fn proj(manager: Manager, dir: &str) -> Target {
         Target::Project {
             manager,
-            dir: PathBuf::from(dir),
+            dir: at_root(dir),
             extras: vec![],
             unlocked_only: false,
         }
@@ -3237,7 +3257,7 @@ mod tests {
     fn uv_run(dir: &str) -> Target {
         Target::Project {
             manager: Manager::Uv,
-            dir: PathBuf::from(dir),
+            dir: at_root(dir),
             extras: vec![],
             unlocked_only: true,
         }
@@ -3651,7 +3671,7 @@ mod tests {
 
     #[test]
     fn project_installs() {
-        let at = |cmd: &str| parse_command(cmd, Path::new("/w")).remove(0).targets;
+        let at = |cmd: &str| parse_command(cmd, root()).remove(0).targets;
         assert_eq!(
             at("npm ci --prefix web"),
             vec![proj(Manager::Npm, "/w/web")]
@@ -3670,7 +3690,7 @@ mod tests {
             vec![proj(Manager::Pnpm, "/w/app")]
         );
         assert_eq!(at("yarn --cwd app"), vec![proj(Manager::Yarn, "/w/app")]);
-        assert!(parse_command("yarn --version", Path::new("/w")).is_empty());
+        assert!(parse_command("yarn --version", root()).is_empty());
         assert_eq!(
             at("yarn install --immutable"),
             vec![proj(Manager::Yarn, "/w")]
@@ -3696,7 +3716,7 @@ mod tests {
         // `--dev` adds the Pipfile's `[dev-packages]`.
         let dev = Target::Project {
             manager: Manager::Pipenv,
-            dir: PathBuf::from("/w"),
+            dir: at_root("/w"),
             extras: vec!["dev".into()],
             unlocked_only: false,
         };
@@ -3715,7 +3735,7 @@ mod tests {
         // Adding packages is not a project install.
         assert_eq!(at("pnpm add zod"), vec![js("zod", None)]);
         assert_eq!(at("bun add zod"), vec![js("zod", None)]);
-        assert!(parse_command("npm run build", Path::new("/w")).is_empty());
+        assert!(parse_command("npm run build", root()).is_empty());
     }
 
     #[test]
@@ -3836,7 +3856,7 @@ mod tests {
         assert_eq!(targets("deno install -g ./cli.ts"), vec![]);
         assert_eq!(targets("deno install --entrypoint main.ts"), vec![]);
         let at = |cmd: &str| -> Vec<Target> {
-            parse_command(cmd, Path::new("/w"))
+            parse_command(cmd, root())
                 .into_iter()
                 .flat_map(|i| i.targets)
                 .collect()

@@ -624,7 +624,8 @@ httpx = {version = ">=0.27", extras = ["http2"]}
             names(&expand(Manager::Pipenv, d.path(), &[])),
             vec!["django 5.0", "requests -"]
         );
-        let e = expand(Manager::Pipenv, Path::new("/nonexistent"), &[]);
+        let empty = tempfile::tempdir().unwrap();
+        let e = expand(Manager::Pipenv, empty.path(), &[]);
         assert!(e.targets.is_empty() && e.locked == 0);
         assert_eq!(Manager::Pipenv.ecosystem(), Ecosystem::Pypi);
     }
