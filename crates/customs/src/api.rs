@@ -25,7 +25,7 @@ use crate::engine::EngineError;
 use crate::policy_log::{describe, PolicyChange};
 use crate::server::AppState;
 use crate::store::EventFilter;
-use crate::util::{parse_ecosystem, registry_name};
+use crate::util::{parse_ecosystem, redact_urls, registry_name};
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -53,7 +53,8 @@ fn engine_error(e: EngineError) -> Response {
         EngineError::Upstream(_) => StatusCode::BAD_GATEWAY,
         EngineError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
     };
-    api_error(status, e.to_string())
+    // Upstream errors name the URL, which may carry the registry credentials.
+    api_error(status, redact_urls(&e.to_string()))
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -231,10 +232,7 @@ async fn events_stream(
     Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
 }
 
-async fn verdict(
-    State(state): State<AppState>,
-    id: Result<Path<i64>, PathRejection>,
-) -> Response {
+async fn verdict(State(state): State<AppState>, id: Result<Path<i64>, PathRejection>) -> Response {
     let Path(id) = match id {
         Ok(id) => id,
         Err(e) => return api_error(StatusCode::BAD_REQUEST, e.body_text()),
@@ -266,7 +264,7 @@ async fn stats(
 }
 
 async fn get_policy(State(state): State<AppState>) -> Response {
-    Json(&*state.engine.policy()).into_response()
+    Json(state.engine.policy().redacted()).into_response()
 }
 
 async fn put_policy(
@@ -294,7 +292,11 @@ async fn put_policy(
         }
         return resp;
     }
-    let policy = match Policy::from_json_replacing(&body) {
+    let policy = match Policy::from_json_replacing(&body).and_then(|mut p| {
+        p.keep_credentials(&state.engine.policy())
+            .map_err(|e| vec![e])?;
+        Ok(p)
+    }) {
         Ok(p) => p,
         Err(errs) => {
             let error = match errs.as_slice() {
@@ -351,7 +353,7 @@ async fn put_policy(
         }
         Ok(None) => {}
     }
-    let mut resp = Json(&*state.engine.policy()).into_response();
+    let mut resp = Json(state.engine.policy().redacted()).into_response();
     if let Some(w) = warning {
         // Header values cannot hold control characters; the log line has the full text.
         let w: String = w

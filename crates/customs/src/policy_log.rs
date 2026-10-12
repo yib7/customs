@@ -32,13 +32,24 @@ pub struct PolicyChange {
     pub changes: Vec<FieldChange>,
 }
 
-/// The fields that differ between two policies, sorted by field path.
+/// The fields that differ between two policies, sorted by field path. Upstream URLs are
+/// compared with their credentials but shown with `***` in their place, since the change is
+/// stored, listed and announced.
 pub fn diff(before: &Policy, after: &Policy) -> Vec<FieldChange> {
     let mut out = Vec::new();
     let (Ok(a), Ok(b)) = (serde_json::to_value(before), serde_json::to_value(after)) else {
         return out;
     };
     walk("", &a, &b, &mut out);
+    for c in &mut out {
+        if c.field.starts_with("upstream.") {
+            for v in [&mut c.before, &mut c.after] {
+                if let Value::String(u) = v {
+                    *u = crate::config::redact_upstream(u);
+                }
+            }
+        }
+    }
     out
 }
 

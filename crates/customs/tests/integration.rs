@@ -3402,3 +3402,44 @@ async fn a_partial_policy_put_is_refused_with_the_missing_keys() {
     assert_eq!(h.engine.policy().deny, vec!["npm:evil-js".to_string()]);
     h.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn upstream_credentials_are_redacted_but_kept() {
+    let h = Harness::start(|p| {
+        p.upstream.npm = p.upstream.npm.replace("http://", "http://user:s3cret@");
+    })
+    .await;
+    let text = h.get("/api/policy").await.text().await.unwrap();
+    assert!(!text.contains("s3cret"), "{text}");
+    assert!(text.contains("http://***@127.0.0.1"), "{text}");
+    // Sending back what the dashboard read keeps the stored credentials.
+    let mut p: Value = serde_json::from_str(&text).unwrap();
+    p["mode"] = json!("monitor");
+    let r = h
+        .http
+        .put(format!("{}/api/policy", h.base))
+        .json(&p)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    assert!(!r.text().await.unwrap().contains("s3cret"));
+    assert!(h.engine.policy().upstream.npm.contains("user:s3cret@"));
+    let saved = std::fs::read_to_string(h.engine.policy_path()).unwrap();
+    assert!(saved.contains("user:s3cret@"), "{saved}");
+    // New credentials are accepted, and the change log shows neither.
+    p["upstream"]["npm"] = json!("https://other:pw-two@npm.example/registry");
+    let r = h
+        .http
+        .put(format!("{}/api/policy", h.base))
+        .json(&p)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    assert!(h.engine.policy().upstream.npm.contains("pw-two"));
+    let log = h.get("/api/policy/changes").await.text().await.unwrap();
+    assert!(!log.contains("s3cret") && !log.contains("pw-two"), "{log}");
+    assert!(log.contains("https://***@npm.example/registry"), "{log}");
+    h.stop().await;
+}

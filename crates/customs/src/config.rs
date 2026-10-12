@@ -464,15 +464,52 @@ impl fmt::Display for PackageRule {
 }
 
 fn check_url(key: &str, v: &str) -> Result<(), ConfigError> {
-    let u = url::Url::parse(v)
-        .map_err(|e| ConfigError::new(key, format!("'{v}' is not a URL: {e}")))?;
+    let u = url::Url::parse(v).map_err(|e| {
+        ConfigError::new(key, format!("'{}' is not a URL: {e}", redact_upstream(v)))
+    })?;
+    let shown = redact_upstream(v);
     if !matches!(u.scheme(), "http" | "https") {
         return Err(ConfigError::new(
             key,
-            format!("'{v}' must be an http or https URL"),
+            format!("'{shown}' must be an http or https URL"),
+        ));
+    }
+    // Paths are appended to the URL, so a query or fragment would end up in the middle.
+    if u.query().is_some() || u.fragment().is_some() {
+        return Err(ConfigError::new(
+            key,
+            format!("'{shown}' must not have a query (?) or fragment (#)"),
         ));
     }
     Ok(())
+}
+
+/// An upstream URL as the API, the change log, the webhook and the log show it: credentials
+/// (the only way to authenticate to a private registry; reqwest sends them as Basic auth)
+/// become `***`. Only the policy file holds them.
+pub fn redact_upstream(url: &str) -> String {
+    let shown = crate::util::redact_url(url);
+    if shown == url {
+        return shown;
+    }
+    // `Url` adds a `/` to an empty path; stored upstreams have none.
+    shown.trim_end_matches('/').to_string()
+}
+
+/// Whether `url` has `***` (what [`redact_upstream`] shows) in place of its credentials.
+fn has_redacted_credentials(url: &str) -> bool {
+    url::Url::parse(url).is_ok_and(|u| u.username() == "***" && u.password().is_none())
+}
+
+impl Upstream {
+    fn fields_mut(&mut self) -> [(&'static str, &mut String); 4] {
+        [
+            ("upstream.pypi_simple", &mut self.pypi_simple),
+            ("upstream.pypi_files", &mut self.pypi_files),
+            ("upstream.pypi_json", &mut self.pypi_json),
+            ("upstream.npm", &mut self.npm),
+        ]
+    }
 }
 
 /// Push onto `out` the dotted path of every key of `full` that `got` lacks, descending
@@ -615,18 +652,50 @@ impl Policy {
                     .map_err(|m| ConfigError::new(format!("{key}[{i}]"), m))?;
             }
         }
-        for (key, v) in [
-            ("upstream.pypi_simple", &mut self.upstream.pypi_simple),
-            ("upstream.pypi_files", &mut self.upstream.pypi_files),
-            ("upstream.pypi_json", &mut self.upstream.pypi_json),
-            ("upstream.npm", &mut self.upstream.npm),
-        ] {
+        for (key, v) in self.upstream.fields_mut() {
             check_url(key, v)?;
             while v.ends_with('/') {
                 v.pop();
             }
         }
         Ok(self)
+    }
+
+    /// This policy as the API shows it: upstream credentials replaced by `***`.
+    pub fn redacted(&self) -> Policy {
+        let mut p = self.clone();
+        for (_, v) in p.upstream.fields_mut() {
+            *v = redact_upstream(v);
+        }
+        p
+    }
+
+    /// Put back the credentials of `active` where this policy (from `PUT /api/policy`) has
+    /// the `***` that [`Policy::redacted`] showed, so a dashboard can send back what it read.
+    /// A `***` on a URL other than the active one is an error: there is nothing to keep.
+    pub fn keep_credentials(&mut self, active: &Policy) -> Result<(), ConfigError> {
+        let mut active = active.upstream.clone();
+        for ((key, v), (_, old)) in self
+            .upstream
+            .fields_mut()
+            .into_iter()
+            .zip(active.fields_mut())
+        {
+            if !has_redacted_credentials(v) {
+                continue;
+            }
+            if redact_upstream(old) != redact_upstream(v) {
+                return Err(ConfigError::new(
+                    key,
+                    format!(
+                        "'{v}': `***` stands for the stored credentials, and the active                          upstream is '{}'; send a new URL with its own credentials",
+                        redact_upstream(old)
+                    ),
+                ));
+            }
+            *v = old.clone();
+        }
+        Ok(())
     }
 
     /// Whether a release history rule that applies to PyPI is on. Those rules need the
@@ -892,6 +961,48 @@ npm = "https://registry.npmjs.org"
         assert!(PackageRule::parse("pypi:").is_err());
         assert!(PackageRule::parse("pypi:zope.interface==5.0").is_ok());
         assert!(PackageRule::parse("npm:lodash.merge@4.6.2").is_ok());
+    }
+
+    #[test]
+    fn upstream_with_query_or_fragment_is_rejected() {
+        for bad in ["https://r.example/x?token=t", "https://r.example/x#frag"] {
+            let e = Policy::from_toml(&format!(
+                "[upstream]
+npm = \"{bad}\""
+            ))
+            .unwrap_err();
+            assert_eq!(e.key, "upstream.npm", "{bad}");
+        }
+        let e = Policy::from_toml(
+            "[upstream]
+npm = \"https://u:s3cret@r.example/x?t=1\"",
+        )
+        .unwrap_err();
+        assert!(!e.to_string().contains("s3cret"), "{e}");
+        let p = Policy::from_toml(
+            "[upstream]
+npm = \"https://u:s3cret@r.example/x\"",
+        )
+        .unwrap();
+        assert_eq!(p.upstream.npm, "https://u:s3cret@r.example/x");
+    }
+
+    #[test]
+    fn upstream_credentials_are_shown_as_stars_and_kept() {
+        let mut active = Policy::default();
+        active.upstream.npm = "https://u:s3cret@r.example".into();
+        let shown = active.redacted();
+        assert_eq!(shown.upstream.npm, "https://***@r.example");
+        assert_eq!(shown.upstream.pypi_json, active.upstream.pypi_json);
+        let mut back = shown.clone();
+        back.keep_credentials(&active).unwrap();
+        assert_eq!(back, active);
+        // `***` on another host has no credentials to keep.
+        let mut moved = shown;
+        moved.upstream.npm = "https://***@other.example".into();
+        let e = moved.keep_credentials(&active).unwrap_err();
+        assert_eq!(e.key, "upstream.npm");
+        assert!(!e.to_string().contains("s3cret"), "{e}");
     }
 
     #[test]

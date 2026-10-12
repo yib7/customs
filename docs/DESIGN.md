@@ -958,7 +958,11 @@ Only exact versions are supported: an entry with a range, a specifier (`pypi:x>=
 name cannot hold is rejected, since it would never match anything. Deny
 beats allow; allow overrides the model and the other rules. `block_nonexistent = false`
 turns nonexistent names into warnings. Unknown keys and bad values are rejected with the
-key that holds them. Without `--config`, the server reads `./customs.toml`, then
+key that holds them. An upstream URL may carry credentials for a private registry
+(`https://user:token@host/path`, sent as Basic auth) but no query or fragment. Only the
+policy file holds them: `GET /api/policy`, the change log, the webhook and the log show
+`https://***@host/path`, and a `PUT` that sends `***` back for the same URL keeps the stored
+credentials (with a different URL it is refused). Without `--config`, the server reads `./customs.toml`, then
 `<data-dir>/policy.toml`, and `PUT /api/policy` writes to the file it read (or
 `<data-dir>/policy.toml`). Client mode (the hooks, `check`, `diff`, `audit`, `mcp`, `scan`)
 never reads the working directory, which is the agent's project and may be hostile: its
