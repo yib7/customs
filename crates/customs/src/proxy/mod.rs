@@ -17,26 +17,47 @@ use crate::engine::{EngineError, Outcome};
 use crate::util::ecosystem_str;
 use crate::verdict::Verdict;
 
+/// Whether the policy can hide young versions; metadata is fetched for that only then.
+fn hides_young(policy: &crate::config::Policy) -> bool {
+    policy.hide_young_versions
+        && policy.mode == Mode::Enforce
+        && policy.min_age_days > 0
+        && policy.min_age_severity == crate::config::AgeSeverity::Block
+}
+
+/// Fetch (and cache) the metadata [`young_versions`] reads, so it can run alongside the
+/// upstream page request.
+pub async fn prefetch_age_meta(state: &crate::server::AppState, eco: Ecosystem, name: &str) {
+    let policy = state.engine.policy();
+    if hides_young(&policy) {
+        let _ = state
+            .engine
+            .registry
+            .package_meta(&policy.upstream, eco, name)
+            .await;
+    }
+}
+
 /// Versions of `name` to leave out of the metadata served for it (see [`crate::cooldown`]).
-/// Metadata is fetched only when the policy can hide anything; a failed fetch hides
-/// nothing, and the archive request is still judged on its own.
+/// `listed` are the versions the upstream page offers: cached metadata that lacks one of
+/// them predates its release and is fetched again, or the new release would be served
+/// without being judged young. A failed fetch hides nothing, and the archive request is
+/// still judged on its own.
 pub async fn young_versions(
     state: &crate::server::AppState,
     eco: Ecosystem,
     name: &str,
+    listed: &[String],
 ) -> std::collections::HashSet<String> {
     let policy = state.engine.policy();
-    if !policy.hide_young_versions
-        || policy.mode != Mode::Enforce
-        || policy.min_age_days == 0
-        || policy.min_age_severity != crate::config::AgeSeverity::Block
-    {
+    if !hides_young(&policy) {
         return Default::default();
     }
+    let need: Vec<&str> = listed.iter().map(String::as_str).collect();
     match state
         .engine
         .registry
-        .package_meta(&policy.upstream, eco, name)
+        .package_meta_listing(&policy.upstream, eco, name, &need)
         .await
     {
         Ok(Some(meta)) => crate::cooldown::hidden_versions(&policy, &meta, crate::util::now()),

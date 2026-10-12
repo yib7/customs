@@ -691,7 +691,8 @@ allow), and that an `established` hit drops the model decision from the combinat
 rule hits still count). `risk` and component scores are `null` when that part of the model could not run
 (for example a package that does not exist has only a name score). `thresholds` are the
 effective ones (policy overrides applied). Policy `severity` is `allow` for informational
-hits (`allow`, `established`, `not_scanned`), else `warn` or `block`. Rules: `deny`, `allow`,
+hits (`allow`, `established`, `not_scanned` from the proxy, `also_checked`), else `warn`
+or `block`. Rules: `deny`, `allow`,
 `established` (an established release of a popular package, section 8),
 `block_nonexistent`, `min_age_days`, `block_install_scripts_from_new`, the release history
 rules of section 8 (`provenance_dropped`, `install_script_added`, `publisher_changed`,
@@ -701,7 +702,8 @@ rules of section 8 (`provenance_dropped`, `install_script_added`, `publisher_cha
 (a `.pth` file that launches, connects, downloads or reads secrets, block by default),
 `agent_bypass` (install-time code runs an AI coding CLI with its permission checks off,
 block by default), `not_scanned`
-(archive above the scan size limit).
+(archive above the scan size limit; `warn` from `POST /api/check` for a wheel above the
+check limit, which it does not download).
 `reasons` mix model features (positive contributions to the stacked logit, largest first)
 and name signals (`name_dist1`, `name_contains_popular_token`, ...). A name signal that
 explains a lookalike ("1 edit from popular package 'requests'") is always listed, with its
@@ -734,7 +736,13 @@ Registry proxy:
 - `GET /npm/{package}/-/{file}.tgz`: fetch, scan, decide, stream or 403 with
   `{"error": "<explanation>"}` (npm prints `error`).
 - `/npm/-/...` (audit, search and other registry endpoints) passes through unchanged,
-  query string included.
+  query string included. A response body cut short upstream is a 502, not an empty answer.
+- Upstream requests time out: 15 s to connect, 60 s per read, 2 min in all for a page,
+  metadata or passthrough request, and 10 min in all for an archive download (502). The
+  client trusts the platform roots plus the bundles named by `CUSTOMS_CA_FILE` (startup
+  fails if it cannot be read) and `SSL_CERT_FILE` (logged and skipped if unreadable).
+  A cached archive whose size on disk differs from the recorded size is downloaded again,
+  and partial downloads over an hour old are removed at startup.
 - Artifact responses carry `x-customs-decision` and `x-customs-verdict` (verdict id).
 - Every path that ends up in an upstream URL is checked after the router has
   percent-decoded it once: a `?`, `#`, `\`, `%`, whitespace or control character, or an
@@ -747,9 +755,19 @@ Registry proxy:
 API (JSON). CORS allows only `http://localhost:5173` (the Vite dev server).
 - `POST /api/check` `{ "ecosystem": "pypi", "name": "foo", "version": null, "client": "cli" }`:
   `version` is null (latest), an exact version, a range (`>=1,<2`, `~=1.4`, `^1.2`, npm
-  ranges), or an npm dist-tag; it resolves to the newest matching non-yanked version. The
-  server applies policy, fetches (PyPI prefers the sdist, then a pure wheel, then the
-  smallest wheel), scans, and returns a verdict. Errors: 400 bad input, 404
+  ranges), or an npm dist-tag; it resolves to the newest matching non-yanked version. A
+  PyPI version matches by PEP 440 equality (`1.0.0` is `1.0`), and an unpublished exact
+  version is a 422, never the latest. The server applies policy, fetches (PyPI prefers
+  the sdist, then a pure wheel, then the smallest wheel), scans, and returns a verdict.
+  When the release has both an sdist and a pure-Python (`-none-any`) wheel, both are read, since pip installs the wheel: both
+  verdicts are recorded, each with an `also_checked` hit naming the other file, and the
+  stricter is returned. A payload only in a platform-specific wheel is caught by the proxy,
+  which scans exactly what the installer downloads, not by a hook-only check. Each
+  archive is dated by its own upload time, not the release's. A wheel whose registry size is above the
+  64 MiB check limit is not scored by the models (judged on metadata and policy rules only), with a `warn` `not_scanned` hit;
+  an sdist or npm tarball is always downloaded (up to the 2 GiB download limit) and read
+  like the proxy reads it, since its install-time code runs (npm's `unpackedSize` is
+  written by the publisher and is not trusted). Errors: 400 bad input, 404
   `{ "error", "code": "nonexistent_package", "verdict": {...} }` when the registry does not
   know the name (the verdict carries the `block_nonexistent` decision), 422 no matching
   version, 502 upstream failure; all as `{ "error": "..." }`. Optional `"resolve"`:
@@ -813,8 +831,8 @@ API (JSON). CORS allows only `http://localhost:5173` (the Vite dev server).
   them). `new_evidence` lists findings of `to` with no finding of the same indicator, file
   and code in `from`, ignoring the line, since an edit above a finding moves it; both
   sides come from capped evidence lists (50 items), so a release with more findings than
-  that can list some old ones as new. An archive above the check limit is not
-  downloaded and one above the scan limit is not compared; `files_note` says why. Errors:
+  that can list some old ones as new. A wheel above the check limit is not
+  downloaded and an archive above the scan limit is not compared; `files_note` says why. Errors:
   404 for an unknown package, 422 for a version that does not resolve, no earlier
   release, or `from` equal to `to`. The dashboard's verdict page runs the comparison on
   request, since it downloads and scans the earlier release.
@@ -874,8 +892,18 @@ are still checked by the Claude Code hook and `customs audit`, which read the lo
 itself.
 
 Caching: archives are stored by sha256 under `<data-dir>/cache`, verdict inputs (scan and
-model output) in SQLite keyed by (ecosystem, name, version, sha256, model_version).
+model output) in SQLite keyed by (ecosystem, name, version, sha256, model_version), where
+the last column also names the scanner rules, feature schema and summary versions and the
+scan size limit. An upgrade that changes the scanner therefore rescans instead of serving
+summaries that lack its new findings, and rows of an earlier scanner are dropped at startup.
 Concurrent requests for the same artifact URL share one download and one scan.
+
+The database (`<data-dir>/customs.db`) records its schema version in SQLite's
+`user_version`; a database written by a newer customs, or a file that is not a customs
+database, stops startup with an error naming the file and saying to move it aside. Each
+verdict and the event that produced it are written in one transaction. Verdicts and events
+are the audit trail behind the dashboard and are never pruned, so the database grows with
+use; only scan-cache rows of an earlier scanner are dropped.
 
 ### 7.1 Notifications
 
@@ -995,6 +1023,17 @@ only in enforce mode with `min_age_severity = "block"`: allow-listed versions st
 unless also denied, a package whose versions are all young keeps them (the install then
 fails with the block reason instead of "no matching version"), and a pinned young version
 is still blocked when fetched. Metadata fetch errors fail open (nothing held back).
+
+Package metadata is cached for five minutes, so a release published meanwhile would be
+missing from it. A cached document that does not list a version the page offers, the
+archive requested, or a pinned `check` names is fetched again (a document refetched for a
+miss is reused for 5 s, so a version that does not exist cannot turn every request into
+an upstream one). A PyPI file the project document does not list is looked up in the
+uncached release document, and the age comes from that file's own upload time, not the
+release's: a wheel uploaded today to a two-year-old release is a day-old file and not
+`[established]`. A version or file that fresh metadata still does not list (or a file name
+that names no version of the package) has no known publish time and hits `min_age_days`
+(and `block_install_scripts_from_new`) as if it were young.
 `scripts/installer_e2e.py` checks this with real pip, uv, npm, pnpm, yarn and bun.
 
 `POST /api/check` resolves an unpinned or ranged version the same way by default

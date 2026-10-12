@@ -461,6 +461,10 @@ flags, none in install-time code.
   (release age, install scripts in new packages, release history) are the backstop.
 * The hook reads commands, not intentions. A script that is written and run in the same
   command, JSR and URL imports in Deno code, and code built at run time are not read.
+* `customs check` and the hooks read a PyPI release's sdist and its pure-Python wheel, not
+  its platform-specific wheels (the server does not know the client's platform), so a
+  payload only in a platform wheel is caught by the proxy, which scans exactly what pip
+  downloads, and not by a hook-only setup.
 * PyPI and npm only. No Maven, RubyGems, crates.io or Go modules, and Windows is not
   tested.
 * Next: a retrain with more benign releases of popular packages, and the same proxy for

@@ -162,12 +162,11 @@ async fn packument(
         .unwrap_or("application/json");
     // The release-age metadata is fetched alongside the page, not after it.
     let held_back = async {
-        match version {
-            None => super::young_versions(state, Ecosystem::Npm, name).await,
-            Some(_) => Default::default(),
+        if version.is_none() {
+            super::prefetch_age_meta(state, Ecosystem::Npm, name).await;
         }
     };
-    let (page, hidden) = tokio::join!(
+    let (page, ()) = tokio::join!(
         state
             .engine
             .registry
@@ -209,7 +208,18 @@ async fn packument(
     }
     match serde_json::from_slice::<Value>(&page.body) {
         Ok(mut v) => {
-            let n = crate::cooldown::filter_packument(&mut v, &hidden);
+            let n = match version {
+                None => {
+                    let listed: Vec<String> = v
+                        .get("versions")
+                        .and_then(Value::as_object)
+                        .map(|o| o.keys().cloned().collect())
+                        .unwrap_or_default();
+                    let hidden = super::young_versions(state, Ecosystem::Npm, name, &listed).await;
+                    crate::cooldown::filter_packument(&mut v, &hidden)
+                }
+                Some(_) => 0,
+            };
             rewrite_packument(&mut v, &proxy_base(headers));
             let mut resp = ([(header::CONTENT_TYPE, ct)], v.to_string()).into_response();
             if n > 0 {
@@ -264,7 +274,13 @@ async fn passthrough(
     let Ok(m) = reqwest::Method::from_bytes(method.as_str().as_bytes()) else {
         return StatusCode::METHOD_NOT_ALLOWED.into_response();
     };
-    let mut req = state.engine.registry.client().request(m, &url).body(body);
+    let mut req = state
+        .engine
+        .registry
+        .client()
+        .request(m, &url)
+        .timeout(crate::registry::PAGE_TIMEOUT)
+        .body(body);
     for h in [
         header::CONTENT_TYPE,
         header::ACCEPT,
@@ -284,15 +300,22 @@ async fn passthrough(
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or("application/json")
                 .to_string();
-            let bytes = resp.bytes().await.unwrap_or_default();
-            (status, [(header::CONTENT_TYPE, ct)], bytes).into_response()
+            match resp.bytes().await {
+                Ok(bytes) => (status, [(header::CONTENT_TYPE, ct)], bytes).into_response(),
+                // A body cut short is an upstream failure, not an empty answer.
+                Err(e) => upstream_error(e),
+            }
         }
-        Err(e) => (
-            StatusCode::BAD_GATEWAY,
-            format!("customs: upstream error: {e}\n"),
-        )
-            .into_response(),
+        Err(e) => upstream_error(e),
     }
+}
+
+fn upstream_error(e: reqwest::Error) -> Response {
+    (
+        StatusCode::BAD_GATEWAY,
+        format!("customs: upstream error: {e}\n"),
+    )
+        .into_response()
 }
 
 #[cfg(test)]

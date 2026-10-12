@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use customs_model::{decide, Decision, Models, Reason, ScoreInput, Scores};
@@ -25,7 +25,7 @@ use crate::metrics::Metrics;
 use crate::policy::{effective_thresholds, evaluate, PolicyContext};
 use crate::policy_log::PolicyChange;
 use crate::registry::{FetchError, FileMeta, Registry, VersionMeta};
-use crate::resolve::{exact_version, resolve_version};
+use crate::resolve::{exact_version, pinned_version, resolve_version};
 use crate::store::{ArtifactRow, NewEvent, ScanKey, Store};
 use crate::util::{
     ecosystem_str, normalize_name, now, now_ts, parse_npm_tarball, parse_pypi_filename,
@@ -52,10 +52,14 @@ pub struct Limits {
     pub max_download_bytes: u64,
     /// Artifacts larger than this are served but only scored on name and metadata.
     pub max_scan_bytes: u64,
-    /// `POST /api/check` does not download artifacts larger than this.
+    /// `POST /api/check` does not download a wheel the registry says is larger than this;
+    /// sdists and npm tarballs are always read, up to `max_download_bytes`.
     pub max_check_bytes: u64,
     /// The artifact cache is trimmed (least recently used first) when it grows past this.
     pub max_cache_bytes: u64,
+    /// An archive download that takes longer than this in all is abandoned (502), so an
+    /// upstream that drips bytes cannot hold the download and everyone waiting on it.
+    pub download_timeout: Duration,
 }
 
 impl Default for Limits {
@@ -65,6 +69,7 @@ impl Default for Limits {
             max_scan_bytes: 256 << 20,
             max_check_bytes: 64 << 20,
             max_cache_bytes: 10 << 30,
+            download_timeout: Duration::from_secs(600),
         }
     }
 }
@@ -130,8 +135,10 @@ pub struct MetaFacts {
     pub history: Option<ReleaseHistory>,
     /// The registry marks the version (or the requested file) yanked, or npm deprecated.
     pub yanked: bool,
-    /// An informational hit about how the version was chosen.
-    pub note: Option<PolicyHit>,
+    /// Metadata read fresh does not list the version or file, so its age is unknown.
+    pub age_unknown: bool,
+    /// Hits about how the version or the archive was chosen.
+    pub notes: Vec<PolicyHit>,
 }
 
 /// One artifact to evaluate.
@@ -158,8 +165,12 @@ pub struct Outcome {
     pub size: u64,
 }
 
+/// Version of [`ScanSummary`]. Bump when its contents or the scoring for the same archive
+/// change, so summaries cached by an earlier build are not served (see [`Engine::scan_identity`]).
+const SCAN_SUMMARY_VERSION: u32 = 1;
+
 /// What the scan cache stores: everything in a verdict that depends only on the bytes,
-/// the name, and the model version.
+/// the name, the model version, and the scanner.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct ScanSummary {
     risk: Option<f64>,
@@ -187,6 +198,8 @@ struct ScanSummary {
 }
 
 type Flight = Arc<OnceCell<Result<Outcome, EngineError>>>;
+/// A flight with the event kind and client of the caller that started it.
+type Leader = (Flight, EventKind, Option<String>);
 
 pub struct Engine {
     policy: RwLock<Arc<Policy>>,
@@ -202,7 +215,9 @@ pub struct Engine {
     policy_changes: broadcast::Sender<PolicyChange>,
     /// Serializes policy changes, so each diff is taken against the policy it replaces.
     policy_write: Mutex<()>,
-    inflight: Mutex<HashMap<String, Flight>>,
+    /// In-progress evaluations by artifact URL, with the event kind and client that started
+    /// each one.
+    inflight: Mutex<HashMap<String, Leader>>,
     tmp_counter: AtomicU64,
     /// Bytes downloaded since the cache size was last checked.
     cache_growth: AtomicU64,
@@ -228,11 +243,46 @@ fn install_scripts_from_report(r: &ScanReport) -> Vec<String> {
     out
 }
 
+/// Partial downloads older than this were left by a crash. Age-gated rather than removed
+/// outright because a server and in-process engines may share a data directory.
+const STALE_PART_AGE: Duration = Duration::from_secs(3600);
+
+/// Remove `.part` files in `tmp` last written more than `older_than` ago; returns how many.
+fn remove_stale_parts(tmp: &Path, older_than: Duration) -> usize {
+    let Ok(entries) = std::fs::read_dir(tmp) else {
+        return 0;
+    };
+    let mut n = 0;
+    for e in entries.flatten() {
+        let stale = e.file_name().to_string_lossy().ends_with(".part")
+            && e.metadata()
+                .and_then(|m| m.modified())
+                .is_ok_and(|t| t.elapsed().is_ok_and(|age| age > older_than));
+        if stale && std::fs::remove_file(e.path()).is_ok() {
+            n += 1;
+        }
+    }
+    n
+}
+
 impl Engine {
     pub fn new(cfg: EngineConfig) -> anyhow::Result<Arc<Self>> {
         let cache_dir = cfg.data_dir.join("cache");
         std::fs::create_dir_all(cache_dir.join("tmp"))?;
+        let n = remove_stale_parts(&cache_dir.join("tmp"), STALE_PART_AGE);
+        if n > 0 {
+            tracing::info!(
+                files = n,
+                "removed partial downloads left by an earlier run"
+            );
+        }
         let store = Store::open(&cfg.data_dir.join("customs.db"))?;
+        // Summaries from an earlier scanner or summary version are never read again.
+        match store.scan_cache_prune(&scan_suffix(&cfg.limits)) {
+            Ok(0) => {}
+            Ok(n) => tracing::info!(rows = n, "dropped scan results of an earlier scanner"),
+            Err(e) => tracing::warn!(error = %e, "pruning the scan cache failed"),
+        }
         let (events, _) = broadcast::channel(1024);
         let (policy_changes, _) = broadcast::channel(64);
         Ok(Arc::new(Self {
@@ -311,23 +361,37 @@ impl Engine {
         self.cache_dir.join(&sha256[..2]).join(sha256)
     }
 
+    /// What a cached scan summary depends on besides the archive: the models, the scanner
+    /// rules and feature schema, the summary layout, and the scan size limit. Stored in the
+    /// scan cache's `model_version` column, so a new identity needs no schema change.
+    fn scan_identity(&self) -> String {
+        format!(
+            "{}{}",
+            self.models.model_version(),
+            scan_suffix(&self.limits)
+        )
+    }
+
     /// Evaluate one artifact; concurrent calls for the same URL share a single evaluation.
     pub async fn evaluate_artifact(
         self: &Arc<Self>,
         req: ArtifactRequest,
     ) -> Result<Outcome, EngineError> {
         let key = req.url.clone();
-        let cell = {
+        let me = (req.kind, req.client.clone());
+        // `Some` when this call joined a flight another kind of request or client started.
+        let (cell, joined_other) = {
             let mut map = self.inflight.lock().unwrap_or_else(|e| e.into_inner());
             match map.get(&key) {
-                Some(c) => {
+                Some((c, kind, client)) => {
                     self.metrics.singleflight_join();
-                    c.clone()
+                    let other = (*kind, client.clone()) != me;
+                    (c.clone(), other.then_some(me))
                 }
                 None => {
                     let c: Flight = Arc::new(OnceCell::new());
-                    map.insert(key.clone(), c.clone());
-                    c
+                    map.insert(key.clone(), (c.clone(), me.0, me.1.clone()));
+                    (c, None)
                 }
             }
         };
@@ -342,9 +406,16 @@ impl Engine {
             })
             .await
             .clone();
-        let mut map = self.inflight.lock().unwrap_or_else(|e| e.into_inner());
-        if map.get(&key).is_some_and(|c| Arc::ptr_eq(c, &cell)) {
-            map.remove(&key);
+        {
+            let mut map = self.inflight.lock().unwrap_or_else(|e| e.into_inner());
+            if map.get(&key).is_some_and(|(c, ..)| Arc::ptr_eq(c, &cell)) {
+                map.remove(&key);
+            }
+        }
+        // The evaluation recorded one event, for the request that started it. A proxy
+        // install that joined a check (or a check that joined an install) is its own event.
+        if let (Ok(o), Some((kind, client))) = (&result, joined_other) {
+            self.record_event(&o.verdict, kind, client)?;
         }
         result
     }
@@ -424,29 +495,34 @@ impl Engine {
         }
     }
 
-    /// Registry facts for an artifact requested through the proxy. Failures only cost the
-    /// metadata rules, so they are logged and otherwise ignored.
+    /// Registry facts for an artifact requested through the proxy. A failed metadata
+    /// lookup only costs the metadata rules, so it is logged and otherwise ignored; metadata
+    /// that does not list the file is another matter (see [`MetaFacts::age_unknown`]).
     async fn artifact_meta(&self, policy: &Policy, req: &ArtifactRequest) -> MetaFacts {
         let mut facts = MetaFacts {
             exists: true,
             ..Default::default()
         };
         let Some(version) = &req.version else {
+            // A file name that names no version of the package cannot be dated.
+            facts.age_unknown = true;
             return facts;
         };
         // npm needs the packument anyway. For PyPI the per-release document is enough unless
         // a release history rule that applies to PyPI is on; then the project document (also
         // cached for `check`) is read, falling back to the release document when it does not
-        // list the version yet.
+        // list the file. A cached document that lacks the version is fetched again: it may
+        // predate the release.
         let full = match req.ecosystem {
             Ecosystem::Npm => true,
             Ecosystem::Pypi => policy.pypi_history_rules_enabled(),
         };
+        let lists_file = |vm: &VersionMeta| vm.files.iter().any(|f| f.filename == req.filename);
         let mut result: Result<Option<VersionMeta>, FetchError> = Ok(None);
         if full {
             result = self
                 .registry
-                .package_meta(&policy.upstream, req.ecosystem, &req.name)
+                .package_meta_listing(&policy.upstream, req.ecosystem, &req.name, &[version])
                 .await
                 .map(|m| {
                     m.and_then(|m| {
@@ -458,22 +534,37 @@ impl Engine {
         if let Some(h) = facts.history.as_mut() {
             self.lookup_added_dependencies(policy, h).await;
         }
-        if req.ecosystem == Ecosystem::Pypi && !matches!(result, Ok(Some(_))) {
-            result = self
+        if req.ecosystem == Ecosystem::Pypi && !matches!(&result, Ok(Some(vm)) if lists_file(vm)) {
+            // The release document is never cached, so it lists a file uploaded since.
+            match self
                 .registry
                 .pypi_release(&policy.upstream, &req.name, version)
-                .await;
+                .await
+            {
+                Ok(None) | Err(_) if matches!(result, Ok(Some(_))) => {}
+                other => result = other,
+            }
         }
         match result {
             Ok(Some(vm)) => {
-                // Prefer the upload time of this exact file over the release time.
-                let file = vm.files.iter().find(|f| f.filename == req.filename);
-                facts.published = file.and_then(|f| f.upload_time).or(vm.published);
-                facts.yanked = vm.yanked || file.is_some_and(|f| f.yanked);
-                facts.install_scripts = vm.install_scripts;
+                facts.install_scripts = vm.install_scripts.clone();
+                match vm.files.iter().find(|f| f.filename == req.filename) {
+                    // The upload time of this exact file, not the release's: a file added to
+                    // an old release is as new as its upload.
+                    Some(file) => {
+                        facts.published = file.upload_time.or(vm.published);
+                        facts.yanked = vm.yanked || file.yanked;
+                    }
+                    None => {
+                        tracing::debug!(name = %req.name, version, file = %req.filename, "registry metadata does not list the file");
+                        facts.yanked = vm.yanked;
+                        facts.age_unknown = true;
+                    }
+                }
             }
             Ok(None) => {
-                tracing::debug!(name = %req.name, version, "no registry metadata for version")
+                tracing::debug!(name = %req.name, version, "no registry metadata for version");
+                facts.age_unknown = true;
             }
             Err(e) => {
                 tracing::warn!(name = %req.name, version, error = %e, "registry metadata lookup failed")
@@ -490,7 +581,8 @@ impl Engine {
     ) -> Result<(PathBuf, String, u64), EngineError> {
         if let Some(row) = self.store.artifact_get(url).map_err(internal)? {
             let p = self.blob_path(&row.sha256);
-            if p.exists() {
+            // A blob cut short (a crash mid-write, a full disk) is a miss, not a hit.
+            if std::fs::metadata(&p).is_ok_and(|m| m.len() == row.size) {
                 crate::cache::touch(&p);
                 self.metrics.cache("artifact_hit");
                 return Ok((p, row.sha256, row.size));
@@ -505,7 +597,12 @@ impl Engine {
         ));
         let dl = match self
             .registry
-            .download(url, &tmp, self.limits.max_download_bytes)
+            .download(
+                url,
+                &tmp,
+                self.limits.max_download_bytes,
+                self.limits.download_timeout,
+            )
             .await
         {
             Ok(d) => d,
@@ -571,7 +668,7 @@ impl Engine {
             name: name.to_string(),
             version: version.map(str::to_string),
             sha256: sha256.to_string(),
-            model_version: self.models.model_version().to_string(),
+            model_version: self.scan_identity(),
         };
         if let Some(json) = self.store.scan_cache_get(&key).map_err(internal)? {
             if let Ok(s) = serde_json::from_str::<ScanSummary>(&json) {
@@ -685,12 +782,13 @@ impl Engine {
                 history: meta.history.as_ref(),
                 popular_rank: self.models.popular_rank(eco, name),
                 yanked: meta.yanked,
+                age_unknown: meta.age_unknown,
                 now: now(),
             },
         );
         let mut hits = outcome.hits.clone();
         hits.extend(scan_hits(policy, s));
-        hits.extend(meta.note.clone());
+        hits.extend(meta.notes.iter().cloned());
         let decision = outcome.decide_with(model_decision, &hits);
         Verdict {
             id: None,
@@ -724,21 +822,21 @@ impl Engine {
         kind: EventKind,
         client: Option<String>,
     ) -> Result<Verdict, EngineError> {
-        let id = self.store.insert_verdict(&v).map_err(internal)?;
-        v.id = Some(id);
-        let event = self
+        let new_event = NewEvent {
+            ecosystem: v.ecosystem,
+            name: v.name.clone(),
+            version: v.version.clone(),
+            client,
+            kind,
+            decision: Some(v.decision),
+            risk: v.risk,
+            verdict_id: None,
+        };
+        let (id, event) = self
             .store
-            .insert_event(NewEvent {
-                ecosystem: v.ecosystem,
-                name: v.name.clone(),
-                version: v.version.clone(),
-                client,
-                kind,
-                decision: Some(v.decision),
-                risk: v.risk,
-                verdict_id: Some(id),
-            })
+            .insert_verdict_with_event(&v, new_event)
             .map_err(internal)?;
+        v.id = Some(id);
         self.metrics
             .verdict(v.decision.as_str(), ecosystem_str(v.ecosystem));
         self.metrics.event(kind.as_str());
@@ -756,6 +854,31 @@ impl Engine {
         // No subscribers is fine.
         let _ = self.events.send(event);
         Ok(v)
+    }
+
+    /// Record another request answered by the already stored verdict `v`.
+    fn record_event(
+        &self,
+        v: &Verdict,
+        kind: EventKind,
+        client: Option<String>,
+    ) -> Result<(), EngineError> {
+        let event = self
+            .store
+            .insert_event(NewEvent {
+                ecosystem: v.ecosystem,
+                name: v.name.clone(),
+                version: v.version.clone(),
+                client,
+                kind,
+                decision: Some(v.decision),
+                risk: v.risk,
+                verdict_id: v.id,
+            })
+            .map_err(internal)?;
+        self.metrics.event(kind.as_str());
+        let _ = self.events.send(event);
+        Ok(())
     }
 
     /// Record a request for a name the registry does not know (from the proxy).
@@ -782,6 +905,20 @@ impl Engine {
         self.record(v, EventKind::NonexistentPackage, client)
     }
 
+    /// Package metadata that lists `pins` when the registry does.
+    async fn package_meta_with(
+        &self,
+        policy: &Policy,
+        eco: Ecosystem,
+        name: &str,
+        pins: &[String],
+    ) -> Result<Option<Arc<crate::registry::PackageMeta>>, FetchError> {
+        let need: Vec<&str> = pins.iter().map(String::as_str).collect();
+        self.registry
+            .package_meta_listing(&policy.upstream, eco, name, &need)
+            .await
+    }
+
     /// `POST /api/check`: resolve, fetch, scan, decide. An unpinned spec resolves against
     /// the metadata the proxy serves.
     pub async fn check(
@@ -806,11 +943,12 @@ impl Engine {
     ) -> Result<Verdict, EngineError> {
         let policy = self.policy();
         let name = normalize_name(eco, name);
-        let Some(meta) = self
-            .registry
-            .package_meta(&policy.upstream, eco, &name)
-            .await?
-        else {
+        // A pinned version the cached metadata lacks may have been published since.
+        let pins: Vec<String> = version
+            .and_then(|v| pinned_version(eco, v))
+            .into_iter()
+            .collect();
+        let Some(meta) = self.package_meta_with(&policy, eco, &name, &pins).await? else {
             return self.record_nonexistent(eco, &name, client);
         };
         // Resolve an unpinned spec against the metadata the proxy serves, which leaves out
@@ -857,29 +995,81 @@ impl Engine {
             install_scripts: vm.install_scripts.clone(),
             history,
             yanked: vm.yanked,
-            note,
+            age_unknown: false,
+            notes: note.into_iter().collect(),
         };
-        let Some(file) = choose_file(eco, &vm.files) else {
+        let files = check_files(eco, &vm.files);
+        if files.is_empty() {
             return Err(EngineError::NotFound(format!(
                 "{name} {version} has no downloadable files"
             )));
-        };
-        if file.size.is_some_and(|s| s > self.limits.max_check_bytes) {
-            let s = self.name_only_summary(
-                eco,
-                &name,
-                Some(format!(
-                    "{} is {} MB, above the {} MB check limit; not scored by the models (archive not scanned), judged on metadata and policy rules only",
+        }
+        // pip installs a compatible wheel when there is one, so the pure-Python wheel is
+        // read as well as the sdist; both verdicts are recorded and the stricter returned.
+        let checks = files.iter().map(|file| {
+            let mut facts = facts.clone();
+            if let Some(other) = files.iter().find(|f| f.filename != file.filename) {
+                facts.notes.push(PolicyHit {
+                    rule: "also_checked".into(),
+                    severity: Decision::Allow,
+                    detail: format!(
+                        "{} was checked as well (an installer may pick either); the stricter verdict is returned",
+                        other.filename
+                    ),
+                });
+            }
+            self.check_file(&policy, eco, &name, &version, file, facts, client.clone())
+        });
+        let verdicts = futures::future::join_all(checks).await;
+        let mut best: Option<Verdict> = None;
+        for v in verdicts {
+            let v = v?;
+            if best.as_ref().is_none_or(|b| v.decision > b.decision) {
+                best = Some(v);
+            }
+        }
+        best.ok_or_else(|| internal("no archive was checked"))
+    }
+
+    /// Check one archive of a release: its own upload time and yank status, read like the
+    /// proxy reads it unless it is a wheel above the check limit.
+    #[allow(clippy::too_many_arguments)]
+    async fn check_file(
+        self: &Arc<Self>,
+        policy: &Policy,
+        eco: Ecosystem,
+        name: &str,
+        version: &str,
+        file: &FileMeta,
+        mut facts: MetaFacts,
+        client: Option<String>,
+    ) -> Result<Verdict, EngineError> {
+        // The archive's own upload time: an sdist added years after the wheels is new.
+        facts.published = file.upload_time.or(facts.published);
+        facts.yanked = facts.yanked || file.yanked;
+        // Only a wheel may skip the download: it runs nothing at install but a top-level
+        // `.pth` file. Anything else is read like the proxy reads it (up to the download
+        // limit), since its install-time code must not go unread. PyPI reports a file's own
+        // size; npm reports none (its `unpackedSize` is whatever the publisher wrote).
+        if file.filename.ends_with(".whl")
+            && file.size.is_some_and(|s| s > self.limits.max_check_bytes)
+        {
+            let s = self.name_only_summary(eco, name, None);
+            facts.notes.push(PolicyHit {
+                rule: "not_scanned".into(),
+                severity: Decision::Warn,
+                detail: format!(
+                    "{} is {} MB, above the {} MB check limit, so it was not downloaded or read; not scored by the models, judged on metadata and policy rules only",
                     file.filename,
                     file.size.unwrap_or(0) >> 20,
                     self.limits.max_check_bytes >> 20
-                )),
-            );
+                ),
+            });
             let v = self.build_verdict(
-                &policy,
+                policy,
                 eco,
-                &name,
-                Some(version),
+                name,
+                Some(version.to_string()),
                 Some(file.filename.clone()),
                 file.sha256.clone(),
                 &s,
@@ -891,8 +1081,8 @@ impl Engine {
         let out = self
             .evaluate_artifact(ArtifactRequest {
                 ecosystem: eco,
-                name,
-                version: Some(version),
+                name: name.to_string(),
+                version: Some(version.to_string()),
                 filename: file.filename.clone(),
                 url: file.url.clone(),
                 client,
@@ -918,11 +1108,12 @@ impl Engine {
     ) -> Result<ReleaseDiff, EngineError> {
         let policy = self.policy();
         let name = normalize_name(eco, name);
-        let Some(meta) = self
-            .registry
-            .package_meta(&policy.upstream, eco, &name)
-            .await?
-        else {
+        let pins: Vec<String> = [from, to]
+            .into_iter()
+            .flatten()
+            .filter_map(|v| pinned_version(eco, v))
+            .collect();
+        let Some(meta) = self.package_meta_with(&policy, eco, &name, &pins).await? else {
             return Err(EngineError::NotFound(format!(
                 "'{name}' does not exist on {}",
                 crate::util::registry_name(eco)
@@ -1009,7 +1200,7 @@ impl Engine {
         let limit = self.limits.max_check_bytes;
         if let Some(big) = [&file_from, &file_to]
             .into_iter()
-            .find(|f| f.size.is_some_and(|s| s > limit))
+            .find(|f| f.filename.ends_with(".whl") && f.size.is_some_and(|s| s > limit))
         {
             d.files_note = Some(format!(
                 "{} is above the {} MB check limit",
@@ -1108,13 +1299,18 @@ fn local_verdict(
 ) -> Verdict {
     use sha2::{Digest, Sha256};
     let sha = hex::encode(Sha256::digest(bytes));
+    let given = name.is_some();
     let name = name
         .map(str::to_string)
         .or(guessed.as_ref().map(|g| g.0.clone()))
         .unwrap_or_else(|| filename.to_string());
-    let version = guessed
-        .map(|g| g.1)
-        .or_else(|| parse_npm_tarball(&name, filename));
+    let version = guessed.map(|g| g.1).or_else(|| {
+        if given {
+            parse_npm_tarball(&name, filename)
+        } else {
+            crate::util::guess_npm_tarball_version(filename)
+        }
+    });
     let facts = MetaFacts {
         exists: true,
         ..Default::default()
@@ -1129,6 +1325,16 @@ fn local_verdict(
         &s,
         false,
         &facts,
+    )
+}
+
+/// The scanner part of [`Engine::scan_identity`].
+fn scan_suffix(limits: &Limits) -> String {
+    format!(
+        "|scan:{}.{}|summary:{SCAN_SUMMARY_VERSION}|max:{}",
+        customs_scan::SCAN_RULES_VERSION,
+        customs_scan::FEATURE_SCHEMA_VERSION,
+        limits.max_scan_bytes
     )
 }
 
@@ -1259,6 +1465,25 @@ fn scan_and_score(
             }
         }
     }
+}
+
+/// The archives `check` reads: [`choose_file`]'s pick and, when that is an sdist, the
+/// pure-Python wheel of the same release, which pip installs in its place. A
+/// platform-specific wheel is not read (the server does not know the client's platform).
+pub fn check_files(eco: Ecosystem, files: &[FileMeta]) -> Vec<&FileMeta> {
+    let Some(first) = choose_file(eco, files) else {
+        return Vec::new();
+    };
+    let mut out = vec![first];
+    if eco == Ecosystem::Pypi && !first.filename.ends_with(".whl") {
+        if let Some(w) = files
+            .iter()
+            .find(|f| !f.url.is_empty() && !f.yanked && f.filename.ends_with("-none-any.whl"))
+        {
+            out.push(w);
+        }
+    }
+    out
 }
 
 /// Pick the artifact `check` scans. PyPI prefers the sdist, whose `setup.py` runs at
@@ -1535,5 +1760,23 @@ mod tests {
             agent_bypass: vec![],
         };
         assert_eq!(install_scripts_from_report(&r), vec!["postinstall"]);
+    }
+
+    #[test]
+    fn stale_partial_downloads_are_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join("1-1-0.part");
+        let new = dir.path().join("2-2-0.part");
+        std::fs::write(&old, b"x").unwrap();
+        std::fs::write(&new, b"x").unwrap();
+        std::fs::File::options()
+            .append(true)
+            .open(&old)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - Duration::from_secs(7200))
+            .unwrap();
+        assert_eq!(remove_stale_parts(dir.path(), Duration::from_secs(3600)), 1);
+        assert!(!old.exists());
+        assert!(new.exists());
     }
 }

@@ -23,6 +23,17 @@ use crate::metrics::Metrics;
 use crate::util::{ecosystem_str, normalize_name};
 
 const META_TTL: Duration = Duration::from_secs(300);
+/// A page, metadata or passthrough request that takes longer than this in all fails, so an
+/// upstream that drips bytes (each read inside the 60 s read timeout) cannot hold it forever.
+pub const PAGE_TIMEOUT: Duration = Duration::from_secs(120);
+/// A cached document that was itself refetched for a missing version is served for this
+/// long before another miss refetches it, so requests for a version that does not exist
+/// cannot turn every lookup into an upstream request.
+const META_REFRESH_GAP: Duration = Duration::from_secs(5);
+/// Past this many cached documents, an insert first drops the expired ones.
+const META_SOFT_CAP: usize = 512;
+/// The cache never holds more documents than this; the oldest go first.
+const META_HARD_CAP: usize = 4096;
 
 #[derive(Debug, thiserror::Error)]
 pub enum FetchError {
@@ -116,6 +127,19 @@ impl PackageMeta {
     pub fn version(&self, v: &str) -> Option<&VersionMeta> {
         self.versions.iter().find(|x| x.version == v)
     }
+
+    /// Whether the document lists version `v` (PyPI: any spelling with the same PEP 440
+    /// value, as `1.0` for `1.0.0`).
+    pub fn lists(&self, v: &str) -> bool {
+        self.version(v).is_some()
+            || (self.ecosystem == Ecosystem::Pypi
+                && crate::resolve::Pep440::parse(v).is_some_and(|want| {
+                    self.versions.iter().any(|x| {
+                        crate::resolve::Pep440::parse(&x.version)
+                            .is_some_and(|have| have.cmp(&want).is_eq())
+                    })
+                }))
+    }
 }
 
 /// Result of downloading an artifact into a file.
@@ -128,7 +152,32 @@ pub struct Download {
 pub struct Registry {
     client: reqwest::Client,
     metrics: Arc<Metrics>,
-    meta: Mutex<HashMap<String, (Instant, Arc<PackageMeta>)>>,
+    meta: Mutex<HashMap<String, MetaEntry>>,
+}
+
+/// A cached package document.
+struct MetaEntry {
+    fetched: Instant,
+    meta: Arc<PackageMeta>,
+    /// Fetched because the copy before it did not list a version a caller needed.
+    refreshed: bool,
+}
+
+/// Cache `entry` under `key`, keeping the map bounded: past [`META_SOFT_CAP`] entries the
+/// expired ones are dropped, and past [`META_HARD_CAP`] the oldest quarter goes too.
+fn insert_meta(map: &mut HashMap<String, MetaEntry>, key: String, entry: MetaEntry, now: Instant) {
+    if map.len() >= META_SOFT_CAP {
+        map.retain(|_, e| now.saturating_duration_since(e.fetched) < META_TTL);
+    }
+    map.insert(key, entry);
+    if map.len() > META_HARD_CAP {
+        let mut ages: Vec<(Instant, String)> =
+            map.iter().map(|(k, e)| (e.fetched, k.clone())).collect();
+        ages.sort();
+        for (_, k) in ages.into_iter().take(map.len() - META_HARD_CAP * 3 / 4) {
+            map.remove(&k);
+        }
+    }
 }
 
 fn parse_time(v: &Value) -> Option<DateTime<Utc>> {
@@ -173,6 +222,34 @@ pub fn npm_escape(name: &str) -> String {
     name.replacen('/', "%2f", 1)
 }
 
+/// Extra root certificates from `CUSTOMS_CA_FILE` and `SSL_CERT_FILE` (read through `env`).
+/// An unreadable `CUSTOMS_CA_FILE` is an error: it is set for Customs alone, and ignoring it
+/// would only surface later as certificate failures on every upstream request. An unreadable
+/// `SSL_CERT_FILE` is shared with other tools, so it is logged and skipped.
+fn extra_roots(env: impl Fn(&str) -> Option<String>) -> anyhow::Result<Vec<reqwest::Certificate>> {
+    let mut out = Vec::new();
+    for var in ["CUSTOMS_CA_FILE", "SSL_CERT_FILE"] {
+        let Some(path) = env(var).filter(|p| !p.is_empty()) else {
+            continue;
+        };
+        let pem = match std::fs::read(&path) {
+            Ok(pem) => pem,
+            Err(e) if var == "CUSTOMS_CA_FILE" => {
+                anyhow::bail!("reading {var}={path}: {e}");
+            }
+            Err(e) => {
+                tracing::warn!(%path, error = %e, "{var} is unreadable; not adding its certificates");
+                continue;
+            }
+        };
+        out.extend(
+            reqwest::Certificate::from_pem_bundle(&pem)
+                .with_context(|| format!("parsing {var}={path}"))?,
+        );
+    }
+    Ok(out)
+}
+
 impl Registry {
     pub fn new(metrics: Arc<Metrics>) -> anyhow::Result<Self> {
         let mut b = reqwest::Client::builder()
@@ -181,16 +258,8 @@ impl Registry {
             .connect_timeout(Duration::from_secs(15))
             .read_timeout(Duration::from_secs(60))
             .pool_idle_timeout(Duration::from_secs(60));
-        for var in ["CUSTOMS_CA_FILE", "SSL_CERT_FILE"] {
-            if let Ok(path) = std::env::var(var) {
-                if let Ok(pem) = std::fs::read(&path) {
-                    let certs = reqwest::Certificate::from_pem_bundle(&pem)
-                        .with_context(|| format!("parsing {var}={path}"))?;
-                    for c in certs {
-                        b = b.add_root_certificate(c);
-                    }
-                }
-            }
+        for c in extra_roots(|var| std::env::var(var).ok())? {
+            b = b.add_root_certificate(c);
         }
         Ok(Self {
             client: b.build().context("building HTTP client")?,
@@ -215,9 +284,8 @@ impl Registry {
         if let Some(a) = accept {
             req = req.header(reqwest::header::ACCEPT, a);
         }
-        let resp = req.send().await;
         let result = async {
-            let resp = resp?;
+            let resp = req.send().await?;
             let status = resp.status().as_u16();
             let final_url = resp.url().to_string();
             let content_type = resp
@@ -232,8 +300,15 @@ impl Registry {
                 body,
                 url: final_url,
             })
-        }
-        .await;
+        };
+        let result = tokio::time::timeout(PAGE_TIMEOUT, result)
+            .await
+            .unwrap_or_else(|_| {
+                Err(FetchError::Transport(format!(
+                    "{url} took longer than {} s",
+                    PAGE_TIMEOUT.as_secs()
+                )))
+            });
         self.metrics.upstream_latency(kind, start.elapsed());
         result
     }
@@ -255,15 +330,33 @@ impl Registry {
         eco: Ecosystem,
         name: &str,
     ) -> Result<Option<Arc<PackageMeta>>, FetchError> {
+        self.package_meta_listing(upstream, eco, name, &[]).await
+    }
+
+    /// [`Registry::package_meta`] for a caller that needs the versions in `need`: a cached
+    /// document that does not list one of them predates its release and is fetched again
+    /// (at most once per [`META_REFRESH_GAP`] while the version stays missing).
+    pub async fn package_meta_listing(
+        &self,
+        upstream: &Upstream,
+        eco: Ecosystem,
+        name: &str,
+        need: &[&str],
+    ) -> Result<Option<Arc<PackageMeta>>, FetchError> {
         let key = format!("{}:{}", ecosystem_str(eco), normalize_name(eco, name));
-        if let Some((t, m)) = self
+        let mut refreshed = false;
+        if let Some(e) = self
             .meta
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(&key)
         {
-            if t.elapsed() < META_TTL {
-                return Ok(Some(m.clone()));
+            let age = e.fetched.elapsed();
+            if age < META_TTL {
+                if need.iter().all(|v| e.meta.lists(v)) || (e.refreshed && age < META_REFRESH_GAP) {
+                    return Ok(Some(e.meta.clone()));
+                }
+                refreshed = true;
             }
         }
         let parsed = match eco {
@@ -290,10 +383,17 @@ impl Registry {
         }
         .ok_or_else(|| FetchError::Other(format!("unexpected metadata format for {key}")))?;
         let m = Arc::new(parsed);
-        self.meta
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(key, (Instant::now(), m.clone()));
+        let now = Instant::now();
+        insert_meta(
+            &mut self.meta.lock().unwrap_or_else(|e| e.into_inner()),
+            key,
+            MetaEntry {
+                fetched: now,
+                meta: m.clone(),
+                refreshed,
+            },
+            now,
+        );
         Ok(Some(m))
     }
 
@@ -362,12 +462,14 @@ impl Registry {
         }
     }
 
-    /// Stream `url` into `dest`, hashing as it goes. Fails with `TooLarge` past `max_bytes`.
+    /// Stream `url` into `dest`, hashing as it goes. Fails with `TooLarge` past `max_bytes`,
+    /// and with `Transport` when the whole download takes longer than `timeout`.
     pub async fn download(
         &self,
         url: &str,
         dest: &Path,
         max_bytes: u64,
+        timeout: Duration,
     ) -> Result<Download, FetchError> {
         let start = Instant::now();
         let result = async {
@@ -398,12 +500,23 @@ impl Registry {
             file.flush()
                 .await
                 .map_err(|e| FetchError::Other(format!("cache write: {e}")))?;
+            // On disk before the caller renames it into the cache and records it.
+            file.sync_all()
+                .await
+                .map_err(|e| FetchError::Other(format!("cache write: {e}")))?;
             Ok(Download {
                 sha256: hex::encode(hasher.finalize()),
                 size,
             })
-        }
-        .await;
+        };
+        let result = tokio::time::timeout(timeout, result)
+            .await
+            .unwrap_or_else(|_| {
+                Err(FetchError::Transport(format!(
+                    "downloading {url} took longer than {} s",
+                    timeout.as_secs()
+                )))
+            });
         self.metrics.upstream_latency("artifact", start.elapsed());
         result
     }
@@ -580,9 +693,9 @@ pub fn parse_npm_packument(v: &Value) -> Option<PackageMeta> {
                             upload_time: published,
                             sha256: None,
                             packagetype: "tarball".into(),
-                            size: dist
-                                .and_then(|d| d.get("unpackedSize"))
-                                .and_then(Value::as_u64),
+                            // The packument has no tarball size; `dist.unpackedSize` is
+                            // whatever the publisher wrote, so it is not used.
+                            size: None,
                             yanked: false,
                         }],
                         install_scripts,
@@ -629,6 +742,46 @@ pub fn parse_npm_packument(v: &Value) -> Option<PackageMeta> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_metadata_cache_stays_bounded() {
+        let meta = Arc::new(PackageMeta {
+            ecosystem: Ecosystem::Npm,
+            name: "x".into(),
+            latest: None,
+            dist_tags: BTreeMap::new(),
+            versions: vec![],
+            created: None,
+            people: vec![],
+        });
+        let entry = |fetched: Instant| MetaEntry {
+            fetched,
+            meta: meta.clone(),
+            refreshed: false,
+        };
+        let t0 = Instant::now();
+        let mut map = HashMap::new();
+        for i in 0..META_SOFT_CAP {
+            insert_meta(&mut map, format!("old{i}"), entry(t0), t0);
+        }
+        assert_eq!(map.len(), META_SOFT_CAP);
+        // Once the old entries have expired, the next insert past the bound sweeps them.
+        let later = t0 + META_TTL + Duration::from_secs(1);
+        insert_meta(&mut map, "new".into(), entry(later), later);
+        assert_eq!(map.len(), 1);
+        assert!(map.contains_key("new"));
+
+        // Fresh entries are never swept, but the hard cap drops the oldest.
+        let mut map = HashMap::new();
+        for i in 0..META_HARD_CAP + 10 {
+            let t = t0 + Duration::from_millis(i as u64);
+            insert_meta(&mut map, format!("k{i}"), entry(t), t);
+        }
+        assert!(map.len() <= META_HARD_CAP);
+        let last = format!("k{}", META_HARD_CAP + 9);
+        assert!(map.contains_key(&last));
+        assert!(!map.contains_key("k0"));
+    }
 
     #[test]
     fn parses_pypi_project() {
@@ -763,5 +916,27 @@ mod tests {
     fn escapes_scoped_names() {
         assert_eq!(npm_escape("@babel/core"), "@babel%2fcore");
         assert_eq!(npm_escape("left-pad"), "left-pad");
+    }
+
+    #[test]
+    fn an_unreadable_customs_ca_file_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("ca.pem").display().to_string();
+        let Err(err) = extra_roots(|v| (v == "CUSTOMS_CA_FILE").then(|| missing.clone())) else {
+            panic!("an unreadable CUSTOMS_CA_FILE was ignored");
+        };
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("CUSTOMS_CA_FILE") && msg.contains(&missing),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_ssl_cert_file_is_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("ca.pem").display().to_string();
+        let roots = extra_roots(|v| (v == "SSL_CERT_FILE").then(|| missing.clone())).unwrap();
+        assert!(roots.is_empty());
     }
 }

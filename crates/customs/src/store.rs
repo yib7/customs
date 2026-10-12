@@ -77,6 +77,8 @@ pub struct ScanKey {
     pub name: String,
     pub version: Option<String>,
     pub sha256: String,
+    /// Everything else the cached result depends on: the model version followed by the
+    /// scanner and summary versions and the scan limit (the engine's scan identity).
     pub model_version: String,
 }
 
@@ -172,16 +174,80 @@ pub struct Store {
     conn: Mutex<Connection>,
 }
 
+fn insert_verdict_row(c: &Connection, v: &Verdict, json: &str) -> rusqlite::Result<i64> {
+    c.execute(
+        "INSERT INTO verdicts (ts, ecosystem, name, version, sha256, decision, risk, json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            v.ts,
+            ecosystem_str(v.ecosystem),
+            v.name,
+            v.version,
+            v.sha256,
+            v.decision.as_str(),
+            v.risk,
+            json
+        ],
+    )?;
+    Ok(c.last_insert_rowid())
+}
+
+fn insert_event_row(c: &Connection, e: &NewEvent, ts: &str) -> rusqlite::Result<i64> {
+    c.execute(
+        "INSERT INTO events (ts, ecosystem, name, version, client, kind, decision, risk, verdict_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            ts,
+            ecosystem_str(e.ecosystem),
+            e.name,
+            e.version,
+            e.client,
+            e.kind.as_str(),
+            e.decision.map(|d| d.as_str()),
+            e.risk,
+            e.verdict_id
+        ],
+    )?;
+    Ok(c.last_insert_rowid())
+}
+
+fn event_from(id: i64, ts: String, e: NewEvent) -> Event {
+    Event {
+        id,
+        ts,
+        ecosystem: e.ecosystem,
+        name: e.name,
+        version: e.version,
+        client: e.client,
+        kind: e.kind,
+        decision: e.decision,
+        risk: e.risk,
+        verdict_id: e.verdict_id,
+    }
+}
+
+/// The schema this build writes, kept in SQLite's `user_version`.
+const SCHEMA_VERSION: i64 = 1;
+
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
         }
         let conn = Connection::open(path).with_context(|| format!("opening {}", path.display()))?;
-        conn.pragma_update(None, "journal_mode", "WAL")?;
-        conn.pragma_update(None, "synchronous", "NORMAL")?;
-        conn.busy_timeout(std::time::Duration::from_secs(5))?;
-        Self::init(conn)
+        let unusable = || {
+            format!(
+                "opening the database {}: it is not a usable SQLite file; move it aside to start fresh",
+                path.display()
+            )
+        };
+        conn.pragma_update(None, "journal_mode", "WAL")
+            .with_context(unusable)?;
+        conn.pragma_update(None, "synchronous", "NORMAL")
+            .with_context(unusable)?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))
+            .with_context(unusable)?;
+        Self::init(conn).with_context(|| format!("opening the database {}", path.display()))
     }
 
     pub fn open_in_memory() -> Result<Self> {
@@ -189,7 +255,28 @@ impl Store {
     }
 
     fn init(conn: Connection) -> Result<Self> {
-        conn.execute_batch(SCHEMA).context("creating schema")?;
+        let found: i64 = conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .context("reading the schema version: not a usable SQLite file; move it aside to start fresh")?;
+        if found > SCHEMA_VERSION {
+            anyhow::bail!(
+                "it was written by a newer customs (schema {found}; this build knows {SCHEMA_VERSION}); \
+                 upgrade customs, or move it aside to start fresh"
+            );
+        }
+        conn.execute_batch(SCHEMA).context(
+            "creating schema: not a usable customs database; move it aside to start fresh",
+        )?;
+        match found {
+            // 0 is a new file or one from before the schema was versioned; both match SCHEMA.
+            // A future change adds `n => migrate from n to n + 1` arms here.
+            0 | SCHEMA_VERSION => {}
+            other => anyhow::bail!("unknown schema version {other}; move it aside to start fresh"),
+        }
+        if found != SCHEMA_VERSION {
+            conn.pragma_update(None, "user_version", SCHEMA_VERSION)
+                .context("recording the schema version")?;
+        }
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -202,23 +289,22 @@ impl Store {
 
     pub fn insert_verdict(&self, v: &Verdict) -> Result<i64> {
         let json = serde_json::to_string(v)?;
-        self.with(|c| {
-            c.execute(
-                "INSERT INTO verdicts (ts, ecosystem, name, version, sha256, decision, risk, json)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![
-                    v.ts,
-                    ecosystem_str(v.ecosystem),
-                    v.name,
-                    v.version,
-                    v.sha256,
-                    v.decision.as_str(),
-                    v.risk,
-                    json
-                ],
-            )?;
-            Ok(c.last_insert_rowid())
-        })
+        self.with(|c| insert_verdict_row(c, v, &json))
+    }
+
+    /// Store `v` and an event pointing at it in one transaction: both or neither.
+    pub fn insert_verdict_with_event(&self, v: &Verdict, mut e: NewEvent) -> Result<(i64, Event)> {
+        let json = serde_json::to_string(v)?;
+        let ts = now_ts();
+        let (id, event_id) = self.with(|c| {
+            let tx = c.unchecked_transaction()?;
+            let id = insert_verdict_row(&tx, v, &json)?;
+            e.verdict_id = Some(id);
+            let event_id = insert_event_row(&tx, &e, &ts)?;
+            tx.commit()?;
+            Ok((id, event_id))
+        })?;
+        Ok((id, event_from(event_id, ts, e)))
     }
 
     pub fn verdict(&self, id: i64) -> Result<Option<Verdict>> {
@@ -240,36 +326,8 @@ impl Store {
 
     pub fn insert_event(&self, e: NewEvent) -> Result<Event> {
         let ts = now_ts();
-        let id = self.with(|c| {
-            c.execute(
-                "INSERT INTO events (ts, ecosystem, name, version, client, kind, decision, risk, verdict_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                params![
-                    ts,
-                    ecosystem_str(e.ecosystem),
-                    e.name,
-                    e.version,
-                    e.client,
-                    e.kind.as_str(),
-                    e.decision.map(|d| d.as_str()),
-                    e.risk,
-                    e.verdict_id
-                ],
-            )?;
-            Ok(c.last_insert_rowid())
-        })?;
-        Ok(Event {
-            id,
-            ts,
-            ecosystem: e.ecosystem,
-            name: e.name,
-            version: e.version,
-            client: e.client,
-            kind: e.kind,
-            decision: e.decision,
-            risk: e.risk,
-            verdict_id: e.verdict_id,
-        })
+        let id = self.with(|c| insert_event_row(c, &e, &ts))?;
+        Ok(event_from(id, ts, e))
     }
 
     /// Record a policy change; `id` and `ts` of the argument are replaced.
@@ -387,6 +445,19 @@ impl Store {
                 ],
             )?;
             Ok(())
+        })
+    }
+
+    /// Delete scan cache rows whose identity does not end with `suffix` (the current
+    /// scanner, summary version and scan limit). Rows of other model versions with the same
+    /// scanner stay, since another engine on the same data directory may use them.
+    pub fn scan_cache_prune(&self, suffix: &str) -> Result<usize> {
+        self.with(|c| {
+            c.execute(
+                "DELETE FROM scan_cache
+                 WHERE substr(model_version, length(model_version) - length(?1) + 1) != ?1",
+                [suffix],
+            )
         })
     }
 
@@ -552,6 +623,7 @@ pub fn rule_label(rule: &str) -> String {
         "block_install_scripts_from_new" => "New package with install scripts".into(),
         "scan_error" => "Archive could not be scanned".into(),
         "not_scanned" => "Archive too large to scan".into(),
+        "also_checked" => "The release's other archive was checked too".into(),
         "provenance_dropped" => "Release lost its provenance attestation".into(),
         "install_script_added" => "Release added or changed an install script".into(),
         "publisher_changed" => "Release published by a new account".into(),
@@ -565,5 +637,144 @@ pub fn rule_label(rule: &str) -> String {
         "startup_hook" => ".pth file runs code at every Python start".into(),
         "agent_bypass" => "Install-time code runs an AI agent without permission checks".into(),
         other => other.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key(identity: &str) -> ScanKey {
+        ScanKey {
+            ecosystem: Ecosystem::Pypi,
+            name: "p".into(),
+            version: Some("1.0".into()),
+            sha256: "ab".into(),
+            model_version: identity.into(),
+        }
+    }
+
+    fn verdict() -> Verdict {
+        Verdict {
+            id: None,
+            ts: now_ts(),
+            ecosystem: Ecosystem::Pypi,
+            name: "p".into(),
+            version: Some("1.0".into()),
+            artifact: None,
+            sha256: None,
+            decision: Decision::Allow,
+            risk: Some(0.1),
+            model_decision: Decision::Allow,
+            thresholds: Default::default(),
+            scores: Default::default(),
+            policy_hits: vec![],
+            reasons: vec![],
+            evidence: vec![],
+            install_surface: vec![],
+            scan_errors: vec![],
+            scanned_ms: 0,
+            model_version: "m".into(),
+            cached: false,
+            mode: Default::default(),
+        }
+    }
+
+    fn event(v: &Verdict) -> NewEvent {
+        NewEvent {
+            ecosystem: v.ecosystem,
+            name: v.name.clone(),
+            version: v.version.clone(),
+            client: Some("pip".into()),
+            kind: EventKind::Install,
+            decision: Some(v.decision),
+            risk: v.risk,
+            verdict_id: None,
+        }
+    }
+
+    fn user_version(s: &Store) -> i64 {
+        s.with(|c| c.pragma_query_value(None, "user_version", |r| r.get(0)))
+            .unwrap()
+    }
+
+    #[test]
+    fn an_unusable_database_is_named_with_a_remedy() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("customs.db");
+        std::fs::write(&path, vec![b'x'; 4096]).unwrap();
+        let err = format!(
+            "{:#}",
+            Store::open(&path).err().expect("garbage must not open")
+        );
+        assert!(err.contains(&path.display().to_string()), "{err}");
+        assert!(err.contains("move it aside"), "{err}");
+    }
+
+    #[test]
+    fn the_schema_version_is_recorded_and_checked() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("customs.db");
+        let s = Store::open(&path).unwrap();
+        assert_eq!(user_version(&s), SCHEMA_VERSION);
+        assert_eq!(
+            user_version(&Store::open_in_memory().unwrap()),
+            SCHEMA_VERSION
+        );
+        s.with(|c| c.pragma_update(None, "user_version", SCHEMA_VERSION + 1))
+            .unwrap();
+        drop(s);
+        let err = format!(
+            "{:#}",
+            Store::open(&path)
+                .err()
+                .expect("newer schema must not open")
+        );
+        assert!(err.contains("newer"), "{err}");
+        assert!(err.contains(&path.display().to_string()), "{err}");
+    }
+
+    #[test]
+    fn a_verdict_and_its_event_are_stored_together() {
+        let s = Store::open_in_memory().unwrap();
+        let v = verdict();
+        let (id, ev) = s.insert_verdict_with_event(&v, event(&v)).unwrap();
+        assert_eq!(ev.verdict_id, Some(id));
+        assert!(s.verdict(id).unwrap().is_some());
+
+        // When the event cannot be written, the verdict is not left behind either.
+        s.with(|c| c.execute_batch("DROP TABLE events")).unwrap();
+        assert!(s.insert_verdict_with_event(&v, event(&v)).is_err());
+        let n: i64 = s
+            .with(|c| c.query_row("SELECT COUNT(*) FROM verdicts", [], |r| r.get(0)))
+            .unwrap();
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn scan_cache_prune_keeps_only_the_current_scanner() {
+        let s = Store::open_in_memory().unwrap();
+        for id in [
+            "m1",
+            "m1|scan:1.1|summary:1|max:9",
+            "m2|scan:1.1|summary:1|max:9",
+            "m1|scan:0.1|summary:1|max:9",
+        ] {
+            s.scan_cache_put(&key(id), "{}").unwrap();
+        }
+        assert_eq!(s.scan_cache_prune("|scan:1.1|summary:1|max:9").unwrap(), 2);
+        assert!(s.scan_cache_get(&key("m1")).unwrap().is_none());
+        assert!(s
+            .scan_cache_get(&key("m1|scan:0.1|summary:1|max:9"))
+            .unwrap()
+            .is_none());
+        assert!(s
+            .scan_cache_get(&key("m1|scan:1.1|summary:1|max:9"))
+            .unwrap()
+            .is_some());
+        assert!(s
+            .scan_cache_get(&key("m2|scan:1.1|summary:1|max:9"))
+            .unwrap()
+            .is_some());
     }
 }

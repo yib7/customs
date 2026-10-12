@@ -127,12 +127,11 @@ async fn fetch_and_rewrite(
         .unwrap_or(DEFAULT_ACCEPT);
     // The release-age metadata is fetched alongside the page, not after it.
     let held_back = async {
-        match project {
-            Some(p) => super::young_versions(state, Ecosystem::Pypi, p).await,
-            None => Default::default(),
+        if let Some(p) = project {
+            super::prefetch_age_meta(state, Ecosystem::Pypi, p).await;
         }
     };
-    let (page, hidden) = tokio::join!(
+    let (page, ()) = tokio::join!(
         state.engine.registry.get(&url, Some(accept), "pypi_simple"),
         held_back
     );
@@ -187,6 +186,14 @@ async fn fetch_and_rewrite(
         match serde_json::from_slice::<Value>(&page.body) {
             Ok(mut v) => {
                 if let Some(p) = project {
+                    let names = v
+                        .get("files")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|f| f.get("filename").and_then(Value::as_str));
+                    let listed = versions_of(p, names);
+                    let hidden = super::young_versions(state, Ecosystem::Pypi, p, &listed).await;
                     removed = crate::cooldown::filter_simple_json(&mut v, p, &hidden, &reason);
                 }
                 rw.rewrite_json(&mut v, &page_url);
@@ -201,6 +208,8 @@ async fn fetch_and_rewrite(
         let html = String::from_utf8_lossy(&page.body);
         let html = match project {
             Some(p) => {
+                let listed = versions_of(p, link_texts(&html));
+                let hidden = super::young_versions(state, Ecosystem::Pypi, p, &listed).await;
                 let (h, n) = crate::cooldown::filter_simple_html(&html, p, &hidden, &reason);
                 removed = n;
                 h
@@ -215,6 +224,27 @@ async fn fetch_and_rewrite(
             .insert(super::HIDDEN_HEADER, header::HeaderValue::from(removed));
     }
     resp
+}
+
+/// The versions of `project` among file names on its simple page.
+fn versions_of<'a>(project: &str, filenames: impl Iterator<Item = &'a str>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for f in filenames {
+        if let Some((n, v)) = parse_pypi_filename(f.trim()) {
+            if normalize_name(Ecosystem::Pypi, &n) == project && !out.contains(&v) {
+                out.push(v);
+            }
+        }
+    }
+    out
+}
+
+/// Link texts of an HTML simple page, which are the file names on PyPI and its mirrors.
+fn link_texts(html: &str) -> impl Iterator<Item = &str> {
+    static LINK: OnceLock<Regex> = OnceLock::new();
+    LINK.get_or_init(|| Regex::new(r"(?is)<a\s[^>]*>([^<]*)</a>").unwrap())
+        .captures_iter(html)
+        .filter_map(|c| c.get(1).map(|m| m.as_str()))
 }
 
 /// `GET /pypi/simple/`

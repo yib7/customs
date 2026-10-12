@@ -96,13 +96,20 @@ pub fn parse_pypi_filename(filename: &str) -> Option<(String, String)> {
     Some((stem[..idx].to_string(), stem[idx + 1..].to_string()))
 }
 
-/// Version from an npm tarball file name `{bare}-{version}.tgz`.
+/// Version from an npm tarball file name `{bare}-{version}.tgz` of `package`. A file named
+/// for another package (`lodash/-/evil-4.17.21.tgz`) has none: it is not that version.
 pub fn parse_npm_tarball(package: &str, filename: &str) -> Option<String> {
     let stem = filename.strip_suffix(".tgz")?;
     let bare = package.rsplit('/').next().unwrap_or(package);
-    if let Some(v) = stem.strip_prefix(&format!("{bare}-")) {
-        return Some(v.to_string());
-    }
+    stem.strip_prefix(&format!("{bare}-"))
+        .filter(|v| v.starts_with(|c: char| c.is_ascii_digit()))
+        .map(str::to_string)
+}
+
+/// Best guess at the version in a tarball name when the package is not known
+/// (`customs scan x-1.0.0.tgz`): what follows the first `-` that precedes a digit.
+pub fn guess_npm_tarball_version(filename: &str) -> Option<String> {
+    let stem = filename.strip_suffix(".tgz")?;
     let bytes = stem.as_bytes();
     let idx = (0..bytes.len().saturating_sub(1))
         .find(|&i| bytes[i] == b'-' && bytes[i + 1].is_ascii_digit())?;
@@ -163,6 +170,13 @@ mod tests {
             Some("1.0.0-beta.1")
         );
         assert_eq!(parse_npm_tarball("x", "x.zip"), None);
+        // Another package's file name is not a version of this one.
+        assert_eq!(parse_npm_tarball("lodash", "evil-4.17.21.tgz"), None);
+        assert_eq!(parse_npm_tarball("lodash", "lodash-evil-4.17.21.tgz"), None);
+        assert_eq!(
+            guess_npm_tarball_version("left-pad-1.3.0.tgz").as_deref(),
+            Some("1.3.0")
+        );
     }
 
     #[test]

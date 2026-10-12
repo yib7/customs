@@ -28,7 +28,42 @@ use tokio::net::TcpListener;
 struct MockState {
     base: String,
     hits: Mutex<HashMap<String, usize>>,
-    file_delay_ms: AtomicUsize,
+    /// When set, archive downloads wait for a permit (one per download).
+    file_gate: Mutex<Option<Arc<tokio::sync::Semaphore>>>,
+    /// Files added while a test runs.
+    extra_pypi: Mutex<Vec<ExtraFile>>,
+    extra_npm: Mutex<Vec<ExtraFile>>,
+}
+
+/// A file a test adds to the mock registry after it started. An npm file of a listed
+/// version must be named `{bare}-{version}.tgz`, the name the packument's tarball URL
+/// gives it.
+#[derive(Clone)]
+struct ExtraFile {
+    name: String,
+    version: String,
+    filename: String,
+    bytes: Vec<u8>,
+    /// Upload (PyPI) or publish (npm) time.
+    time: String,
+    /// npm: extra version document fields.
+    doc: Value,
+    /// Whether the registry metadata lists it (the archive is served either way).
+    listed: bool,
+}
+
+impl ExtraFile {
+    fn new(name: &str, version: &str, filename: &str, bytes: &[u8], time: String) -> Self {
+        Self {
+            name: name.into(),
+            version: version.into(),
+            filename: filename.into(),
+            bytes: bytes.to_vec(),
+            time,
+            doc: json!({}),
+            listed: true,
+        }
+    }
 }
 
 impl MockState {
@@ -132,7 +167,7 @@ async fn simple_page(
     if headers.get("accept").and_then(|a| a.to_str().ok())
         == Some("application/vnd.pypi.simple.v1+json")
     {
-        let files: Vec<Value> = pypi_packages()
+        let mut files: Vec<Value> = pypi_packages()
             .into_iter()
             .filter(|p| p.0 == project)
             .map(|(n, v, _, t)| {
@@ -142,6 +177,11 @@ async fn simple_page(
                 json!({"filename": file_name(n, v), "upload-time": t, "provenance": prov})
             })
             .collect();
+        for f in m.extra_pypi.lock().unwrap().iter() {
+            if f.name == project && f.listed {
+                files.push(json!({"filename": f.filename, "upload-time": f.time}));
+            }
+        }
         if files.is_empty() {
             return (StatusCode::NOT_FOUND, "Not Found").into_response();
         }
@@ -151,11 +191,19 @@ async fn simple_page(
         )
             .into_response();
     }
-    let links: Vec<String> = pypi_packages()
+    let mut names: Vec<String> = pypi_packages()
         .into_iter()
         .filter(|p| p.0 == project)
-        .map(|(n, v, _, _)| {
-            let f = file_name(n, v);
+        .map(|(n, v, _, _)| file_name(n, v))
+        .collect();
+    for f in m.extra_pypi.lock().unwrap().iter() {
+        if f.name == project && f.listed {
+            names.push(f.filename.clone());
+        }
+    }
+    let links: Vec<String> = names
+        .iter()
+        .map(|f| {
             format!(
                 r#"<a href="{}/files/packages/ab/cd/{f}#sha256=00">{f}</a><br/>"#,
                 m.base
@@ -184,19 +232,44 @@ fn pypi_file_json(m: &MockState, n: &str, v: &str, t: &str, bytes: &[u8]) -> Val
     })
 }
 
+fn extra_pypi_file_json(m: &MockState, f: &ExtraFile) -> Value {
+    json!({
+        "filename": f.filename,
+        "url": format!("{}/files/packages/ab/cd/{}", m.base, f.filename),
+        "upload_time_iso_8601": f.time,
+        "packagetype": if f.filename.ends_with(".whl") { "bdist_wheel" } else { "sdist" },
+        "size": f.bytes.len(),
+        "digests": {"sha256": "00"},
+        "yanked": false,
+    })
+}
+
+/// The releases of `name` as `(version, files)`, in the order they were added.
+fn pypi_releases(m: &MockState, name: &str) -> Vec<(String, Vec<Value>)> {
+    let mut out: Vec<(String, Vec<Value>)> = Vec::new();
+    let mut add = |v: &str, f: Value| match out.iter_mut().find(|(x, _)| x == v) {
+        Some((_, files)) => files.push(f),
+        None => out.push((v.to_string(), vec![f])),
+    };
+    for (n, v, b, t) in pypi_packages().into_iter().filter(|p| p.0 == name) {
+        add(v, pypi_file_json(m, n, v, &t, b));
+    }
+    for f in m.extra_pypi.lock().unwrap().iter() {
+        if f.name == name && f.listed {
+            add(&f.version, extra_pypi_file_json(m, f));
+        }
+    }
+    out
+}
+
 async fn pypi_json(State(m): State<Mock>, Path(name): Path<String>) -> Response {
-    let pkgs: Vec<_> = pypi_packages()
-        .into_iter()
-        .filter(|p| p.0 == name)
-        .collect();
-    if pkgs.is_empty() {
+    let rels = pypi_releases(&m, &name);
+    if rels.is_empty() {
         return (StatusCode::NOT_FOUND, Json(json!({"message": "Not Found"}))).into_response();
     }
-    let mut releases = serde_json::Map::new();
-    for (n, v, b, t) in &pkgs {
-        releases.insert(v.to_string(), json!([pypi_file_json(&m, n, v, t, b)]));
-    }
-    let latest = pkgs.last().unwrap().1;
+    let latest = rels.last().unwrap().0.clone();
+    let releases: serde_json::Map<String, Value> =
+        rels.into_iter().map(|(v, f)| (v, json!(f))).collect();
     Json(json!({"info": {"name": name, "version": latest}, "releases": releases})).into_response()
 }
 
@@ -204,29 +277,42 @@ async fn pypi_version_json(
     State(m): State<Mock>,
     Path((name, version)): Path<(String, String)>,
 ) -> Response {
-    match pypi_packages()
+    match pypi_releases(&m, &name)
         .into_iter()
-        .find(|p| p.0 == name && p.1 == version)
+        .find(|(v, _)| *v == version)
     {
-        Some((n, v, b, t)) => Json(
-            json!({"info": {"name": n, "version": v}, "urls": [pypi_file_json(&m, n, v, &t, b)]}),
-        )
-        .into_response(),
+        Some((v, files)) => {
+            Json(json!({"info": {"name": name, "version": v}, "urls": files})).into_response()
+        }
         None => (StatusCode::NOT_FOUND, "{}").into_response(),
+    }
+}
+
+/// Wait for the test to release one download, when it holds them back.
+async fn pass_gate(m: &MockState) {
+    let gate = m.file_gate.lock().unwrap().clone();
+    if let Some(g) = gate {
+        g.acquire().await.unwrap().forget();
     }
 }
 
 async fn files(State(m): State<Mock>, Path(path): Path<String>) -> Response {
     m.hit(&path);
-    let delay = m.file_delay_ms.load(Ordering::SeqCst);
-    if delay > 0 {
-        tokio::time::sleep(Duration::from_millis(delay as u64)).await;
-    }
+    pass_gate(&m).await;
     let file = path.rsplit('/').next().unwrap_or("");
     for (n, v, b, _) in pypi_packages() {
         if file_name(n, v) == file {
             return b.to_vec().into_response();
         }
+    }
+    if let Some(f) = m
+        .extra_pypi
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|f| f.filename == file)
+    {
+        return f.bytes.clone().into_response();
     }
     StatusCode::NOT_FOUND.into_response()
 }
@@ -381,22 +467,46 @@ async fn npm_search(uri: axum::http::Uri) -> Response {
 async fn npm_doc(State(m): State<Mock>, Path(rest): Path<String>) -> Response {
     if let Some((name, file)) = rest.split_once("/-/") {
         m.hit(&format!("npm:{file}"));
+        pass_gate(&m).await;
         for (n, v, b, _, _) in npm_packages() {
             let bare = n.rsplit('/').next().unwrap();
             if n == name && file == format!("{bare}-{v}.tgz") {
                 return b.to_vec().into_response();
             }
         }
+        if let Some(f) = m
+            .extra_npm
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|f| f.name == name && f.filename == file)
+        {
+            return f.bytes.clone().into_response();
+        }
         return StatusCode::NOT_FOUND.into_response();
     }
     let name = rest.replace("%2f", "/").replace("%2F", "/");
-    let rows: Vec<_> = npm_packages().into_iter().filter(|p| p.0 == name).collect();
+    let mut rows: Vec<(String, String, String, Value)> = npm_packages()
+        .into_iter()
+        .filter(|p| p.0 == name)
+        .map(|(n, v, _, t, extra)| (n.to_string(), v.to_string(), t, extra))
+        .collect();
+    for f in m.extra_npm.lock().unwrap().iter() {
+        if f.name == name && f.listed {
+            rows.push((
+                f.name.clone(),
+                f.version.clone(),
+                f.time.clone(),
+                f.doc.clone(),
+            ));
+        }
+    }
     if rows.is_empty() {
         return (StatusCode::NOT_FOUND, Json(json!({"error": "Not found"}))).into_response();
     }
     let mut time = serde_json::Map::new();
     let mut versions = serde_json::Map::new();
-    for (n, v, _, t, extra) in &rows {
+    for (n, v, t, extra) in &rows {
         let bare = n.rsplit('/').next().unwrap();
         let mut doc = extra.clone();
         doc["name"] = json!(n);
@@ -409,7 +519,7 @@ async fn npm_doc(State(m): State<Mock>, Path(rest): Path<String>) -> Response {
         time.insert(v.to_string(), json!(t));
         versions.insert(v.to_string(), doc);
     }
-    time.insert("created".into(), json!(rows[0].3));
+    time.insert("created".into(), json!(rows[0].2));
     Json(json!({
         "name": name,
         "dist-tags": {"latest": rows.last().unwrap().1},
@@ -1211,7 +1321,8 @@ async fn check_resolves_versions() {
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_requests_scan_once() {
     let h = Harness::start(|_| {}).await;
-    h.mock.file_delay_ms.store(400, Ordering::SeqCst);
+    // Hold the one upstream download until all eight requests have joined it.
+    let gate = hold_downloads(&h);
     let path = pypi_file_path("slowpkg", "1.0.0");
     let mut tasks = Vec::new();
     for _ in 0..8 {
@@ -1225,6 +1336,8 @@ async fn concurrent_requests_scan_once() {
             (r.status().as_u16(), id, r.bytes().await.unwrap())
         }));
     }
+    wait_for_metric(&h, "customs_singleflight_joins_total 7").await;
+    gate.add_permits(1);
     let mut ids = Vec::new();
     for t in tasks {
         let (status, id, body) = t.await.unwrap();
@@ -1459,7 +1572,18 @@ async fn events_filters_stats_model_metrics_health() {
     assert_eq!(s["by_ecosystem"]["pypi"]["allow"], 1);
     assert_eq!(s["by_kind"]["install"], 3);
     assert_eq!(s["blocks_per_day"].as_array().unwrap().len(), 30);
-    assert_eq!(s["blocks_per_day"][29]["count"], 1);
+    // Find the day by date: the block may have landed just before UTC midnight.
+    let ev = h.events().await;
+    let block = ev.iter().find(|e| e["decision"] == "block").unwrap();
+    let day = &block["ts"].as_str().unwrap()[..10];
+    let blocks: Vec<(&str, u64)> = s["blocks_per_day"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| (d["date"].as_str().unwrap(), d["count"].as_u64().unwrap()))
+        .filter(|(_, n)| *n > 0)
+        .collect();
+    assert_eq!(blocks, [(day, 1)]);
     assert_eq!(s["top_reasons"][0]["feature"], "inst_download_exec");
 
     let m: Value = h.get("/api/model").await.json().await.unwrap();
@@ -2368,9 +2492,48 @@ fn mcp_send(stdin: &mut std::process::ChildStdin, msg: Value) {
     stdin.flush().unwrap();
 }
 
-fn mcp_recv(stdout: &mut impl std::io::BufRead) -> Value {
-    let mut line = String::new();
-    stdout.read_line(&mut line).unwrap();
+/// How long the MCP test waits for any one reply.
+const MCP_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The lines a child writes to stdout, read on a helper thread, so a child that stops
+/// answering fails the test instead of hanging the suite.
+struct McpOut(std::sync::mpsc::Receiver<String>);
+
+impl McpOut {
+    fn new(mut r: impl std::io::BufRead + Send + 'static) -> Self {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || loop {
+            let mut line = String::new();
+            match r.read_line(&mut line) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {
+                    if tx.send(line).is_err() {
+                        break;
+                    }
+                }
+            }
+        });
+        Self(rx)
+    }
+
+    /// Everything the child writes before closing stdout.
+    fn rest(&mut self) -> String {
+        let mut out = String::new();
+        loop {
+            match self.0.recv_timeout(MCP_TIMEOUT) {
+                Ok(line) => out.push_str(&line),
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return out,
+                Err(e) => panic!("the MCP server did not close stdout within {MCP_TIMEOUT:?}: {e}"),
+            }
+        }
+    }
+}
+
+fn mcp_recv(stdout: &mut McpOut) -> Value {
+    let line = stdout
+        .0
+        .recv_timeout(MCP_TIMEOUT)
+        .unwrap_or_else(|e| panic!("no reply from the MCP server within {MCP_TIMEOUT:?}: {e}"));
     serde_json::from_str(&line).unwrap_or_else(|e| panic!("{e}: {line:?}"))
 }
 
@@ -2405,7 +2568,7 @@ fn mcp_server_over_stdio() {
         .spawn()
         .unwrap();
     let mut stdin = child.stdin.take().unwrap();
-    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let mut stdout = McpOut::new(BufReader::new(child.stdout.take().unwrap()));
 
     mcp_send(
         &mut stdin,
@@ -2483,11 +2646,15 @@ fn mcp_server_over_stdio() {
 
     // End of input ends the server cleanly; stdout carried nothing but replies.
     drop(stdin);
-    let mut rest = String::new();
-    stdout.read_to_string(&mut rest).unwrap();
-    assert_eq!(rest, "");
-    let out = child.wait_with_output().unwrap();
-    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(stdout.rest(), "");
+    let mut err = String::new();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut err)
+        .unwrap();
+    assert_eq!(child.wait().unwrap().code(), Some(0), "{err}");
 }
 
 /// Live registries. Run with `cargo test -p customs -- --ignored`.
@@ -2575,7 +2742,8 @@ async fn blocks_are_posted_to_the_webhook_once() {
     while received.lock().unwrap().is_empty() && std::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // The second block was seen and held back as a repeat, not merely late.
+    wait_for_metric(&h, "customs_notifications_total{outcome=\"repeat\"} 1").await;
     let got = received.lock().unwrap().clone();
     assert_eq!(got.len(), 1, "{got:?}");
     let text = got[0]["text"].as_str().unwrap();
@@ -2919,4 +3087,477 @@ async fn hook_checks_installs_that_runners_start() {
             .unwrap();
         assert!(reason.contains("zzevil"), "{command}: {reason}");
     }
+}
+
+// ---- Phase 3A: ENGINE ----
+
+fn sha256_hex(b: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(b))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn scan_cache_ignores_summaries_from_an_older_scanner() {
+    let h = Harness::start(|_| {}).await;
+    // What a build from before the `agent_bypass` rule cached for this archive: keyed by
+    // the model version alone, and without the field.
+    let old = json!({
+        "risk": 0.01, "scores": {}, "reasons": [], "evidence": [], "install_surface": [],
+        "scan_errors": [], "install_scripts": [], "scanned_ms": 1, "scanned": true,
+    });
+    let key = customs::store::ScanKey {
+        ecosystem: Ecosystem::Pypi,
+        name: "agentic".into(),
+        version: Some("1.0.0".into()),
+        sha256: sha256_hex(b"benign but agentic"),
+        model_version: "dev-untrained".into(),
+    };
+    h.engine
+        .store
+        .scan_cache_put(&key, &old.to_string())
+        .unwrap();
+    let (_, v) = h.check("pypi", "agentic", Some("1.0.0")).await;
+    assert_eq!(v["cached"], false, "{v}");
+    assert!(rules_of(&v).contains(&"agent_bypass".to_string()), "{v}");
+    assert_eq!(h.scans.load(Ordering::SeqCst), 1);
+    h.stop().await;
+}
+
+fn now_rfc3339() -> String {
+    Utc::now().to_rfc3339()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_release_published_while_metadata_is_cached_is_still_young() {
+    let h = Harness::start(|_| {}).await;
+    // The proxy's tarball path: the packument is cached, then a release with an install
+    // script appears.
+    assert_eq!(h.get("/npm/plainlib").await.status(), 200);
+    let mut f = ExtraFile::new(
+        "plainlib",
+        "0.2.0",
+        "plainlib-0.2.0.tgz",
+        b"benign plain 0.2.0",
+        now_rfc3339(),
+    );
+    f.doc = json!({"scripts": {"postinstall": "node x.js"}});
+    h.mock.extra_npm.lock().unwrap().push(f);
+    let r = h.get("/npm/plainlib/-/plainlib-0.2.0.tgz").await;
+    assert_eq!(r.status(), 403);
+    let err: Value = r.json().await.unwrap();
+    let msg = err["error"].as_str().unwrap();
+    assert!(msg.contains("min_age_days: published"), "{msg}");
+    assert!(msg.contains("block_install_scripts_from_new"), "{msg}");
+
+    // The packument the proxy serves leaves the new release out.
+    assert_eq!(h.get("/npm/@scope/lib").await.status(), 200);
+    h.mock.extra_npm.lock().unwrap().push(ExtraFile::new(
+        "@scope/lib",
+        "1.3.0",
+        "lib-1.3.0.tgz",
+        b"benign scoped 1.3.0",
+        now_rfc3339(),
+    ));
+    let r = h.get("/npm/@scope/lib").await;
+    assert_eq!(
+        r.headers()
+            .get("x-customs-hidden-versions")
+            .map(|v| v.to_str().unwrap()),
+        Some("1")
+    );
+    let doc: Value = r.json().await.unwrap();
+    assert!(doc["versions"].get("1.3.0").is_none(), "{doc}");
+    assert_eq!(doc["dist-tags"]["latest"], "1.2.3");
+
+    // A check pinned to the new release finds it instead of failing to resolve.
+    let (s, _) = h.check("npm", "lure-dep", None).await;
+    assert_eq!(s, 200);
+    h.mock.extra_npm.lock().unwrap().push(ExtraFile::new(
+        "lure-dep",
+        "0.0.2",
+        "lure-dep-0.0.2.tgz",
+        b"benign lure 0.0.2",
+        now_rfc3339(),
+    ));
+    let (s, v) = h.check("npm", "lure-dep", Some("0.0.2")).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["version"], "0.0.2");
+    assert!(rules_of(&v).contains(&"min_age_days".to_string()), "{v}");
+
+    // PyPI: the simple page marks a release the cached project document lacks.
+    let html = h.get("/pypi/simple/goodpkg/").await.text().await.unwrap();
+    assert!(!html.contains("data-yanked"), "{html}");
+    h.mock.extra_pypi.lock().unwrap().push(ExtraFile::new(
+        "goodpkg",
+        "1.2.0",
+        "goodpkg-1.2.0.tar.gz",
+        b"benign archive v1.2",
+        now_rfc3339(),
+    ));
+    let html = h.get("/pypi/simple/goodpkg/").await.text().await.unwrap();
+    let line = html
+        .lines()
+        .find(|l| l.contains(">goodpkg-1.2.0.tar.gz<"))
+        .unwrap_or_else(|| panic!("{html}"));
+    assert!(line.contains("data-yanked"), "{html}");
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_added_to_an_old_release_is_not_established() {
+    let h = Harness::start(|_| {}).await;
+    // six 1.16.0 is an established release; its project document is now cached.
+    let r = h.get(&pypi_file_path("six", "1.16.0")).await;
+    assert_eq!(r.headers()["x-customs-decision"], "allow");
+    // A wheel uploaded to that release today is as new as its upload.
+    h.mock.extra_pypi.lock().unwrap().push(ExtraFile::new(
+        "six",
+        "1.16.0",
+        "six-1.16.0-py3-none-any.whl",
+        b"EVIL wheel uploaded today",
+        now_rfc3339(),
+    ));
+    let r = h
+        .get("/pypi/files/packages/ab/cd/six-1.16.0-py3-none-any.whl")
+        .await;
+    assert_eq!(r.status(), 403);
+    let body = r.text().await.unwrap();
+    assert!(body.contains("min_age_days: published"), "{body}");
+    assert!(!body.contains("established"), "{body}");
+    // A file the registry does not list at all has no known age.
+    let mut f = ExtraFile::new(
+        "six",
+        "1.16.0",
+        "six-1.16.0-py2-none-any.whl",
+        b"benign unlisted",
+        now_rfc3339(),
+    );
+    f.listed = false;
+    h.mock.extra_pypi.lock().unwrap().push(f);
+    let r = h
+        .get("/pypi/files/packages/ab/cd/six-1.16.0-py2-none-any.whl")
+        .await;
+    assert_eq!(r.status(), 403);
+    let body = r.text().await.unwrap();
+    assert!(body.contains("publish time unknown"), "{body}");
+    // An npm tarball named for another package is not a version of this one.
+    let mut f = ExtraFile::new(
+        "plainlib",
+        "0.1.0",
+        "evil-0.1.0.tgz",
+        b"benign evil",
+        now_rfc3339(),
+    );
+    f.listed = false;
+    h.mock.extra_npm.lock().unwrap().push(f);
+    let r = h.get("/npm/plainlib/-/evil-0.1.0.tgz").await;
+    assert_eq!(r.status(), 403);
+    let err: Value = r.json().await.unwrap();
+    assert!(
+        err["error"]
+            .as_str()
+            .unwrap()
+            .contains("publish time unknown"),
+        "{err}"
+    );
+    h.stop().await;
+}
+
+fn hit<'a>(v: &'a Value, rule: &str) -> Option<&'a Value> {
+    v["policy_hits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["rule"] == rule)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn check_reads_npm_install_code_whatever_unpacked_size_says() {
+    let h = Harness::start(|_| {}).await;
+    // The publisher claims a terabyte; the packument lists no install script, the tarball
+    // has one (the stand-in scanner reports a postinstall for archives ending in "fresh").
+    let mut f = ExtraFile::new(
+        "bigclaim",
+        "1.0.0",
+        "bigclaim-1.0.0.tgz",
+        b"benign but fresh",
+        "2019-05-01T00:00:00.000Z".into(),
+    );
+    f.doc = json!({"dist": {"unpackedSize": 1_099_511_627_776u64}});
+    h.mock.extra_npm.lock().unwrap().push(f);
+    let (s, v) = h.check("npm", "bigclaim", None).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(h.mock.hits("npm:bigclaim-1.0.0.tgz"), 1);
+    assert!(hit(&v, "not_scanned").is_none(), "{v}");
+    assert!(
+        v["install_surface"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("package.json:scripts.postinstall")),
+        "{v}"
+    );
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn check_reads_an_oversize_sdist_like_the_proxy() {
+    let limits = Limits {
+        max_check_bytes: 4,
+        ..Limits::default()
+    };
+    let h = Harness::start_full(|_| {}, None, limits).await;
+    // An sdist runs code at install, so it is read whatever its size.
+    let (s, v) = h.check("pypi", "goodpkg", Some("1.0.0")).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(h.mock.hits("packages/ab/cd/goodpkg-1.0.0.tar.gz"), 1);
+    assert!(hit(&v, "not_scanned").is_none(), "{v}");
+    assert_eq!(h.scans.load(Ordering::SeqCst), 1);
+    // A wheel above the check limit is not downloaded, and the check says it did not look.
+    h.mock.extra_pypi.lock().unwrap().push(ExtraFile::new(
+        "bigwheel",
+        "1.0.0",
+        "bigwheel-1.0.0-py3-none-any.whl",
+        b"benign big wheel",
+        "2020-01-01T00:00:00.000000Z".into(),
+    ));
+    let (s, v) = h.check("pypi", "bigwheel", None).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(
+        h.mock
+            .hits("packages/ab/cd/bigwheel-1.0.0-py3-none-any.whl"),
+        0
+    );
+    let ns = hit(&v, "not_scanned").unwrap_or_else(|| panic!("{v}"));
+    assert_eq!(ns["severity"], "warn", "{v}");
+    assert_eq!(v["decision"], "warn", "{v}");
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn check_dates_the_file_it_scans() {
+    let h = Harness::start(|_| {}).await;
+    // An old release of a popular name gets an sdist today.
+    {
+        let mut x = h.mock.extra_pypi.lock().unwrap();
+        x.push(ExtraFile::new(
+            "six",
+            "1.15.0",
+            "six-1.15.0-py3-none-any.whl",
+            b"benign six wheel",
+            "2020-05-01T00:00:00.000000Z".into(),
+        ));
+        x.push(ExtraFile::new(
+            "six",
+            "1.15.0",
+            "six-1.15.0.tar.gz",
+            b"benign six sdist",
+            now_rfc3339(),
+        ));
+    }
+    let (s, v) = h.check("pypi", "six", Some("1.15.0")).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["artifact"], "six-1.15.0.tar.gz", "{v}");
+    assert!(hit(&v, "established").is_none(), "{v}");
+    assert!(hit(&v, "min_age_days").is_some(), "{v}");
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn check_also_reads_the_pure_python_wheel() {
+    let h = Harness::start(|_| {}).await;
+    // pip installs the wheel; the payload is only there.
+    {
+        let mut x = h.mock.extra_pypi.lock().unwrap();
+        x.push(ExtraFile::new(
+            "wheelonly",
+            "1.0.0",
+            "wheelonly-1.0.0.tar.gz",
+            b"benign sdist",
+            "2020-05-01T00:00:00.000000Z".into(),
+        ));
+        x.push(ExtraFile::new(
+            "wheelonly",
+            "1.0.0",
+            "wheelonly-1.0.0-py3-none-any.whl",
+            b"EVIL wheel payload",
+            "2020-05-01T00:00:00.000000Z".into(),
+        ));
+    }
+    let (s, v) = h.check("pypi", "wheelonly", None).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["decision"], "block", "{v}");
+    assert_eq!(v["artifact"], "wheelonly-1.0.0-py3-none-any.whl", "{v}");
+    let note = hit(&v, "also_checked").unwrap_or_else(|| panic!("{v}"));
+    assert!(
+        note["detail"]
+            .as_str()
+            .unwrap()
+            .contains("wheelonly-1.0.0.tar.gz"),
+        "{v}"
+    );
+    // Both archives were read and both verdicts recorded.
+    assert_eq!(h.scans.load(Ordering::SeqCst), 2);
+    assert_eq!(h.events().await.len(), 2);
+    h.stop().await;
+}
+
+/// Wait until `/metrics` contains `needle`, or fail after a generous deadline.
+async fn wait_for_metric(h: &Harness, needle: &str) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let m = h.get("/metrics").await.text().await.unwrap();
+        if m.contains(needle) {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no `{needle}` in /metrics:\n{m}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Hold every mock file download until the test releases it.
+fn hold_downloads(h: &Harness) -> Arc<tokio::sync::Semaphore> {
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    *h.mock.file_gate.lock().unwrap() = Some(gate.clone());
+    gate
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_proxy_install_joining_a_check_records_an_install_event() {
+    let h = Arc::new(Harness::start(|_| {}).await);
+    let gate = hold_downloads(&h);
+    let check = {
+        let h = h.clone();
+        tokio::spawn(async move { h.check("pypi", "goodpkg", Some("1.0.0")).await })
+    };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while h.mock.hits("packages/ab/cd/goodpkg-1.0.0.tar.gz") == 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "check never fetched"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let install = {
+        let h = h.clone();
+        tokio::spawn(async move { h.get(&pypi_file_path("goodpkg", "1.0.0")).await.status() })
+    };
+    wait_for_metric(&h, "customs_singleflight_joins_total 1").await;
+    gate.add_permits(1);
+    let (status, v) = check.await.unwrap();
+    assert_eq!(status, 200, "{v}");
+    assert_eq!(install.await.unwrap(), 200);
+    assert_eq!(h.scans.load(Ordering::SeqCst), 1);
+
+    let ev = h.events().await;
+    let mut kinds: Vec<&str> = ev.iter().map(|e| e["kind"].as_str().unwrap()).collect();
+    kinds.sort();
+    assert_eq!(kinds, ["check", "install"], "{ev:?}");
+    assert!(ev.iter().all(|e| e["verdict_id"] == v["id"]), "{ev:?} {v}");
+    Arc::try_unwrap(h).ok().unwrap().stop().await;
+}
+
+/// An upstream that answers every request with `head` (status line and headers), then
+/// `body` (one byte per `gap` when set), then closes the connection.
+async fn raw_upstream(head: &'static str, body: Vec<u8>, gap: Option<Duration>) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = listener.accept().await {
+            let body = body.clone();
+            tokio::spawn(async move {
+                let mut buf = [0u8; 4096];
+                let _ = s.read(&mut buf).await;
+                if s.write_all(head.as_bytes()).await.is_err() {
+                    return;
+                }
+                match gap {
+                    None => {
+                        let _ = s.write_all(&body).await;
+                    }
+                    Some(g) => {
+                        for b in body {
+                            if s.write_all(&[b]).await.is_err() {
+                                return;
+                            }
+                            tokio::time::sleep(g).await;
+                        }
+                    }
+                }
+                let _ = s.shutdown().await;
+            });
+        }
+    });
+    base
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cut_off_npm_passthrough_body_is_a_502() {
+    let base = raw_upstream(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n",
+        b"{\"objects\":[".to_vec(),
+        None,
+    )
+    .await;
+    let h = Harness::start(|p| p.upstream.npm = base).await;
+    let r = h.get("/npm/-/v1/search?text=left-pad").await;
+    assert_eq!(r.status(), 502);
+    assert!(r.text().await.unwrap().contains("upstream"));
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_download_that_drips_is_abandoned() {
+    let files = raw_upstream(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: 600\r\n\r\n",
+        vec![b'x'; 600],
+        Some(Duration::from_millis(100)),
+    )
+    .await;
+    let limits = Limits {
+        download_timeout: Duration::from_secs(1),
+        ..Limits::default()
+    };
+    let h = Harness::start_full(|p| p.upstream.pypi_files = files, None, limits).await;
+    let r = tokio::time::timeout(
+        Duration::from_secs(20),
+        h.get(&pypi_file_path("goodpkg", "1.0.0")),
+    )
+    .await
+    .expect("the download was never cut off");
+    assert_eq!(r.status(), 502);
+    let tmp = h._dir.path().join("cache").join("tmp");
+    assert_eq!(
+        std::fs::read_dir(&tmp).unwrap().count(),
+        0,
+        "partial download left behind"
+    );
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_truncated_cached_archive_is_downloaded_again() {
+    let h = Harness::start(|_| {}).await;
+    let path = pypi_file_path("goodpkg", "1.0.0");
+    let r = h.get(&path).await;
+    assert_eq!(r.status(), 200);
+    let whole = r.bytes().await.unwrap();
+    let blob = std::fs::read_dir(h._dir.path().join("cache"))
+        .unwrap()
+        .flatten()
+        .filter(|d| d.file_name().len() == 2)
+        .flat_map(|d| std::fs::read_dir(d.path()).unwrap().flatten())
+        .map(|f| f.path())
+        .next()
+        .unwrap();
+    std::fs::write(&blob, &whole[..1]).unwrap();
+
+    let r = h.get(&path).await;
+    assert_eq!(r.status(), 200);
+    assert_eq!(r.bytes().await.unwrap(), whole);
+    assert_eq!(h.mock.hits("packages/ab/cd/goodpkg-1.0.0.tar.gz"), 2);
+    h.stop().await;
 }
