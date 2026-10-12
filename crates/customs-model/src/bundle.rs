@@ -53,6 +53,9 @@ pub struct Models {
     /// False when `ensemble.json` was absent and equal weights are in use.
     pub ensemble_shipped: bool,
     pub metrics: Option<serde_json::Value>,
+    /// Why `metrics` is `None` although a metrics file was named or present. The file is
+    /// informational, so a bad one is reported here instead of failing the load.
+    pub metrics_error: Option<String>,
 }
 
 /// Inputs for one assessment. Any of them may be absent.
@@ -122,6 +125,7 @@ impl Models {
             ensemble: Ensemble::unweighted(),
             ensemble_shipped: false,
             metrics: None,
+            metrics_error: None,
         }
     }
 
@@ -172,12 +176,14 @@ impl Models {
                 .exists()
                 .then(|| "metrics.json".to_string())
         });
-        let metrics = match metrics_file {
-            Some(f) => Some(
-                serde_json::from_str(&read("metrics", &f)?)
-                    .map_err(|e| ModelError::parse("metrics", e))?,
-            ),
-            None => None,
+        let (metrics, metrics_error) = match metrics_file.map(|f| {
+            read("metrics", &f).and_then(|t| {
+                serde_json::from_str(&t).map_err(|e| ModelError::parse("metrics", e))
+            })
+        }) {
+            Some(Ok(m)) => (Some(m), None),
+            Some(Err(e)) => (None, Some(e.to_string())),
+            None => (None, None),
         };
         Ok(Self {
             dir,
@@ -188,6 +194,7 @@ impl Models {
             ensemble,
             ensemble_shipped,
             metrics,
+            metrics_error,
         })
     }
 

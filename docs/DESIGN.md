@@ -663,7 +663,8 @@ limits, or rejected by the scanner) has no model risk and is judged by the polic
 Verdict `scores` are per-component
 probabilities: the gbdt calibrated probability, sigmoid of the CNN and name logits.
 
-`metrics.json`: the evaluation summary served by `/api/model` (section 7).
+`metrics.json`: the evaluation summary served by `/api/model` (section 7). It is informational:
+an unreadable or malformed file is logged and ignored, never a load error.
 
 ## 6. Verdict
 

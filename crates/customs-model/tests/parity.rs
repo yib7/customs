@@ -350,3 +350,30 @@ fn name_search_is_fast() {
     );
     assert!(per < 0.02, "too slow: {per}s per query");
 }
+
+/// A copy of the fixture bundle in a fresh temporary directory.
+fn fixture_copy(tag: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("customs-model-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    for entry in std::fs::read_dir(fixtures().join("models")).unwrap() {
+        let p = entry.unwrap().path();
+        std::fs::copy(&p, dir.join(p.file_name().unwrap())).unwrap();
+    }
+    dir
+}
+
+#[test]
+fn metrics_json_corrupt_still_loads() {
+    // metrics.json is informational: a bad one must not stop the firewall from starting.
+    let dir = fixture_copy("metrics");
+    std::fs::write(dir.join("metrics.json"), "{").unwrap();
+    let m = Models::load(&dir).unwrap();
+    assert!(m.metrics.is_none());
+    assert!(m.metrics_error.as_deref().unwrap().contains("metrics"));
+    std::fs::write(dir.join("metrics.json"), r#"{"auc": 0.9}"#).unwrap();
+    let m = Models::load(&dir).unwrap();
+    assert_eq!(m.metrics.unwrap()["auc"], 0.9);
+    assert!(m.metrics_error.is_none());
+    std::fs::remove_dir_all(&dir).unwrap();
+}

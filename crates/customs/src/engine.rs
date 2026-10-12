@@ -1325,6 +1325,9 @@ pub fn load_models(explicit: Option<&Path>) -> anyhow::Result<Models> {
         Some(dir) => {
             let m = Models::load(&dir)
                 .map_err(|e| anyhow::anyhow!("loading models from {}: {e}", dir.display()))?;
+            if let Some(e) = &m.metrics_error {
+                tracing::warn!(dir = %dir.display(), error = %e, "ignoring unreadable model metrics");
+            }
             if m.manifest.untrained {
                 tracing::warn!(dir = %dir.display(), version = m.model_version(), "using UNTRAINED placeholder models");
             } else {
