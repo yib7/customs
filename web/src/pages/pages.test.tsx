@@ -192,6 +192,24 @@ describe('Check page', () => {
 });
 
 describe('Verdict page', () => {
+  it('treats a non-numeric id as a missing verdict without asking the server', async () => {
+    const mock = renderApp('/verdicts/abc');
+    const handle = vi.spyOn(mock.server, 'handle');
+    expect(await screen.findByText('Verdict not found')).toBeInTheDocument();
+    expect(screen.queryByText('Could not load this verdict')).toBeNull();
+    expect(handle.mock.calls.some(([, url]) => url.pathname.startsWith('/api/verdicts/'))).toBe(false);
+  });
+
+  it('goes to Activity on Back when the verdict was opened directly', async () => {
+    // Other pages in this tab's history (outside the app) must not count as "back".
+    window.history.pushState({}, '', '/elsewhere');
+    const user = userEvent.setup();
+    renderApp('/verdicts/41');
+    await screen.findByTestId('verdict');
+    await user.click(screen.getByRole('button', { name: 'Back' }));
+    expect(await screen.findByRole('heading', { level: 1, name: 'Activity' })).toBeInTheDocument();
+  });
+
   it('compares the release with the one before it on request', async () => {
     const user = userEvent.setup();
     renderApp('/verdicts/43');
