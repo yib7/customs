@@ -194,7 +194,7 @@ describe('Check page', () => {
 describe('Verdict page', () => {
   it('compares the release with the one before it on request', async () => {
     const user = userEvent.setup();
-    renderApp('/verdicts/v_2b8e5f17');
+    renderApp('/verdicts/43');
     const card = await screen.findByRole('region', { name: 'Changes since an earlier release' });
     expect(within(card).queryByTestId('release-diff')).toBeNull();
     await user.click(within(card).getByRole('button', { name: 'Compare' }));

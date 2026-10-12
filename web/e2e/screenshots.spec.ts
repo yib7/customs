@@ -6,7 +6,7 @@ import { expect, test, type Page } from '@playwright/test';
 const PAGES: { name: string; path: string; ready: (p: Page) => Promise<void> }[] = [
   { name: 'overview', path: '/', ready: async (p) => void (await p.getByTestId('live-feed').waitFor()) },
   { name: 'activity', path: '/activity', ready: async (p) => void (await p.getByTestId('events-table').waitFor()) },
-  { name: 'verdict', path: '/verdicts/v_7f3a91c2', ready: async (p) => void (await p.getByTestId('verdict').waitFor()) },
+  { name: 'verdict', path: '/verdicts/41', ready: async (p) => void (await p.getByTestId('verdict').waitFor()) },
   {
     name: 'check',
     path: '/check?ecosystem=npm&name=%40lodash-utils%2Fcore',
