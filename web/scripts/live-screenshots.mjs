@@ -8,7 +8,7 @@ import { mkdirSync } from 'node:fs';
 import { chromium } from '@playwright/test';
 
 const base = process.argv[2] ?? 'http://127.0.0.1:7878';
-const out = process.argv[3] ?? '../docs/screenshots';
+const out = process.argv[3] ?? '../docs/media';
 mkdirSync(out, { recursive: true });
 
 const events = await (await fetch(`${base}/api/events?limit=200`)).json();

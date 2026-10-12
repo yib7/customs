@@ -15,8 +15,8 @@ are stopped before anything is downloaded.
 
 | | |
 |---|---|
-| ![Overview page: install counts, the block rate and a live feed of recent verdicts](docs/screenshots/overview-light.png) | ![Verdict page for a blocked PyPI package, with the risk score, the reasons and the code that triggered them](docs/screenshots/verdict-light.png) |
-| ![Activity page: every install and check, filterable by decision, ecosystem and kind](docs/screenshots/activity-light.png) | ![Model page: thresholds, held-out test results and the comparison with GuardDog](docs/screenshots/model-light.png) |
+| <picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/overview-dark.png"><img alt="Overview page: install counts, the block rate and a live feed of recent verdicts" src="docs/media/overview-light.png"></picture> | <picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/verdict-dark.png"><img alt="Verdict page for a blocked PyPI package, with the risk score, the reasons and the code that triggered them" src="docs/media/verdict-light.png"></picture> |
+| <picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/activity-dark.png"><img alt="Activity page: every install and check, filterable by decision, ecosystem and kind" src="docs/media/activity-light.png"></picture> | <picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/model-dark.png"><img alt="Model page: thresholds, held-out test results and the comparison with GuardDog" src="docs/media/model-light.png"></picture> |
 
 **On malware discovered after its training data** (time-split test set of 8,317 packages):
 
