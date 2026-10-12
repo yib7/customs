@@ -67,10 +67,13 @@ First public release. Not tagged yet.
 - Dashboard: refuses non-JSON success responses instead of showing a default policy,
   recovers the live feed after a late server start and catches up on lagged events, keeps
   Activity search and paging in the URL, handles bad verdict ids, accepts version ranges
-  on the Check page, and says what monitor mode and checks did with a blocked package.
+  on the Check page, says what monitor mode and checks did with a blocked package, and
+  no longer squeezes Policy rule labels to one word per line.
 - Clearer startup errors: an empty admin token, a missing dashboard directory, an
-  unwritable data directory, an unreadable `CUSTOMS_CA_FILE`, and no models found (the
-  warning lists where it looked).
+  unwritable data directory, an unreadable `CUSTOMS_CA_FILE`, a malformed `--bind`, a
+  models directory without a manifest, and no models found (the warning lists where it
+  looked). A `--server` that is not a URL is named instead of silently checking
+  in-process.
 - Training tools: UTF-8 for all text I/O, and a missing GuardDog, an empty held-out half,
   a timed-out parity check or a CNN run without a usable validation PR AUC give a clear
   error or a recorded result instead of a crash. MalRegistry dev-half rows that
