@@ -4400,3 +4400,67 @@ async fn install_code_the_installer_reads_differently_is_blocked() {
         v.policy_hits
     );
 }
+
+// ---- Phase 3A: merge (3.12 bad paths) ----
+
+#[test]
+fn serve_with_a_malformed_bind_says_the_form() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    let (_, err, code) = run_customs(
+        &["serve", "--data-dir", data.to_str().unwrap()],
+        &[("CUSTOMS_BIND", "not-an-address")],
+        "",
+        30,
+    );
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("HOST:PORT"), "{err}");
+    assert!(err.contains("127.0.0.1:7878"), "{err}");
+}
+
+#[test]
+fn a_server_that_is_not_a_url_is_named_not_ignored() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    let (_, err, code) = run_customs(
+        &[
+            "check",
+            "pypi",
+            "requests",
+            "--data-dir",
+            data.to_str().unwrap(),
+        ],
+        &[("CUSTOMS_SERVER", "garbage")],
+        "",
+        30,
+    );
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("'garbage'"), "{err}");
+    assert!(err.contains("CUSTOMS_SERVER"), "{err}");
+}
+
+#[test]
+fn a_missing_models_dir_says_where_to_point() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    let missing = dir.path().join("nope");
+    let (_, err, code) = run_customs(
+        &[
+            "check",
+            "pypi",
+            "requests",
+            "--models",
+            missing.to_str().unwrap(),
+            "--data-dir",
+            data.to_str().unwrap(),
+            "--server",
+            "http://127.0.0.1:1",
+        ],
+        &[],
+        "",
+        30,
+    );
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("manifest.json"), "{err}");
+    assert!(err.contains("CUSTOMS_MODELS"), "{err}");
+}

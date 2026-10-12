@@ -1624,7 +1624,13 @@ pub fn load_models(explicit: Option<&Path>, project_dir: Option<&Path>) -> anyho
         }
         None => {
             if let Some(p) = explicit {
-                anyhow::bail!("no manifest.json in {} or {}/dev", p.display(), p.display());
+                anyhow::bail!(
+                    "no models in {}: no manifest.json there or in {}/dev; point --models or \
+                     CUSTOMS_MODELS at the trained models directory (models/ in the Customs \
+                     repository)",
+                    p.display(),
+                    p.display()
+                );
             }
             let roots = default_model_roots(None, project_dir);
             tracing::error!("{}", no_models_message(&roots));

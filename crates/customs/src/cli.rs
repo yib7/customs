@@ -446,7 +446,7 @@ async fn serve(a: ServeArgs) -> anyhow::Result<()> {
             "; another `customs serve` may be running there: pick another address with \
              --bind or CUSTOMS_BIND"
         } else {
-            ""
+            "; --bind and CUSTOMS_BIND take HOST:PORT, for example 127.0.0.1:7878"
         };
         anyhow::anyhow!("binding {}: {e}{hint}", a.bind)
     })?;

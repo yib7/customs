@@ -141,6 +141,15 @@ impl Checker {
     /// Use the server at `base` if `/healthz` answers quickly, else build a local engine.
     pub async fn connect(base: &str, local: &LocalOptions) -> anyhow::Result<Self> {
         let base = base.trim_end_matches('/').to_string();
+        // A typo here would otherwise read as "server down" and quietly check in-process.
+        if !url::Url::parse(&base)
+            .is_ok_and(|u| matches!(u.scheme(), "http" | "https") && u.has_host())
+        {
+            anyhow::bail!(
+                "the server '{base}' (--server or CUSTOMS_SERVER) is not an http(s) URL; use \
+                 one like http://127.0.0.1:7878"
+            );
+        }
         let mut b = reqwest::Client::builder().timeout(Duration::from_secs(55));
         if is_loopback(&base) {
             // A corporate HTTP proxy must not see requests meant for the local server.
