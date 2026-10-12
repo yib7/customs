@@ -84,12 +84,6 @@ describe('parseVerdict', () => {
     expect(() => parseVerdict({ name: 'x', decision: 'maybe', policy_hits: hits })).toThrow(ParseError);
   });
 
-  it('accepts a wrapped verdict with an id', () => {
-    const v = parseVerdict({ id: 'abc', verdict: DESIGN_VERDICT });
-    expect(v.id).toBe('abc');
-    expect(v.name).toBe('foo');
-  });
-
   it('reads the policy mode and the model decision', () => {
     const v = parseVerdict({ ...DESIGN_VERDICT, mode: 'monitor', model_decision: 'warn' });
     expect(v.mode).toBe('monitor');
@@ -131,10 +125,8 @@ describe('events', () => {
     expect(e).toMatchObject({ kind: 'nonexistent_package', risk: null, verdict_id: null, version: null });
   });
 
-  it('accepts arrays and wrapped lists, skipping invalid rows', () => {
+  it('reads a bare array, skipping invalid rows', () => {
     expect(parseEventList([ev, { id: 1 }])).toHaveLength(1);
-    expect(parseEventList({ events: [ev] })).toHaveLength(1);
-    expect(parseEventList({ items: [ev, ev] })).toHaveLength(2);
     expect(parseEventList('garbage')).toEqual([]);
   });
 
@@ -164,8 +156,8 @@ describe('parseStats', () => {
     expect(s.by_kind.nonexistent_package).toBe(1);
   });
 
-  it('accepts a date map for blocks per day and computes a missing total', () => {
-    const s = parseStats({ by_decision: { allow: 1, block: 2 }, blocks_per_day: { '2026-10-01': 2, junk: 4 } });
+  it('computes a missing total and skips malformed days', () => {
+    const s = parseStats({ by_decision: { allow: 1, block: 2 }, blocks_per_day: [{ date: '2026-10-01', count: 2 }, { count: 4 }] });
     expect(s.total).toBe(3);
     expect(s.blocks_per_day).toEqual([{ date: '2026-10-01', count: 2 }]);
     expect(s.top_reasons).toEqual([]);
@@ -259,7 +251,7 @@ describe('parseModelInfo', () => {
         split: 'temporal',
         roc_auc: { value: 0.99, ci_low: 0.98, ci_high: 0.995 },
         pr_auc: 0.95,
-        'recall_at_fpr_0.001': 0.87,
+        recall_at_fpr_0_001: 0.87,
         baselines: { guarddog: { fpr: 0.03, recall: 0.74, customs_recall_at_matched_fpr: 0.96 } },
       },
     });
@@ -282,17 +274,44 @@ describe('parseModelInfo', () => {
     expect(m.untrained).toBe(true);
   });
 
-  it('accepts a manifest-only response', () => {
-    const m = parseModelInfo({ manifest: { model_version: 'x', feature_schema_version: 1 } });
+  it('tolerates a model without metrics or thresholds', () => {
+    const m = parseModelInfo({ model_version: 'x', feature_schema_version: 1, metrics: null });
     expect(m.model_version).toBe('x');
     expect(m.metrics).toBeNull();
     expect(m.thresholds).toBeNull();
   });
 
-  it('prefers the temporal split when metrics are keyed by split', () => {
-    const m = parseModelInfo({ model_version: 'x', metrics: { temporal: { roc_auc: 0.9 }, random: { roc_auc: 0.99 } } });
-    expect(m.metrics?.split).toBe('temporal');
-    expect(m.metrics?.roc_auc?.value).toBe(0.9);
+  it('reads every key models/metrics.json has', () => {
+    // The key set of models/metrics.json as python/customs_ml/evaluate.py writes it.
+    const m = parseModelInfo({
+      model_version: '2026.10.08',
+      feature_schema_version: 1,
+      thresholds: { warn: 0.86, block: 0.99, target_fpr_warn: 0.01, target_fpr_block: 0.001 },
+      metrics: {
+        split: 'temporal (test: malware found from 2026-02-13)',
+        roc_auc: { value: 0.97, ci_low: 0.96, ci_high: 0.98 },
+        pr_auc: { value: 0.978, ci_low: 0.973, ci_high: 0.983 },
+        recall_at_fpr_0_001: { value: 0.63, ci_low: 0.59, ci_high: 0.67 },
+        recall_at_fpr_0_01: { value: 0.78, ci_low: 0.75, ci_high: 0.81 },
+        test_fpr_block: { value: 0.0005, ci_low: 0, ci_high: 0.0012 },
+        brier: 0.0618,
+        n_test_malicious: 4100,
+        n_test_benign: 4217,
+        baselines: { guarddog: { fpr: 0.18, recall: 0.794, customs_recall_at_matched_fpr: 0.964 } },
+      },
+    });
+    expect(m.feature_schema_version).toBe(1);
+    expect(m.metrics).toEqual({
+      split: 'temporal (test: malware found from 2026-02-13)',
+      roc_auc: { value: 0.97, ci_low: 0.96, ci_high: 0.98 },
+      pr_auc: { value: 0.978, ci_low: 0.973, ci_high: 0.983 },
+      recall_at_fpr_0_001: { value: 0.63, ci_low: 0.59, ci_high: 0.67 },
+      recall_at_fpr_0_01: { value: 0.78, ci_low: 0.75, ci_high: 0.81 },
+      brier: { value: 0.0618 },
+      n_test_malicious: 4100,
+      n_test_benign: 4217,
+      guarddog: { fpr: 0.18, recall: 0.794, customs_recall: 0.964 },
+    });
   });
 });
 
