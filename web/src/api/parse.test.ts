@@ -223,9 +223,10 @@ describe('parsePolicy', () => {
     });
   });
 
-  it('falls back to safe defaults', () => {
+  it('falls back to the server defaults', () => {
     const p = parsePolicy({});
     expect(p.mode).toBe('enforce');
+    expect(p.min_age_days).toBe(3);
     expect(p.warn_threshold).toBe('model');
     expect(p.allow).toEqual([]);
     expect(p.provenance_dropped).toBe('warn');
@@ -239,6 +240,12 @@ describe('parsePolicy', () => {
     expect(p.agent_bypass).toBe('block');
     expect(p.scan_error).toBe('block');
     expect(p.established).toEqual({ enabled: true, top: 5000, min_age_days: 30 });
+  });
+
+  it('throws on a body that is not a policy object', () => {
+    expect(() => parsePolicy(null)).toThrow(ParseError);
+    expect(() => parsePolicy('<html>')).toThrow(ParseError);
+    expect(() => parsePolicy([])).toThrow(ParseError);
   });
 });
 

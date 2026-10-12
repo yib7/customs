@@ -334,8 +334,10 @@ function parseRuleSeverity(v: unknown, fallback: RuleSeverity): RuleSeverity {
   return v === 'off' || v === 'warn' || v === 'block' ? v : fallback;
 }
 
+/** `GET /api/policy`. Missing fields get the server's defaults (`crates/customs/src/config.rs`). */
 export function parsePolicy(v: unknown): Policy {
-  const r = isRecord(v) && isRecord(v.policy) ? v.policy : asRecord(v);
+  if (!isRecord(v)) throw new ParseError('policy is not an object');
+  const r = v;
   const upstreamRaw = asRecord(r.upstream);
   const upstream: Record<string, string> = {};
   for (const [k, val] of Object.entries(upstreamRaw)) {
@@ -352,7 +354,7 @@ export function parsePolicy(v: unknown): Policy {
     mode: parseMode(r.mode),
     warn_threshold: parseThreshold(r.warn_threshold),
     block_threshold: parseThreshold(r.block_threshold),
-    min_age_days: minAge === null ? 0 : minAge,
+    min_age_days: minAge === null ? 3 : minAge,
     min_age_severity: r.min_age_severity === 'warn' ? 'warn' : 'block',
     hide_young_versions: asBool(r.hide_young_versions, true),
     block_nonexistent: asBool(r.block_nonexistent, true),
