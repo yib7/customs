@@ -4,8 +4,10 @@
 //! The fixtures in `models/parity/` are written by `customs_ml.evaluate.export` from the
 //! reference implementations (`gbdt.predict_raw_exported`, `nn.numpy_forward`,
 //! `name_model.score_exported`). If training and serving ever disagree, this fails.
-//! Skipped when no trained models are present (for example in a fresh checkout that only
-//! has `models/dev`).
+//! The repository ships trained models, so a missing `models/manifest.json` or parity
+//! fixture fails the tests; set `CUSTOMS_SKIP_SHIPPED_MODELS=1` to skip them on purpose
+//! (for example in a checkout without `models/`). Untrained placeholder models have no
+//! parity fixtures and are skipped.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -18,17 +20,35 @@ fn models_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../models")
 }
 
-fn fixture(name: &str) -> Option<Vec<Value>> {
-    let text = std::fs::read_to_string(models_dir().join("parity").join(name)).ok()?;
-    Some(serde_json::from_str(&text).expect("parity fixture is valid JSON"))
+fn skip_requested() -> bool {
+    std::env::var_os("CUSTOMS_SKIP_SHIPPED_MODELS").is_some_and(|v| v == "1")
 }
 
 fn shipped() -> Option<Models> {
     if !models_dir().join("manifest.json").exists() {
-        eprintln!("no trained models in models/, skipping");
+        assert!(
+            skip_requested(),
+            "models/manifest.json is missing; set CUSTOMS_SKIP_SHIPPED_MODELS=1 to skip"
+        );
+        eprintln!("CUSTOMS_SKIP_SHIPPED_MODELS=1 and no models/manifest.json, skipping");
         return None;
     }
-    Some(Models::load(models_dir()).expect("shipped models load"))
+    let models = Models::load(models_dir()).expect("shipped models load");
+    if models.manifest.untrained {
+        eprintln!("models/ holds untrained placeholders, skipping");
+        return None;
+    }
+    Some(models)
+}
+
+fn fixture(name: &str) -> Option<Vec<Value>> {
+    let path = models_dir().join("parity").join(name);
+    if !path.exists() && (skip_requested() || shipped().is_none()) {
+        return None;
+    }
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("trained models need {}: {e}", path.display()));
+    Some(serde_json::from_str(&text).expect("parity fixture is valid JSON"))
 }
 
 #[test]
