@@ -50,7 +50,7 @@ pub fn default_scanner() -> ScanFn {
 pub struct Limits {
     /// Artifacts larger than this are not downloaded at all.
     pub max_download_bytes: u64,
-    /// Artifacts larger than this are served but only scored on name and metadata.
+    /// Artifacts larger than this are served unscanned, judged on metadata and policy rules.
     pub max_scan_bytes: u64,
     /// `POST /api/check` does not download a wheel the registry says is larger than this;
     /// sdists and npm tarballs are always read, up to `max_download_bytes`.
@@ -167,7 +167,7 @@ pub struct Outcome {
 
 /// Version of [`ScanSummary`]. Bump when its contents or the scoring for the same archive
 /// change, so summaries cached by an earlier build are not served (see [`Engine::scan_identity`]).
-const SCAN_SUMMARY_VERSION: u32 = 1;
+const SCAN_SUMMARY_VERSION: u32 = 2;
 
 /// What the scan cache stores: everything in a verdict that depends only on the bytes,
 /// the name, the model version, and the scanner.
@@ -1650,6 +1650,14 @@ fn no_models_message(roots: &[PathBuf]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scan_suffix_misses_summaries_from_before_hidden_code_and_name_only_scoring() {
+        // Builds with the versioned key but before the hidden_code scanner output and the
+        // name-only risk change cached under scan:1.1|summary:1; those must not be served.
+        let s = scan_suffix(&Limits::default());
+        assert_eq!(s, format!("|scan:2.1|summary:2|max:{}", 256u64 << 20));
+    }
 
     #[test]
     fn find_models_dir_without_project_dir_ignores_models() {
