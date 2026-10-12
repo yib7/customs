@@ -1360,7 +1360,13 @@ pub fn load_models(explicit: Option<&Path>, project_dir: Option<&Path>) -> anyho
             let m = Models::load(&dir)
                 .map_err(|e| anyhow::anyhow!("loading models from {}: {e}", dir.display()))?;
             if m.manifest.untrained {
-                tracing::warn!(dir = %dir.display(), version = m.model_version(), "using UNTRAINED placeholder models");
+                tracing::warn!(
+                    dir = %dir.display(),
+                    version = m.model_version(),
+                    "using UNTRAINED placeholder models: their scores mean nothing; point \
+                     --models or CUSTOMS_MODELS at the trained models directory (models/ in the \
+                     Customs repository)"
+                );
             } else {
                 tracing::info!(dir = %dir.display(), version = m.model_version(), "loaded models");
             }
@@ -1370,17 +1376,25 @@ pub fn load_models(explicit: Option<&Path>, project_dir: Option<&Path>) -> anyho
             if let Some(p) = explicit {
                 anyhow::bail!("no manifest.json in {} or {}/dev", p.display(), p.display());
             }
-            let tried: Vec<String> = default_model_roots(None, project_dir)
-                .iter()
-                .map(|r| r.display().to_string())
-                .collect();
-            tracing::error!(
-                tried = %tried.join(", "),
-                "no models found: the classifier is OFF and verdicts use the policy rules only;                  pass --models DIR or set CUSTOMS_MODELS"
-            );
+            let roots = default_model_roots(None, project_dir);
+            tracing::error!("{}", no_models_message(&roots));
             Ok(Models::empty())
         }
     }
+}
+
+/// What to say when [`find_models_dir`] found nothing in `roots`.
+fn no_models_message(roots: &[PathBuf]) -> String {
+    let tried: Vec<String> = roots.iter().map(|r| r.display().to_string()).collect();
+    format!(
+        "no models found in {} (or their dev/ subdirectories): the classifier is OFF and \
+         verdicts use the policy rules only; pass --models DIR or set CUSTOMS_MODELS",
+        if tried.is_empty() {
+            "any directory".to_string()
+        } else {
+            tried.join(", ")
+        }
+    )
 }
 
 #[cfg(test)]
@@ -1411,6 +1425,18 @@ mod tests {
         // An explicit directory is the only one tried.
         let roots = model_roots(Some(Path::new("/x")), Some(project.path()), Some(env), None);
         assert_eq!(roots, vec![PathBuf::from("/x")]);
+    }
+
+    #[test]
+    fn no_models_message_lists_roots_and_remedy() {
+        let m = no_models_message(&[PathBuf::from("/env/models"), PathBuf::from("/opt/models")]);
+        assert!(m.contains("/env/models, /opt/models"), "{m}");
+        assert!(m.contains("classifier is OFF"), "{m}");
+        assert!(
+            m.contains("--models DIR") && m.contains("CUSTOMS_MODELS"),
+            "{m}"
+        );
+        assert!(!m.contains("  "), "{m}");
     }
 
     fn f(name: &str, kind: &str, size: u64) -> FileMeta {
