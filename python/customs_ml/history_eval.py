@@ -430,7 +430,7 @@ def history_rules(
     sv = _semver(version)
     prior = [(v, _semver(v), t) for t, v in earlier if _semver(v)]
     if sv and prior:
-        hv, hs, _ = max(prior, key=lambda x: x[1])
+        _, hs, _ = max(prior, key=lambda x: x[1])
         if sv[0] > hs[0] + 1:
             out["version_anomaly"] = True
         elif sv[0] < hs[0]:

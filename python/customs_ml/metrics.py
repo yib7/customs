@@ -142,30 +142,3 @@ def cluster_bootstrap(
         return float(point), float("nan"), float("nan")
     lo, hi = np.percentile(vals, [100 * alpha / 2, 100 * (1 - alpha / 2)])
     return float(point), float(lo), float(hi)
-
-
-def paired_bootstrap_diff(
-    y: np.ndarray,
-    score_a: np.ndarray,
-    score_b: np.ndarray,
-    clusters: np.ndarray,
-    stat,
-    n_boot: int = 1000,
-    seed: int = 0,
-) -> tuple[float, float, float, float]:
-    """Difference stat(a) - stat(b) with a cluster-bootstrap CI and a two-sided p-value."""
-    rng = np.random.default_rng(seed)
-    uniq, inv = np.unique(clusters, return_inverse=True)
-    members = [np.flatnonzero(inv == i) for i in range(len(uniq))]
-    point = stat(y, score_a) - stat(y, score_b)
-    diffs = []
-    for _ in range(n_boot):
-        pick = rng.integers(0, len(uniq), len(uniq))
-        idx = np.concatenate([members[i] for i in pick])
-        if len(np.unique(y[idx])) < 2:
-            continue
-        diffs.append(stat(y[idx], score_a[idx]) - stat(y[idx], score_b[idx]))
-    diffs = np.asarray(diffs)
-    lo, hi = np.percentile(diffs, [2.5, 97.5])
-    p = 2 * min(np.mean(diffs <= 0), np.mean(diffs >= 0))
-    return float(point), float(lo), float(hi), float(min(p, 1.0))

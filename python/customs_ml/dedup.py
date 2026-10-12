@@ -133,11 +133,3 @@ def cluster(docs: Sequence[Sequence[str]], threshold: float = THRESHOLD) -> np.n
                 if np.mean(sigs[first] == sigs[other]) >= threshold:
                     uf.union(first, other)
     return np.array([uf.find(i) for i in range(len(docs))])
-
-
-def estimated_jaccard(a: Sequence[str], b: Sequence[str]) -> float:
-    vocab: dict[str, int] = {}
-    mh = MinHasher()
-    sa = mh.signature(shingles(_token_ids(a, vocab)))
-    sb = mh.signature(shingles(_token_ids(b, vocab)))
-    return float(np.mean(sa == sb))

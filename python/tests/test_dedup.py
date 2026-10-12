@@ -1,6 +1,18 @@
 import random
+from collections.abc import Sequence
+
+import numpy as np
 
 from customs_ml import dedup
+
+
+def estimated_jaccard(a: Sequence[str], b: Sequence[str]) -> float:
+    """Share of equal MinHash signature slots: the Jaccard estimate ``cluster`` relies on."""
+    vocab: dict[str, int] = {}
+    mh = dedup.MinHasher()
+    sa = mh.signature(dedup.shingles(dedup._token_ids(a, vocab)))
+    sb = mh.signature(dedup.shingles(dedup._token_ids(b, vocab)))
+    return float(np.mean(sa == sb))
 
 
 def _doc(rng: random.Random, n: int) -> list[str]:
@@ -26,8 +38,8 @@ def test_identical_and_near_duplicates_cluster_together():
 def test_jaccard_estimate_is_close():
     rng = random.Random(1)
     a = _doc(rng, 600)
-    assert dedup.estimated_jaccard(a, a) == 1.0
-    assert dedup.estimated_jaccard(a, _doc(rng, 600)) < 0.2
+    assert estimated_jaccard(a, a) == 1.0
+    assert estimated_jaccard(a, _doc(rng, 600)) < 0.2
 
 
 def test_short_and_empty_docs():

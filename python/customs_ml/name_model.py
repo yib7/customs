@@ -208,18 +208,5 @@ def score_exported(model: dict, ecosystem: str, name: str, pop: Popular) -> floa
     return logit
 
 
-def nearest_popular(name: str, pop: Popular) -> tuple[str | None, int]:
-    b = _bare(name)
-    best, bd = None, MAX_DIST + 1
-    for p in pop.names:
-        pb = _bare(p)
-        if pb == b:
-            continue
-        d = OSA.distance(b, pb, score_cutoff=MAX_DIST)
-        if d < bd:
-            best, bd = p, d
-    return best, bd
-
-
 def save(model: dict, path: Path) -> None:
     path.write_text(json.dumps(model, separators=(",", ":")), encoding="utf-8")
