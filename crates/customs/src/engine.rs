@@ -1658,11 +1658,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn scan_suffix_misses_summaries_from_before_hidden_code_and_name_only_scoring() {
+    fn scan_suffix_misses_summaries_from_older_scanners() {
         // Builds with the versioned key but before the hidden_code scanner output and the
-        // name-only risk change cached under scan:1.1|summary:1; those must not be served.
+        // name-only risk change cached under scan:1.1|summary:1, and builds that flagged
+        // `x.js/x.js` npm files as unread under scan:2.1; those must not be served.
         let s = scan_suffix(&Limits::default());
-        assert_eq!(s, format!("|scan:2.1|summary:2|max:{}", 256u64 << 20));
+        assert_eq!(s, format!("|scan:3.1|summary:2|max:{}", 256u64 << 20));
     }
 
     #[test]

@@ -19,7 +19,7 @@ mod shadow;
 mod surface;
 mod tokens;
 
-use archive::{extension, Contents, Entry};
+use archive::{extension, node_tar_path, normalize_path, Contents, Entry};
 use indicators::{FileAnalysis, EVIDENCE_RANK, INDICATORS, N_IND};
 use lexer::Lang;
 use manifest::Meta;
@@ -34,7 +34,7 @@ pub use large::install_time_code;
 /// Version of the feature schema emitted by this crate.
 pub const FEATURE_SCHEMA_VERSION: u32 = 1;
 /// Bump whenever scanner output for the same archive can change outside the feature schema.
-pub const SCAN_RULES_VERSION: u32 = 2;
+pub const SCAN_RULES_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -477,12 +477,33 @@ struct Scanner<'a> {
     follows_js: HashSet<usize>,
 }
 
+/// The path npm writes a tar entry to, as a slice of the raw entry name: `None` when it is
+/// not the raw name minus its first component, verbatim.
+fn npm_full_path(raw: &str) -> Option<&str> {
+    let full = node_tar_path(raw)?;
+    raw.strip_suffix(full.as_str())
+        .filter(|pre| pre.ends_with('/') && !pre[..pre.len() - 1].contains('/'))
+        .map(|pre| &raw[pre.len()..])
+}
+
 impl<'a> Scanner<'a> {
     fn new(c: &'a Contents, eco: Ecosystem, opts: &'a ScanOptions) -> Self {
         let mut index = HashMap::new();
         for (i, e) in c.entries.iter().enumerate() {
             if e.depth == 0 {
                 index.entry(e.path.as_str()).or_insert(i);
+            }
+        }
+        // The scanner names `ipaddr.js/ipaddr.js` by its collapsed path (see
+        // `archive::normalize_path`), npm writes it to the full one. Index the full path too,
+        // so lookups by the name npm uses find the entry that was read.
+        if eco == Ecosystem::Npm {
+            for (i, e) in c.entries.iter().enumerate().filter(|(_, e)| e.depth == 0) {
+                if let Some(full) = npm_full_path(&e.raw).filter(|f| {
+                    *f != e.path && normalize_path(f).as_deref() == Some(e.path.as_str())
+                }) {
+                    index.entry(full).or_insert(i);
+                }
             }
         }
         Self {

