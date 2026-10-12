@@ -104,7 +104,7 @@ pub struct Limiter {
     last_sent: HashMap<String, Instant>,
     tokens: f64,
     refilled: Instant,
-    /// Messages held back since the last one sent.
+    /// Messages held back or not delivered since the last one sent.
     pub held: u64,
 }
 
@@ -148,6 +148,34 @@ impl Limiter {
         self.last_sent.insert(key.to_string(), now);
         Admit::Send
     }
+
+    /// A message carrying `held` was not delivered: count it, and what it counted, in the
+    /// next one.
+    pub fn not_sent(&mut self, held: u64) {
+        self.held += held + 1;
+    }
+}
+
+/// The verdict behind `ev` and the count of messages not sent before it, when `ev` is to
+/// be announced. Otherwise the outcome to count (`None` for an event below `min`). The
+/// verdict is looked up before the limiter is asked, so a failed lookup spends neither a
+/// token nor the package's repeat window.
+fn admit_event(
+    limiter: &mut Limiter,
+    ev: &Event,
+    min: Decision,
+    lookup: impl FnOnce(i64) -> Option<Verdict>,
+    now: Instant,
+) -> Result<(Verdict, u64), Option<&'static str>> {
+    if ev.decision.is_none_or(|d| d < min) {
+        return Err(None);
+    }
+    let v = ev.verdict_id.and_then(lookup).ok_or(Some("no_verdict"))?;
+    match limiter.admit(&repeat_key(ev), now) {
+        Admit::Send => Ok((v, std::mem::take(&mut limiter.held))),
+        Admit::Repeat => Err(Some("repeat")),
+        Admit::RateLimited => Err(Some("rate_limited")),
+    }
 }
 
 fn repeat_key(ev: &Event) -> String {
@@ -189,7 +217,8 @@ pub fn message(ev: &Event, v: &Verdict, link: Option<&str>, held: u64) -> String
     }
     if held > 0 {
         text.push_str(&format!(
-            "\n({held} earlier notification{} held back by the rate limit; see the dashboard)",
+            "\n({held} earlier notification{} not sent (rate limit or failed delivery); see the \
+             dashboard)",
             if held == 1 { "" } else { "s" }
         ));
     }
@@ -283,12 +312,17 @@ pub fn spawn(engine: Arc<Engine>, cfg: NotifyConfig) -> tokio::task::JoinHandle<
     tokio::spawn(run(engine, cfg, rx, policy_rx))
 }
 
-async fn send(engine: &Engine, cfg: &NotifyConfig, body: &Value, what: &str) {
+/// Whether the webhook took the message.
+async fn send(engine: &Engine, cfg: &NotifyConfig, body: &Value, what: &str) -> bool {
     match deliver(engine, &cfg.url, body).await {
-        Ok(()) => engine.metrics.notification("sent"),
+        Ok(()) => {
+            engine.metrics.notification("sent");
+            true
+        }
         Err(e) => {
             engine.metrics.notification("failed");
             tracing::warn!(host = %cfg.host(), what, "webhook notification failed: {e}");
+            false
         }
     }
 }
@@ -296,33 +330,49 @@ async fn send(engine: &Engine, cfg: &NotifyConfig, body: &Value, what: &str) {
 async fn run(
     engine: Arc<Engine>,
     cfg: NotifyConfig,
-    mut rx: tokio::sync::broadcast::Receiver<Event>,
-    mut policy_rx: tokio::sync::broadcast::Receiver<PolicyChange>,
+    rx: tokio::sync::broadcast::Receiver<Event>,
+    policy_rx: tokio::sync::broadcast::Receiver<PolicyChange>,
 ) {
     let host = cfg.host();
     tracing::info!(%host, format = ?cfg.format, on = cfg.min_decision.as_str(), "webhook notifications on");
-    let mut limiter = Limiter::new(Instant::now());
-    let mut policy_open = true;
+    // Two loops in one task: a verdict delivery waiting on retries (up to ~35 s) must not
+    // hold up a policy-change alert.
+    tokio::join!(
+        verdict_loop(&engine, &cfg, rx),
+        policy_loop(&engine, &cfg, policy_rx)
+    );
+}
+
+async fn policy_loop(
+    engine: &Engine,
+    cfg: &NotifyConfig,
+    mut rx: tokio::sync::broadcast::Receiver<PolicyChange>,
+) {
     loop {
-        let received = tokio::select! {
-            r = rx.recv() => r,
-            ch = policy_rx.recv(), if policy_open => {
-                match ch {
-                    Ok(ch) => {
-                        let link = cfg
-                            .public_url
-                            .as_deref()
-                            .map(|base| format!("{}/policy", base.trim_end_matches('/')));
-                        let text = policy_message(&ch, link.as_deref());
-                        send(&engine, &cfg, &policy_payload(cfg.format, &text, &ch), "policy change").await;
-                    }
-                    Err(RecvError::Lagged(_)) => engine.metrics.notification("dropped"),
-                    Err(RecvError::Closed) => policy_open = false,
-                }
-                continue;
+        match rx.recv().await {
+            Ok(ch) => {
+                let link = cfg
+                    .public_url
+                    .as_deref()
+                    .map(|base| format!("{}/policy", base.trim_end_matches('/')));
+                let text = policy_message(&ch, link.as_deref());
+                let body = policy_payload(cfg.format, &text, &ch);
+                send(engine, cfg, &body, "policy change").await;
             }
-        };
-        let ev = match received {
+            Err(RecvError::Lagged(_)) => engine.metrics.notification("dropped"),
+            Err(RecvError::Closed) => return,
+        }
+    }
+}
+
+async fn verdict_loop(
+    engine: &Engine,
+    cfg: &NotifyConfig,
+    mut rx: tokio::sync::broadcast::Receiver<Event>,
+) {
+    let mut limiter = Limiter::new(Instant::now());
+    loop {
+        let ev = match rx.recv().await {
             Ok(ev) => ev,
             Err(RecvError::Lagged(n)) => {
                 limiter.held += n;
@@ -331,33 +381,31 @@ async fn run(
             }
             Err(RecvError::Closed) => return,
         };
-        if ev.decision.is_none_or(|d| d < cfg.min_decision) {
-            continue;
-        }
-        match limiter.admit(&repeat_key(&ev), Instant::now()) {
-            Admit::Send => {}
-            Admit::Repeat => {
-                engine.metrics.notification("repeat");
-                continue;
+        let lookup = |id| match engine.store.verdict(id) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(id, error = %e, "webhook: cannot read the verdict");
+                None
             }
-            Admit::RateLimited => {
-                engine.metrics.notification("rate_limited");
-                continue;
-            }
-        }
-        let Some(v) = ev
-            .verdict_id
-            .and_then(|id| engine.store.verdict(id).ok().flatten())
-        else {
-            continue;
         };
+        let (v, held) =
+            match admit_event(&mut limiter, &ev, cfg.min_decision, lookup, Instant::now()) {
+                Ok(admitted) => admitted,
+                Err(outcome) => {
+                    if let Some(o) = outcome {
+                        engine.metrics.notification(o);
+                    }
+                    continue;
+                }
+            };
         let link = cfg.public_url.as_deref().and_then(|base| {
             v.id.map(|id| format!("{}/verdicts/{id}", base.trim_end_matches('/')))
         });
-        let held = std::mem::take(&mut limiter.held);
         let text = message(&ev, &v, link.as_deref(), held);
         let body = payload(cfg.format, &text, &ev, &v, link.as_deref());
-        send(&engine, &cfg, &body, &ev.name).await;
+        if !send(engine, cfg, &body, &ev.name).await {
+            limiter.not_sent(held);
+        }
     }
 }
 
@@ -478,7 +526,7 @@ mod tests {
         assert!(t.ends_with("http://c:7878/verdicts/7"), "{t}");
         let t = message(&ev, &verdict(Mode::Monitor), None, 3);
         assert!(t.contains("would block (monitor mode, served)"), "{t}");
-        assert!(t.contains("3 earlier notifications held back"), "{t}");
+        assert!(t.contains("3 earlier notifications not sent"), "{t}");
     }
 
     #[test]
@@ -540,6 +588,49 @@ mod tests {
         let mut v = verdict(Mode::Enforce);
         v.policy_hits[0].detail = "x".repeat(5000);
         assert_eq!(message(&ev, &v, None, 0).chars().count(), MAX_TEXT_CHARS);
+    }
+
+    #[test]
+    fn missing_verdict_does_not_spend_the_repeat_window() {
+        let t0 = Instant::now();
+        let mut l = Limiter::new(t0);
+        let ev = event(Decision::Block);
+        let found = |_| Some(verdict(Mode::Enforce));
+        assert_eq!(
+            admit_event(&mut l, &ev, Decision::Block, |_| None, t0).err(),
+            Some(Some("no_verdict"))
+        );
+        // Below --notify-on: nothing to send, nothing counted.
+        assert_eq!(
+            admit_event(&mut l, &event(Decision::Warn), Decision::Block, found, t0).err(),
+            Some(None)
+        );
+        let (v, held) = admit_event(&mut l, &ev, Decision::Block, found, t0).unwrap();
+        assert_eq!((v.id, held), (Some(7), 0));
+        assert_eq!(
+            admit_event(&mut l, &ev, Decision::Block, found, t0).err(),
+            Some(Some("repeat"))
+        );
+    }
+
+    #[test]
+    fn a_failed_delivery_is_counted_in_the_next_message() {
+        let t0 = Instant::now();
+        let mut l = Limiter::new(t0);
+        l.held = 2;
+        let (_, held) = admit_event(
+            &mut l,
+            &event(Decision::Block),
+            Decision::Block,
+            |_| Some(verdict(Mode::Enforce)),
+            t0,
+        )
+        .unwrap();
+        assert_eq!(held, 2);
+        // The message carrying the count was not delivered: the count and the message
+        // itself go to the next one.
+        l.not_sent(held);
+        assert_eq!(l.held, 3);
     }
 
     #[test]

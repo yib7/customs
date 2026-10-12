@@ -795,7 +795,8 @@ Registry proxy:
   and the event log named `requests`. PyPI project names are limited to letters, digits,
   `-`, `_` and `.`.
 
-API (JSON). CORS allows only `http://localhost:5173` (the Vite dev server).
+API (JSON). No CORS headers: the built dashboard is same-origin, and the Vite dev server
+proxies `/api` with the browser's `Host`, so its dashboard is same-origin as well.
 - `POST /api/check` `{ "ecosystem": "pypi", "name": "foo", "version": null, "client": "cli" }`:
   `version` is null (latest), an exact version, a range (`>=1,<2`, `~=1.4`, `^1.2`, npm
   ranges), or an npm dist-tag; it resolves to the newest matching non-yanked version. A
@@ -834,17 +835,20 @@ API (JSON). CORS allows only `http://localhost:5173` (the Vite dev server).
 - `GET /api/policy`, `PUT /api/policy`: the active policy as JSON with the `customs.toml`
   keys (thresholds are `"model"` or a number). `PUT` switches enforcement off when asked,
   so it is accepted only with a `Host` that DNS rebinding cannot produce: an IP address,
-  `localhost` or `*.localhost`, or a name in `CUSTOMS_ALLOWED_HOSTS` (comma-separated;
+  `localhost` or `*.localhost`, or a name in `--allowed-hosts`/`CUSTOMS_ALLOWED_HOSTS` (comma-separated;
   set it for a team server reached by name). A page that resolves its own host name to
   127.0.0.1 is same-origin to the browser, so CORS alone would not stop it. Any
   state-changing API request carrying a browser `Origin` other than the dashboard's own
-  (or the Vite dev server) is refused with 403 as well; non-browser clients send none.
+  is refused with 403 as well; non-browser clients send none.
   When the server listens on a loopback address, the same `Host` check applies to every
   request, reads and package downloads included, since only a rebound page would name a
   loopback listener by another host name; without it such a page could read the event log
-  and learn what this machine installs. `PUT` takes the full policy (omitted keys
-  take their defaults), validates, persists to the policy file, and returns it; invalid
-  input returns 400 `{ "error", "errors": [ { "field", "message" } ] }`.
+  and learn what this machine installs. `PUT` takes the full policy, as `GET` returns it
+  (a body missing a key, such as `deny` or `established.top`, is refused with one error
+  per missing key rather than resetting it), validates, persists to the policy file, and
+  returns it; invalid input returns 400 `{ "error", "errors": [ { "field", "message" } ] }`. A 500 means
+  nothing changed; a policy that is live but could not be written to the change log is a
+  200 with an `x-customs-warning` header, and is still counted and announced.
   Who may `PUT` depends on how the server was started. With an admin token
   (`CUSTOMS_ADMIN_TOKEN`, or `--admin-token-file` for a mounted secret, at least 16
   characters) the request needs `Authorization: Bearer <token>`, compared in constant
@@ -897,7 +901,11 @@ API (JSON). CORS allows only `http://localhost:5173` (the Vite dev server).
   `customs_cache_total{result}`, `customs_singleflight_joins_total`,
   `customs_policy_changes_total{result}`,
   `customs_scan_duration_seconds`, `customs_upstream_fetch_duration_seconds{kind}`).
-  `GET /healthz`: `{ "status": "ok", "version", "model_version", "mode" }`.
+  `GET /healthz`: `{ "status": "ok", "version", "model_version", "models_loaded",
+  "untrained", "mode" }`. `models_loaded` is false when no model directory was found and
+  verdicts come from the policy rules alone (the server logs an error naming the paths it
+  tried); `customs doctor` warns about that, about untrained placeholder models, and about
+  monitor mode.
 - `GET /` and static assets: the dashboard from `--ui-dir` or `CUSTOMS_UI_DIR` (default `web/dist`, then `../../web/dist` and `../share/customs/ui` beside the binary), with
   unknown non-API paths served `index.html`; a placeholder page when it is not built.
 
@@ -926,7 +934,8 @@ resolved again through the proxy and `uv sync --locked` refused to run. `customs
 [DIR]` checks a project and the current environment for each of these (unset or
 different variables, scoped registries, extra indexes and find-links in pip and uv
 settings or requirements files, non-PyPI Pipfile sources, Poetry, lockfile URLs off the
-proxy) and exits 1 when it finds a way around the proxy. It also reports where the
+proxy) and exits 1 when it finds a way around the proxy. URLs in its output, text or
+JSON, show user names and passwords as `***` and lose their query strings. It also reports where the
 Claude Code hook is registered and warns when its matcher covers only `Bash`, which
 leaves the file edits of section 9.2 unchecked (likewise for the Cursor, Gemini CLI and
 Codex hooks), and warns about MCP servers in the project's or the user's agent
@@ -966,13 +975,16 @@ served)" in monitor mode, and ends with the verdict page under `--public-url` (d
 bind address when it is a specific IP). The same ecosystem, name, version and decision is
 sent once per hour, so an agent retrying a blocked install does not flood the channel, and a
 token bucket (20 messages, refilled at 20 per minute) caps bursts; the next message sent
-counts the ones held back. Delivery has a 10 s timeout and up to two retries (after 1 s and
-4 s) on network errors, 429 and 5xx; other 4xx answers are not retried. The webhook URL's
-path is its credential, so logs name only its host. Outcomes are counted in
-`customs_notifications_total{outcome="sent|failed|repeat|rate_limited|dropped"}`.
+counts the ones held back or not delivered. Delivery has a 10 s timeout and up to two
+retries (after 1 s and 4 s) on network errors, 429 and 5xx; other 4xx answers are not
+retried. The webhook URL's path is its credential, so logs name only its host. Outcomes are
+counted in
+`customs_notifications_total{outcome="sent|failed|repeat|rate_limited|dropped|no_verdict"}`
+(`no_verdict`: the verdict could not be read back from the store).
 
 Each policy change accepted through `PUT /api/policy` is announced too, whatever
-`--notify-on` says and outside the rate limit, since switching to monitor mode or
+`--notify-on` says, outside the rate limit and without waiting for a verdict message's
+retries, since switching to monitor mode or
 allow-listing a package turns protection off for everyone using the server. The text is
 "Customs policy changed" with the address, client and whether the admin token was used,
 then one line per field (`mode: enforce -> monitor`, `allow: added npm:left-pad`), and the
@@ -1025,12 +1037,24 @@ Age comes from registry metadata: PyPI `upload_time_iso_8601` of the specific fi
 the earliest file of the release), npm `time[version]`. `min_age_severity = "warn"` makes
 young versions a warning, so that `block_install_scripts_from_new` is what blocks young npm
 packages with `preinstall`/`install`/`postinstall` scripts. List entries are
-`<ecosystem>:<name>` with an optional `@version` or `==version`; names are normalized. Deny
+`<ecosystem>:<name>` with an optional `@version` or `==version`; names are normalized.
+Only exact versions are supported: an entry with a range, a specifier (`pypi:x>=1.0`,
+`pypi:x=1.0`), extras (`pypi:x[y]`), an empty version (`npm:x@`) or characters a package
+name cannot hold is rejected, since it would never match anything. Deny
 beats allow; allow overrides the model and the other rules. `block_nonexistent = false`
 turns nonexistent names into warnings. Unknown keys and bad values are rejected with the
-key that holds them. Without `--config`, the server reads `./customs.toml`, then
+key that holds them. An upstream URL may carry credentials for a private registry
+(`https://user:token@host/path`, sent as Basic auth) but no query or fragment. Only the
+policy file holds them: `GET /api/policy`, the change log, the webhook and the log show
+`https://***@host/path`, and a `PUT` that sends `***` back for the same URL keeps the stored
+credentials (with a different URL it is refused). Without `--config`, the server reads `./customs.toml`, then
 `<data-dir>/policy.toml`, and `PUT /api/policy` writes to the file it read (or
-`<data-dir>/policy.toml`).
+`<data-dir>/policy.toml`). Client mode (the hooks, `check`, `diff`, `audit`, `mcp`, `scan`)
+never reads the working directory, which is the agent's project and may be hostile: its
+policy is `--config`, else `<data-dir>/policy.toml` of the client data directory, else the
+defaults, and its models are `--models`/`CUSTOMS_MODELS`, else the paths relative to the
+binary (`./models` counts for `serve` only). An installed binary finds no models next to
+it unless they were installed to `<prefix>/share/customs/models`; set `CUSTOMS_MODELS`.
 
 **Established releases.** The classifier has false positives on popular packages that look
 like malware for ordinary reasons: the `requests` sdist has test fixtures full of raw IP

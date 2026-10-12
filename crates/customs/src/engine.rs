@@ -205,6 +205,15 @@ type Flight = Arc<OnceCell<Result<Outcome, EngineError>>>;
 /// A flight with the event kind and client of the caller that started it.
 type Leader = (Flight, EventKind, Option<String>);
 
+/// A policy change that is live (see [`Engine::change_policy`]).
+#[derive(Debug, Clone)]
+pub struct AppliedChange {
+    /// `id` is 0 when the change log could not record it.
+    pub change: PolicyChange,
+    /// Why the change log could not record it.
+    pub log_error: Option<String>,
+}
+
 pub struct Engine {
     policy: RwLock<Arc<Policy>>,
     policy_path: PathBuf,
@@ -272,7 +281,12 @@ fn remove_stale_parts(tmp: &Path, older_than: Duration) -> usize {
 impl Engine {
     pub fn new(cfg: EngineConfig) -> anyhow::Result<Arc<Self>> {
         let cache_dir = cfg.data_dir.join("cache");
-        std::fs::create_dir_all(cache_dir.join("tmp"))?;
+        std::fs::create_dir_all(cache_dir.join("tmp")).map_err(|e| {
+            anyhow::anyhow!(
+                "cannot use the data directory {}: {e}; pass --data-dir a writable directory",
+                cfg.data_dir.display()
+            )
+        })?;
         let n = remove_stale_parts(&cache_dir.join("tmp"), STALE_PART_AGE);
         if n > 0 {
             tracing::info!(
@@ -322,13 +336,14 @@ impl Engine {
 
     /// Persist and activate a validated policy.
     pub fn set_policy(&self, p: Policy) -> anyhow::Result<()> {
+        let text = p.to_toml()?;
         if let Some(dir) = self.policy_path.parent() {
             if !dir.as_os_str().is_empty() {
                 std::fs::create_dir_all(dir)?;
             }
         }
         let tmp = self.policy_path.with_extension("toml.tmp");
-        std::fs::write(&tmp, p.to_toml())?;
+        std::fs::write(&tmp, text)?;
         std::fs::rename(&tmp, &self.policy_path)?;
         *self.policy.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(p);
         Ok(())
@@ -336,21 +351,30 @@ impl Engine {
 
     /// Persist and activate a policy that came in through the API, and record what changed
     /// (`None` when nothing did). `change` carries who made it; its `changes` are filled in.
+    /// An error means nothing changed. Once the policy is live it is counted and announced
+    /// even if the change log cannot record it; [`AppliedChange::log_error`] says why.
     pub fn change_policy(
         &self,
         p: Policy,
         mut change: PolicyChange,
-    ) -> anyhow::Result<Option<PolicyChange>> {
+    ) -> anyhow::Result<Option<AppliedChange>> {
         let _guard = self.policy_write.lock().unwrap_or_else(|e| e.into_inner());
         change.changes = crate::policy_log::diff(&self.policy(), &p);
         self.set_policy(p)?;
         if change.changes.is_empty() {
             return Ok(None);
         }
-        let change = self.store.insert_policy_change(change)?;
+        let (change, log_error) = match self.store.insert_policy_change(change.clone()) {
+            Ok(c) => (c, None),
+            Err(e) => {
+                tracing::error!(error = %e, "policy applied but not recorded in the change log");
+                change.ts = crate::util::now_ts();
+                (change, Some(e.to_string()))
+            }
+        };
         self.metrics.policy_change("applied");
         let _ = self.policy_changes.send(change.clone());
-        Ok(Some(change))
+        Ok(Some(AppliedChange { change, log_error }))
     }
 
     pub fn subscribe_policy_changes(&self) -> broadcast::Receiver<PolicyChange> {
@@ -1535,39 +1559,50 @@ pub fn choose_file(eco: Ecosystem, files: &[FileMeta]) -> Option<&FileMeta> {
     }
 }
 
-/// Find a model directory: an explicit path (or its `dev/` subdirectory), then
-/// `CUSTOMS_MODELS`, `./models`, and paths relative to the executable. Real models in a
-/// directory win over its `dev/` placeholders.
-pub fn find_models_dir(explicit: Option<&Path>) -> Option<PathBuf> {
-    let mut roots: Vec<PathBuf> = Vec::new();
+/// The directories [`find_models_dir`] tries, in order: an explicit path, else
+/// `CUSTOMS_MODELS`, `<project_dir>/models` (only for `serve`; see
+/// [`crate::config::resolve_policy`]), and paths relative to the executable.
+fn model_roots(
+    explicit: Option<&Path>,
+    project_dir: Option<&Path>,
+    env_models: Option<PathBuf>,
+    exe: Option<&Path>,
+) -> Vec<PathBuf> {
     if let Some(p) = explicit {
-        roots.push(p.to_path_buf());
-    } else {
-        if let Ok(p) = std::env::var("CUSTOMS_MODELS") {
-            roots.push(PathBuf::from(p));
-        }
-        roots.push(PathBuf::from("models"));
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(dir) = exe.parent() {
-                // target/{debug,release}/customs in a checkout, or <prefix>/bin/customs.
-                roots.push(dir.join("../../models"));
-                roots.push(dir.join("../share/customs/models"));
-            }
-        }
+        return vec![p.to_path_buf()];
     }
-    for root in roots {
-        for dir in [root.clone(), root.join("dev")] {
-            if dir.join("manifest.json").is_file() {
-                return Some(dir);
-            }
-        }
+    let mut roots: Vec<PathBuf> = env_models.into_iter().collect();
+    roots.extend(project_dir.map(|d| d.join("models")));
+    if let Some(dir) = exe.and_then(Path::parent) {
+        // target/{debug,release}/customs in a checkout, or <prefix>/bin/customs.
+        roots.push(dir.join("../../models"));
+        roots.push(dir.join("../share/customs/models"));
     }
-    None
+    roots
+}
+
+/// Find a model directory among [`model_roots`] (each, or its `dev/` subdirectory). Real
+/// models in a directory win over its `dev/` placeholders.
+pub fn find_models_dir(explicit: Option<&Path>, project_dir: Option<&Path>) -> Option<PathBuf> {
+    first_models_dir(&default_model_roots(explicit, project_dir))
+}
+
+fn default_model_roots(explicit: Option<&Path>, project_dir: Option<&Path>) -> Vec<PathBuf> {
+    let exe = std::env::current_exe().ok();
+    let env_models = std::env::var_os("CUSTOMS_MODELS").map(PathBuf::from);
+    model_roots(explicit, project_dir, env_models, exe.as_deref())
+}
+
+fn first_models_dir(roots: &[PathBuf]) -> Option<PathBuf> {
+    roots
+        .iter()
+        .flat_map(|root| [root.clone(), root.join("dev")])
+        .find(|dir| dir.join("manifest.json").is_file())
 }
 
 /// Load models from [`find_models_dir`]; with nothing found, run policy-only.
-pub fn load_models(explicit: Option<&Path>) -> anyhow::Result<Models> {
-    match find_models_dir(explicit) {
+pub fn load_models(explicit: Option<&Path>, project_dir: Option<&Path>) -> anyhow::Result<Models> {
+    match find_models_dir(explicit, project_dir) {
         Some(dir) => {
             let m = Models::load(&dir)
                 .map_err(|e| anyhow::anyhow!("loading models from {}: {e}", dir.display()))?;
@@ -1575,7 +1610,13 @@ pub fn load_models(explicit: Option<&Path>) -> anyhow::Result<Models> {
                 tracing::warn!(dir = %dir.display(), error = %e, "ignoring unreadable model metrics");
             }
             if m.manifest.untrained {
-                tracing::warn!(dir = %dir.display(), version = m.model_version(), "using UNTRAINED placeholder models");
+                tracing::warn!(
+                    dir = %dir.display(),
+                    version = m.model_version(),
+                    "using UNTRAINED placeholder models: their scores mean nothing; point \
+                     --models or CUSTOMS_MODELS at the trained models directory (models/ in the \
+                     Customs repository)"
+                );
             } else {
                 tracing::info!(dir = %dir.display(), version = m.model_version(), "loaded models");
             }
@@ -1585,15 +1626,68 @@ pub fn load_models(explicit: Option<&Path>) -> anyhow::Result<Models> {
             if let Some(p) = explicit {
                 anyhow::bail!("no manifest.json in {} or {}/dev", p.display(), p.display());
             }
-            tracing::warn!("no models found; verdicts use policy rules only");
+            let roots = default_model_roots(None, project_dir);
+            tracing::error!("{}", no_models_message(&roots));
             Ok(Models::empty())
         }
     }
 }
 
+/// What to say when [`find_models_dir`] found nothing in `roots`.
+fn no_models_message(roots: &[PathBuf]) -> String {
+    let tried: Vec<String> = roots.iter().map(|r| r.display().to_string()).collect();
+    format!(
+        "no models found in {} (or their dev/ subdirectories): the classifier is OFF and \
+         verdicts use the policy rules only; pass --models DIR or set CUSTOMS_MODELS",
+        if tried.is_empty() {
+            "any directory".to_string()
+        } else {
+            tried.join(", ")
+        }
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn find_models_dir_without_project_dir_ignores_models() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project.path().join("models")).unwrap();
+        std::fs::write(project.path().join("models/manifest.json"), "{}").unwrap();
+        let exe = Path::new("/opt/customs/bin/customs");
+        let roots = model_roots(None, None, None, Some(exe));
+        assert!(
+            roots.iter().all(|r| !r.starts_with(project.path())),
+            "{roots:?}"
+        );
+        assert_eq!(first_models_dir(&roots), None);
+        // `serve` looks in its working directory, after CUSTOMS_MODELS.
+        let roots = model_roots(None, Some(project.path()), None, Some(exe));
+        assert_eq!(
+            first_models_dir(&roots),
+            Some(project.path().join("models"))
+        );
+        let env = PathBuf::from("/env/models");
+        let roots = model_roots(None, Some(project.path()), Some(env.clone()), None);
+        assert_eq!(roots[0], env);
+        // An explicit directory is the only one tried.
+        let roots = model_roots(Some(Path::new("/x")), Some(project.path()), Some(env), None);
+        assert_eq!(roots, vec![PathBuf::from("/x")]);
+    }
+
+    #[test]
+    fn no_models_message_lists_roots_and_remedy() {
+        let m = no_models_message(&[PathBuf::from("/env/models"), PathBuf::from("/opt/models")]);
+        assert!(m.contains("/env/models, /opt/models"), "{m}");
+        assert!(m.contains("classifier is OFF"), "{m}");
+        assert!(
+            m.contains("--models DIR") && m.contains("CUSTOMS_MODELS"),
+            "{m}"
+        );
+        assert!(!m.contains("  "), "{m}");
+    }
 
     fn f(name: &str, kind: &str, size: u64) -> FileMeta {
         FileMeta {

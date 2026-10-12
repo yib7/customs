@@ -3,6 +3,7 @@
 use std::convert::Infallible;
 use std::time::Duration;
 
+use axum::extract::rejection::{PathRejection, QueryRejection};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
@@ -24,7 +25,7 @@ use crate::engine::EngineError;
 use crate::policy_log::{describe, PolicyChange};
 use crate::server::AppState;
 use crate::store::EventFilter;
-use crate::util::{parse_ecosystem, registry_name};
+use crate::util::{parse_ecosystem, redact_urls, registry_name};
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -52,7 +53,8 @@ fn engine_error(e: EngineError) -> Response {
         EngineError::Upstream(_) => StatusCode::BAD_GATEWAY,
         EngineError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
     };
-    api_error(status, e.to_string())
+    // Upstream errors name the URL, which may carry the registry credentials.
+    api_error(status, redact_urls(&e.to_string()))
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -135,7 +137,7 @@ struct DiffQuery {
 
 async fn diff(
     State(state): State<AppState>,
-    q: Result<Query<DiffQuery>, axum::extract::rejection::QueryRejection>,
+    q: Result<Query<DiffQuery>, QueryRejection>,
 ) -> Response {
     let Query(q) = match q {
         Ok(q) => q,
@@ -179,7 +181,14 @@ struct EventsQuery {
     q: Option<String>,
 }
 
-async fn events(State(state): State<AppState>, Query(q): Query<EventsQuery>) -> Response {
+async fn events(
+    State(state): State<AppState>,
+    q: Result<Query<EventsQuery>, QueryRejection>,
+) -> Response {
+    let Query(q) = match q {
+        Ok(q) => q,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e.body_text()),
+    };
     let limit = q.limit.unwrap_or(50).clamp(1, 500);
     let nonempty = |s: Option<String>| s.map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
     let filter = EventFilter {
@@ -223,7 +232,11 @@ async fn events_stream(
     Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
 }
 
-async fn verdict(State(state): State<AppState>, Path(id): Path<i64>) -> Response {
+async fn verdict(State(state): State<AppState>, id: Result<Path<i64>, PathRejection>) -> Response {
+    let Path(id) = match id {
+        Ok(id) => id,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e.body_text()),
+    };
     match state.engine.store.verdict(id) {
         Ok(Some(v)) => Json(v).into_response(),
         Ok(None) => api_error(StatusCode::NOT_FOUND, format!("no verdict {id}")),
@@ -236,7 +249,14 @@ struct StatsQuery {
     days: Option<u32>,
 }
 
-async fn stats(State(state): State<AppState>, Query(q): Query<StatsQuery>) -> Response {
+async fn stats(
+    State(state): State<AppState>,
+    q: Result<Query<StatsQuery>, QueryRejection>,
+) -> Response {
+    let Query(q) = match q {
+        Ok(q) => q,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e.body_text()),
+    };
     match state.engine.store.stats(q.days.unwrap_or(30)) {
         Ok(s) => Json(s).into_response(),
         Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
@@ -244,7 +264,7 @@ async fn stats(State(state): State<AppState>, Query(q): Query<StatsQuery>) -> Re
 }
 
 async fn get_policy(State(state): State<AppState>) -> Response {
-    Json(&*state.engine.policy()).into_response()
+    Json(state.engine.policy().redacted()).into_response()
 }
 
 async fn put_policy(
@@ -272,17 +292,33 @@ async fn put_policy(
         }
         return resp;
     }
-    let policy = match Policy::from_json(&body) {
+    let policy = match Policy::from_json_replacing(&body).and_then(|mut p| {
+        p.keep_credentials(&state.engine.policy())
+            .map_err(|e| vec![e])?;
+        Ok(p)
+    }) {
         Ok(p) => p,
-        Err(e) => {
+        Err(errs) => {
+            let error = match errs.as_slice() {
+                [e] => e.to_string(),
+                _ => format!(
+                    "the policy is missing {}: PUT replaces the whole policy, so send every \
+                     key GET /api/policy returns",
+                    errs.iter()
+                        .map(|e| e.key.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            };
+            let errors: Vec<Value> = errs
+                .iter()
+                .map(|e| json!({ "field": e.key, "message": e.message }))
+                .collect();
             return (
                 StatusCode::BAD_REQUEST,
-                Json(json!({
-                    "error": e.to_string(),
-                    "errors": [{ "field": e.key, "message": e.message }],
-                })),
+                Json(json!({ "error": error, "errors": errors })),
             )
-                .into_response()
+                .into_response();
         }
     };
     let who = PolicyChange {
@@ -293,6 +329,7 @@ async fn put_policy(
         auth: state.policy_auth.kind().into(),
         changes: Vec::new(),
     };
+    let mut warning = None;
     match state.engine.change_policy(policy, who) {
         Err(e) => {
             return api_error(
@@ -300,7 +337,8 @@ async fn put_policy(
                 format!("saving policy: {e}"),
             )
         }
-        Ok(Some(ch)) => {
+        Ok(Some(applied)) => {
+            let ch = &applied.change;
             let fields: Vec<String> = ch.changes.iter().map(describe).collect();
             tracing::info!(
                 path = %state.engine.policy_path().display(),
@@ -309,10 +347,24 @@ async fn put_policy(
                 changes = %fields.join("; "),
                 "policy updated"
             );
+            warning = applied
+                .log_error
+                .map(|e| format!("policy applied but not recorded in the change log: {e}"));
         }
         Ok(None) => {}
     }
-    Json(&*state.engine.policy()).into_response()
+    let mut resp = Json(state.engine.policy().redacted()).into_response();
+    if let Some(w) = warning {
+        // Header values cannot hold control characters; the log line has the full text.
+        let w: String = w
+            .chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .collect();
+        if let Ok(v) = axum::http::HeaderValue::from_str(&w) {
+            resp.headers_mut().insert("x-customs-warning", v);
+        }
+    }
+    resp
 }
 
 #[derive(Deserialize)]
@@ -321,7 +373,14 @@ struct ChangesQuery {
 }
 
 /// `GET /api/policy/changes`: policy changes made through the API, newest first.
-async fn policy_changes(State(state): State<AppState>, Query(q): Query<ChangesQuery>) -> Response {
+async fn policy_changes(
+    State(state): State<AppState>,
+    q: Result<Query<ChangesQuery>, QueryRejection>,
+) -> Response {
+    let Query(q) = match q {
+        Ok(q) => q,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e.body_text()),
+    };
     match state
         .engine
         .store

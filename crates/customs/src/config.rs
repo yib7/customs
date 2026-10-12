@@ -410,10 +410,18 @@ impl PackageRule {
             }
         };
         let name = name.trim();
-        if name.is_empty() || name.contains(char::is_whitespace) {
-            return Err(format!("'{s}': missing or invalid package name"));
+        // A specifier written as a name would never match anything, so a deny entry
+        // like `pypi:evil>=1.0` would protect nothing.
+        const SYNTAX: &str = "use `pypi:name`, `pypi:name==1.0`, `npm:name` or `npm:name@1.0`                               (exact versions only; ranges and extras are not supported)";
+        if !valid_package_name(ecosystem, name) {
+            return Err(format!("'{s}': missing or invalid package name; {SYNTAX}"));
         }
-        let version = version.map(str::trim).filter(|v| !v.is_empty());
+        let version = version.map(str::trim);
+        if let Some(v) = version {
+            if v.is_empty() || v.contains(|c: char| c.is_whitespace() || "<>=!^~*|,".contains(c)) {
+                return Err(format!("'{s}': invalid version '{v}'; {SYNTAX}"));
+            }
+        }
         Ok(Self {
             ecosystem,
             name: normalize_name(ecosystem, name),
@@ -432,6 +440,28 @@ impl PackageRule {
     }
 }
 
+/// A PyPI project name (PEP 508), or an npm name with an optional `@scope/`.
+fn valid_package_name(eco: Ecosystem, name: &str) -> bool {
+    let part = |s: &str, extra: &str| {
+        !s.is_empty()
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || extra.contains(c))
+    };
+    match eco {
+        Ecosystem::Pypi => {
+            part(name, "._-")
+                && name.starts_with(|c: char| c.is_ascii_alphanumeric())
+                && name.ends_with(|c: char| c.is_ascii_alphanumeric())
+        }
+        Ecosystem::Npm => match name.strip_prefix('@') {
+            Some(scoped) => scoped
+                .split_once('/')
+                .is_some_and(|(scope, n)| part(scope, "._~-") && part(n, "._~-")),
+            None => part(name, "._~-"),
+        },
+    }
+}
+
 impl fmt::Display for PackageRule {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}:{}", ecosystem_str(self.ecosystem), self.name)?;
@@ -443,15 +473,76 @@ impl fmt::Display for PackageRule {
 }
 
 fn check_url(key: &str, v: &str) -> Result<(), ConfigError> {
-    let u = url::Url::parse(v)
-        .map_err(|e| ConfigError::new(key, format!("'{v}' is not a URL: {e}")))?;
+    let u = url::Url::parse(v).map_err(|e| {
+        ConfigError::new(key, format!("'{}' is not a URL: {e}", redact_upstream(v)))
+    })?;
+    let shown = redact_upstream(v);
     if !matches!(u.scheme(), "http" | "https") {
         return Err(ConfigError::new(
             key,
-            format!("'{v}' must be an http or https URL"),
+            format!("'{shown}' must be an http or https URL"),
+        ));
+    }
+    // Paths are appended to the URL, so a query or fragment would end up in the middle.
+    if u.query().is_some() || u.fragment().is_some() {
+        return Err(ConfigError::new(
+            key,
+            format!("'{shown}' must not have a query (?) or fragment (#)"),
         ));
     }
     Ok(())
+}
+
+/// An upstream URL as the API, the change log, the webhook and the log show it: credentials
+/// (the only way to authenticate to a private registry; reqwest sends them as Basic auth)
+/// become `***`. Only the policy file holds them.
+pub fn redact_upstream(url: &str) -> String {
+    let shown = crate::util::redact_url(url);
+    if shown == url {
+        return shown;
+    }
+    // `Url` adds a `/` to an empty path; stored upstreams have none.
+    shown.trim_end_matches('/').to_string()
+}
+
+/// Whether `url` has `***` (what [`redact_upstream`] shows) in place of its credentials.
+fn has_redacted_credentials(url: &str) -> bool {
+    url::Url::parse(url).is_ok_and(|u| u.username() == "***" && u.password().is_none())
+}
+
+impl Upstream {
+    fn fields_mut(&mut self) -> [(&'static str, &mut String); 4] {
+        [
+            ("upstream.pypi_simple", &mut self.pypi_simple),
+            ("upstream.pypi_files", &mut self.pypi_files),
+            ("upstream.pypi_json", &mut self.pypi_json),
+            ("upstream.npm", &mut self.npm),
+        ]
+    }
+}
+
+/// Push onto `out` the dotted path of every key of `full` that `got` lacks, descending
+/// into tables both have. A `got` that is not an object is left to the parser to reject.
+fn missing_keys(
+    full: &serde_json::Value,
+    got: &serde_json::Value,
+    prefix: &str,
+    out: &mut Vec<String>,
+) {
+    let (Some(full), Some(got)) = (full.as_object(), got.as_object()) else {
+        return;
+    };
+    for (k, fv) in full {
+        let path = if prefix.is_empty() {
+            k.clone()
+        } else {
+            format!("{prefix}.{k}")
+        };
+        match got.get(k) {
+            None => out.push(path),
+            Some(gv) => missing_keys(fv, gv, &path, out),
+        }
+    }
 }
 
 impl Policy {
@@ -471,6 +562,31 @@ impl Policy {
         p.validated()
     }
 
+    /// Parse a JSON body that replaces the whole policy (`PUT /api/policy`). Unlike
+    /// [`Policy::from_json`], every key `GET /api/policy` returns must be present: a partial
+    /// body would otherwise reset the keys it leaves out, the deny list among them. Each
+    /// missing key (a dotted path such as `established.top`) is its own error.
+    pub fn from_json_replacing(text: &str) -> Result<Self, Vec<ConfigError>> {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(text) {
+            let full = serde_json::to_value(Policy::default()).unwrap_or_default();
+            let mut missing = Vec::new();
+            missing_keys(&full, &v, "", &mut missing);
+            if !missing.is_empty() {
+                return Err(missing
+                    .into_iter()
+                    .map(|k| {
+                        ConfigError::new(
+                            k,
+                            "missing: PUT replaces the whole policy, so send every key \
+                             GET /api/policy returns",
+                        )
+                    })
+                    .collect());
+            }
+        }
+        Self::from_json(text).map_err(|e| vec![e])
+    }
+
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
         let text = std::fs::read_to_string(path)
             .map_err(|e| ConfigError::new("", format!("cannot read {}: {e}", path.display())))?;
@@ -480,8 +596,11 @@ impl Policy {
         })
     }
 
-    pub fn to_toml(&self) -> String {
-        toml::to_string_pretty(self).unwrap_or_default()
+    /// The policy file text. An error rather than an empty string, which written over the
+    /// policy file would bring back the defaults (no deny list) at the next start.
+    pub fn to_toml(&self) -> Result<String, ConfigError> {
+        toml::to_string_pretty(self)
+            .map_err(|e| ConfigError::new("", format!("cannot write the policy as TOML: {e}")))
     }
 
     /// Check every value and normalize URLs (no trailing slash).
@@ -545,18 +664,50 @@ impl Policy {
                     .map_err(|m| ConfigError::new(format!("{key}[{i}]"), m))?;
             }
         }
-        for (key, v) in [
-            ("upstream.pypi_simple", &mut self.upstream.pypi_simple),
-            ("upstream.pypi_files", &mut self.upstream.pypi_files),
-            ("upstream.pypi_json", &mut self.upstream.pypi_json),
-            ("upstream.npm", &mut self.upstream.npm),
-        ] {
+        for (key, v) in self.upstream.fields_mut() {
             check_url(key, v)?;
             while v.ends_with('/') {
                 v.pop();
             }
         }
         Ok(self)
+    }
+
+    /// This policy as the API shows it: upstream credentials replaced by `***`.
+    pub fn redacted(&self) -> Policy {
+        let mut p = self.clone();
+        for (_, v) in p.upstream.fields_mut() {
+            *v = redact_upstream(v);
+        }
+        p
+    }
+
+    /// Put back the credentials of `active` where this policy (from `PUT /api/policy`) has
+    /// the `***` that [`Policy::redacted`] showed, so a dashboard can send back what it read.
+    /// A `***` on a URL other than the active one is an error: there is nothing to keep.
+    pub fn keep_credentials(&mut self, active: &Policy) -> Result<(), ConfigError> {
+        let mut active = active.upstream.clone();
+        for ((key, v), (_, old)) in self
+            .upstream
+            .fields_mut()
+            .into_iter()
+            .zip(active.fields_mut())
+        {
+            if !has_redacted_credentials(v) {
+                continue;
+            }
+            if redact_upstream(old) != redact_upstream(v) {
+                return Err(ConfigError::new(
+                    key,
+                    format!(
+                        "'{v}': `***` stands for the stored credentials, and the active                          upstream is '{}'; send a new URL with its own credentials",
+                        redact_upstream(old)
+                    ),
+                ));
+            }
+            *v = old.clone();
+        }
+        Ok(())
     }
 
     /// Whether a release history rule that applies to PyPI is on. Those rules need the
@@ -590,12 +741,18 @@ pub struct PolicySource {
     pub loaded: bool,
 }
 
-/// Resolve the policy file: an explicit `--config` must exist; otherwise `./customs.toml`,
-/// then `<data_dir>/policy.toml`, and if neither exists the defaults are used and later
-/// edits are saved to `<data_dir>/policy.toml`.
+/// Resolve the policy file: an explicit `--config` must exist; otherwise
+/// `<project_dir>/customs.toml` (only when a project directory is given), then
+/// `<data_dir>/policy.toml`, and if neither exists the defaults are used and later edits
+/// are saved to `<data_dir>/policy.toml`.
+///
+/// `serve` passes its working directory, which the operator chose. Client-side checks (the
+/// hook, `check`, `diff`, `audit`, `mcp`, `scan`) pass `None`: they run in the agent's
+/// project, which must not choose the policy that judges it.
 pub fn resolve_policy(
     explicit: Option<&Path>,
     data_dir: &Path,
+    project_dir: Option<&Path>,
 ) -> Result<(Policy, PolicySource), ConfigError> {
     if let Some(p) = explicit {
         let policy = Policy::load(p)?;
@@ -607,7 +764,11 @@ pub fn resolve_policy(
             },
         ));
     }
-    for candidate in [PathBuf::from("customs.toml"), data_dir.join("policy.toml")] {
+    let candidates = project_dir
+        .map(|d| d.join("customs.toml"))
+        .into_iter()
+        .chain([data_dir.join("policy.toml")]);
+    for candidate in candidates {
         if candidate.exists() {
             let policy = Policy::load(&candidate)?;
             return Ok((
@@ -657,7 +818,7 @@ npm = "https://registry.npmjs.org"
         assert_eq!(p.upstream.pypi_simple, "https://pypi.org/simple");
         assert_eq!(p.deny_rules()[0].version.as_deref(), Some("3.3.6"));
         // Round trip through TOML and JSON.
-        assert_eq!(Policy::from_toml(&p.to_toml()).unwrap(), p);
+        assert_eq!(Policy::from_toml(&p.to_toml().unwrap()).unwrap(), p);
         let json = serde_json::to_string(&p).unwrap();
         assert_eq!(Policy::from_json(&json).unwrap(), p);
     }
@@ -714,7 +875,7 @@ npm = "https://registry.npmjs.org"
         let mut q = p.clone();
         q.provenance_dropped = RuleSeverity::Off;
         assert!(!q.pypi_history_rules_enabled());
-        assert_eq!(Policy::from_toml(&p.to_toml()).unwrap(), p);
+        assert_eq!(Policy::from_toml(&p.to_toml().unwrap()).unwrap(), p);
         let json = serde_json::to_value(&p).unwrap();
         assert_eq!(json["provenance_dropped"], "block");
         assert_eq!(json["install_script_added"], "off");
@@ -751,7 +912,7 @@ npm = "https://registry.npmjs.org"
         assert!(!p.established.enabled);
         assert_eq!(p.established.top, 1000);
         assert_eq!(p.established.min_age_days, 30);
-        assert_eq!(Policy::from_toml(&p.to_toml()).unwrap(), p);
+        assert_eq!(Policy::from_toml(&p.to_toml().unwrap()).unwrap(), p);
         let json = serde_json::to_string(&p).unwrap();
         assert_eq!(Policy::from_json(&json).unwrap(), p);
         let p = Policy::from_json(r#"{"established": {"min_age_days": 60}}"#).unwrap();
@@ -775,6 +936,30 @@ npm = "https://registry.npmjs.org"
     }
 
     #[test]
+    fn client_resolution_skips_project_dir() {
+        let project = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        std::fs::write(project.path().join("customs.toml"), "mode = \"monitor\"").unwrap();
+        // A client (no project dir) gets the defaults, to be saved in the data dir.
+        let (p, src) = resolve_policy(None, data.path(), None).unwrap();
+        assert_eq!(p, Policy::default());
+        assert_eq!(src.path, data.path().join("policy.toml"));
+        assert!(!src.loaded);
+        // `serve` reads the project file first.
+        let (p, src) = resolve_policy(None, data.path(), Some(project.path())).unwrap();
+        assert_eq!(p.mode, Mode::Monitor);
+        assert_eq!(src.path, project.path().join("customs.toml"));
+        // The client reads its own data dir's policy.
+        std::fs::write(data.path().join("policy.toml"), "min_age_days = 9").unwrap();
+        let (p, src) = resolve_policy(None, data.path(), None).unwrap();
+        assert_eq!((p.mode, p.min_age_days), (Mode::Enforce, 9));
+        assert!(src.loaded);
+        // A malformed project file cannot break a client either.
+        std::fs::write(project.path().join("customs.toml"), "[[[").unwrap();
+        assert!(resolve_policy(None, data.path(), None).is_ok());
+    }
+
+    #[test]
     fn package_rules() {
         let r = PackageRule::parse("npm:@Scope/Pkg@1.0.0").unwrap();
         assert_eq!(r.name, "@scope/pkg");
@@ -787,5 +972,73 @@ npm = "https://registry.npmjs.org"
         assert!(!r.matches(Ecosystem::Pypi, "python-dateutil", Some("2.9.0")));
         assert!(PackageRule::parse("requests").is_err());
         assert!(PackageRule::parse("pypi:").is_err());
+        assert!(PackageRule::parse("pypi:zope.interface==5.0").is_ok());
+        assert!(PackageRule::parse("npm:lodash.merge@4.6.2").is_ok());
+    }
+
+    #[test]
+    fn upstream_with_query_or_fragment_is_rejected() {
+        for bad in ["https://r.example/x?token=t", "https://r.example/x#frag"] {
+            let e = Policy::from_toml(&format!(
+                "[upstream]
+npm = \"{bad}\""
+            ))
+            .unwrap_err();
+            assert_eq!(e.key, "upstream.npm", "{bad}");
+        }
+        let e = Policy::from_toml(
+            "[upstream]
+npm = \"https://u:s3cret@r.example/x?t=1\"",
+        )
+        .unwrap_err();
+        assert!(!e.to_string().contains("s3cret"), "{e}");
+        let p = Policy::from_toml(
+            "[upstream]
+npm = \"https://u:s3cret@r.example/x\"",
+        )
+        .unwrap();
+        assert_eq!(p.upstream.npm, "https://u:s3cret@r.example/x");
+    }
+
+    #[test]
+    fn upstream_credentials_are_shown_as_stars_and_kept() {
+        let mut active = Policy::default();
+        active.upstream.npm = "https://u:s3cret@r.example".into();
+        let shown = active.redacted();
+        assert_eq!(shown.upstream.npm, "https://***@r.example");
+        assert_eq!(shown.upstream.pypi_json, active.upstream.pypi_json);
+        let mut back = shown.clone();
+        back.keep_credentials(&active).unwrap();
+        assert_eq!(back, active);
+        // `***` on another host has no credentials to keep.
+        let mut moved = shown;
+        moved.upstream.npm = "https://***@other.example".into();
+        let e = moved.keep_credentials(&active).unwrap_err();
+        assert_eq!(e.key, "upstream.npm");
+        assert!(!e.to_string().contains("s3cret"), "{e}");
+    }
+
+    #[test]
+    fn package_rule_rejects_specifiers() {
+        for bad in [
+            "pypi:evil>=1.0",
+            "pypi:foo=1.0",
+            "pypi:foo~=1",
+            "pypi:foo[x]",
+            "pypi:foo==",
+            "pypi:foo==>1",
+            "npm:foo@",
+            "npm:foo@^1.2",
+            "npm:@scope/",
+            "npm:@scope",
+            "npm:foo bar",
+            "npm:a/b",
+        ] {
+            let e = PackageRule::parse(bad).unwrap_err();
+            assert!(e.contains(bad), "{bad}: {e}");
+        }
+        let e = Policy::from_toml("deny = [\"npm:ok\", \"pypi:evil>=1.0\"]").unwrap_err();
+        assert_eq!(e.key, "deny[1]");
+        assert!(e.message.contains("pypi:name==1.0"), "{e}");
     }
 }

@@ -35,7 +35,7 @@ pub fn now() -> DateTime<Utc> {
     Utc::now()
 }
 
-pub fn ts(t: DateTime<Utc>) -> String {
+fn ts(t: DateTime<Utc>) -> String {
     t.to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
@@ -56,6 +56,57 @@ pub fn human_duration(d: chrono::Duration) -> String {
         (s / 86400, "day")
     };
     format!("{n} {unit}{}", if n == 1 { "" } else { "s" })
+}
+
+/// `url` safe to show: a user name or password becomes `***` and the query and fragment
+/// (where tokens also travel) are dropped. A URL with none of those comes back unchanged.
+pub fn redact_url(url: &str) -> String {
+    if let Ok(mut u) = url::Url::parse(url) {
+        if !u.has_host() {
+            return url.to_string();
+        }
+        let userinfo = !u.username().is_empty() || u.password().is_some();
+        if !userinfo && u.query().is_none() && u.fragment().is_none() {
+            return url.to_string();
+        }
+        if userinfo {
+            let _ = u.set_password(None);
+            let _ = u.set_username("***");
+        }
+        u.set_query(None);
+        u.set_fragment(None);
+        return u.to_string();
+    }
+    // Not parseable: still cut `user:pass@` from the authority and anything after `?`/`#`.
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return url.to_string();
+    };
+    let rest = &rest[..rest.find(['?', '#']).unwrap_or(rest.len())];
+    let end = rest.find('/').unwrap_or(rest.len());
+    let (authority, path) = rest.split_at(end);
+    match authority.rsplit_once('@') {
+        Some((_, host)) => format!("{scheme}://***@{host}{path}"),
+        None => format!("{scheme}://{authority}{path}"),
+    }
+}
+
+/// `text` with every `scheme://...` token passed through [`redact_url`].
+pub fn redact_urls(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find("://") {
+        let start = rest[..i]
+            .rfind(|c: char| !(c.is_ascii_alphanumeric() || "+.-".contains(c)))
+            .map_or(0, |j| j + 1);
+        let end = rest[i..]
+            .find(|c: char| c.is_whitespace() || "\"'`,;<>()[]{}".contains(c))
+            .map_or(rest.len(), |j| i + j);
+        out.push_str(&rest[..start]);
+        out.push_str(&redact_url(&rest[start..end]));
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Name and version from a PyPI distribution file name.
@@ -186,5 +237,29 @@ mod tests {
         assert_eq!(human_duration(chrono::Duration::hours(2)), "2 hours");
         assert_eq!(human_duration(chrono::Duration::days(1)), "24 hours");
         assert_eq!(human_duration(chrono::Duration::days(3)), "3 days");
+    }
+
+    #[test]
+    fn urls_lose_their_credentials() {
+        assert_eq!(
+            redact_url("https://__token__:pypi-s3cret@corp.example/simple?token=t#x"),
+            "https://***@corp.example/simple"
+        );
+        assert_eq!(
+            redact_url("http://user@127.0.0.1:1234/npm"),
+            "http://***@127.0.0.1:1234/npm"
+        );
+        // Nothing to hide: unchanged, no trailing slash added.
+        assert_eq!(redact_url("https://pypi.org"), "https://pypi.org");
+        assert_eq!(redact_url("not a url"), "not a url");
+        assert_eq!(
+            redact_url("https://u:p@[bad host/x?y"),
+            "https://***@[bad host/x"
+        );
+        assert_eq!(
+            redact_urls("`--index-url https://u:s3cret@h.example/x?k=v` sends pip elsewhere, and \"http://a:b@c/\""),
+            "`--index-url https://***@h.example/x` sends pip elsewhere, and \"http://***@c/\""
+        );
+        assert_eq!(redact_urls("no urls here"), "no urls here");
     }
 }

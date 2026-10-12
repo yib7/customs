@@ -4,12 +4,13 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use clap::builder::BoolishValueParser;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use customs_model::Decision;
 use customs_scan::Ecosystem;
 
 use crate::audit::{AuditOptions, FailOn, Format};
-use crate::client::{Checker, LocalOptions};
+use crate::client::{default_client_data_dir, Checker, LocalOptions};
 use crate::config::resolve_policy;
 use crate::engine::{default_scanner, load_models, Engine, EngineConfig, Limits};
 use crate::hook::{run_agent, run_claude_code, Agent, HookOptions};
@@ -30,7 +31,7 @@ const DEFAULT_SERVER: &str = "http://127.0.0.1:7878";
 )]
 pub struct Cli {
     /// Log as JSON lines (to stderr).
-    #[arg(long, global = true, env = "CUSTOMS_LOG_JSON")]
+    #[arg(long, global = true, env = "CUSTOMS_LOG_JSON", value_parser = BoolishValueParser::new())]
     pub log_json: bool,
     #[command(subcommand)]
     pub command: Command,
@@ -74,7 +75,8 @@ pub struct ServeArgs {
     /// Dashboard directory. Default: ./web/dist, then paths relative to the executable.
     #[arg(long, env = "CUSTOMS_UI_DIR")]
     pub ui_dir: Option<PathBuf>,
-    /// Model directory (falls back to its dev/ placeholders).
+    /// Model directory (falls back to its dev/ placeholders). Default: ./models, then paths
+    /// relative to the executable.
     #[arg(long, env = "CUSTOMS_MODELS")]
     pub models: Option<PathBuf>,
     /// Artifact cache size cap in MiB; least recently used archives are removed past it.
@@ -107,8 +109,12 @@ pub struct ServeArgs {
     pub admin_token_file: Option<PathBuf>,
     /// Accept policy changes without a token on a server that listens beyond loopback,
     /// for a container whose published port is itself bound to loopback.
-    #[arg(long, env = "CUSTOMS_ALLOW_ANONYMOUS_POLICY_CHANGES")]
+    #[arg(long, env = "CUSTOMS_ALLOW_ANONYMOUS_POLICY_CHANGES", value_parser = BoolishValueParser::new())]
     pub allow_anonymous_policy_changes: bool,
+    /// Host names (comma-separated) under which the dashboard may change the policy, and a
+    /// loopback server answers, besides localhost and IP addresses.
+    #[arg(long, env = "CUSTOMS_ALLOWED_HOSTS", value_delimiter = ',')]
+    pub allowed_hosts: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -127,13 +133,16 @@ pub enum NotifyOnArg {
 
 #[derive(Debug, Args, Clone)]
 pub struct LocalArgs {
-    /// Policy file for in-process checks.
+    /// Policy file for in-process checks (default: <data-dir>/policy.toml; a project's
+    /// customs.toml is never read).
     #[arg(long)]
     pub config: Option<PathBuf>,
-    /// Model directory for in-process checks.
+    /// Model directory for in-process checks (default: paths relative to the executable; a
+    /// project's models/ is never read).
     #[arg(long, env = "CUSTOMS_MODELS")]
     pub models: Option<PathBuf>,
-    /// Cache and database directory for in-process checks (default: ~/.cache/customs).
+    /// Cache and database directory for in-process checks (default: ~/.cache/customs, or
+    /// %LOCALAPPDATA%\customs on Windows without HOME).
     #[arg(long)]
     pub data_dir: Option<PathBuf>,
 }
@@ -273,7 +282,7 @@ pub enum HookTarget {
         #[arg(long, default_value = DEFAULT_SERVER, env = "CUSTOMS_SERVER")]
         server: String,
         /// Deny the command when Customs itself fails (default: allow and log to stderr).
-        #[arg(long, env = "CUSTOMS_HOOK_FAIL_CLOSED")]
+        #[arg(long, env = "CUSTOMS_HOOK_FAIL_CLOSED", value_parser = BoolishValueParser::new())]
         fail_closed: bool,
         #[command(flatten)]
         local: LocalArgs,
@@ -300,7 +309,7 @@ pub struct AgentHookArgs {
     #[arg(long, default_value = DEFAULT_SERVER, env = "CUSTOMS_SERVER")]
     pub server: String,
     /// Deny the command when Customs itself fails (default: allow and log to stderr).
-    #[arg(long, env = "CUSTOMS_HOOK_FAIL_CLOSED")]
+    #[arg(long, env = "CUSTOMS_HOOK_FAIL_CLOSED", value_parser = BoolishValueParser::new())]
     pub fail_closed: bool,
     #[command(flatten)]
     pub local: LocalArgs,
@@ -365,6 +374,9 @@ pub async fn run(cli: Cli) -> i32 {
             print!("{}", env_exports(&a.server, a.shell));
             Ok(0)
         }
+        Command::Doctor(a) if !a.dir.is_dir() => {
+            Err(anyhow::anyhow!("no such directory: {}", a.dir.display()))
+        }
         Command::Doctor(a) => Ok(crate::doctor::run(crate::doctor::DoctorOptions {
             dir: a.dir,
             server: a.server,
@@ -404,14 +416,19 @@ pub async fn run(cli: Cli) -> i32 {
 }
 
 async fn serve(a: ServeArgs) -> anyhow::Result<()> {
-    let (policy, source) =
-        resolve_policy(a.config.as_deref(), &a.data_dir).map_err(|e| anyhow::anyhow!("{e}"))?;
+    // Settings that need no engine are checked first, so a typo fails fast.
+    let ui = find_ui_dir(a.ui_dir.as_deref())?;
+    let admin_token = admin_token(a.admin_token, a.admin_token_file)?;
+    // The operator starts the server, so its working directory may hold the configuration.
+    let here = Some(Path::new("."));
+    let (policy, source) = resolve_policy(a.config.as_deref(), &a.data_dir, here)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     if source.loaded {
         tracing::info!(path = %source.path.display(), mode = policy.mode.as_str(), "loaded policy");
     } else {
         tracing::info!(save_to = %source.path.display(), "no policy file; using defaults");
     }
-    let models = load_models(a.models.as_deref())?;
+    let models = load_models(a.models.as_deref(), here)?;
     let engine = Engine::new(EngineConfig {
         data_dir: a.data_dir.clone(),
         models,
@@ -424,11 +441,16 @@ async fn serve(a: ServeArgs) -> anyhow::Result<()> {
         },
         metrics: Arc::new(Metrics::new()),
     })?;
-    let listener = tokio::net::TcpListener::bind(&a.bind)
-        .await
-        .map_err(|e| anyhow::anyhow!("binding {}: {e}", a.bind))?;
+    let listener = tokio::net::TcpListener::bind(&a.bind).await.map_err(|e| {
+        let hint = if e.kind() == std::io::ErrorKind::AddrInUse {
+            "; another `customs serve` may be running there: pick another address with \
+             --bind or CUSTOMS_BIND"
+        } else {
+            ""
+        };
+        anyhow::anyhow!("binding {}: {e}{hint}", a.bind)
+    })?;
     let addr = listener.local_addr()?;
-    let ui = find_ui_dir(a.ui_dir.as_deref());
     if ui.is_none() {
         tracing::warn!("dashboard not built (npm run build in web/); serving a placeholder page");
     }
@@ -453,23 +475,56 @@ async fn serve(a: ServeArgs) -> anyhow::Result<()> {
         cfg.validate().map_err(|e| anyhow::anyhow!("{e}"))?;
         crate::notify::spawn(engine.clone(), cfg);
     }
-    let admin_token = match (a.admin_token, a.admin_token_file) {
-        (Some(t), _) => Some(t.trim().to_string()),
-        (None, Some(path)) => Some(
-            std::fs::read_to_string(&path)
-                .map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))?
-                .trim()
-                .to_string(),
-        ),
-        (None, None) => None,
-    }
-    .filter(|t| !t.is_empty());
     let opts = ServeOptions {
         admin_token,
         allow_anonymous_policy_changes: a.allow_anonymous_policy_changes,
+        allowed_hosts: a.allowed_hosts,
     };
     tracing::info!(%addr, "customs listening; run `customs env` for client settings");
     serve_with(listener, engine, ui, opts, shutdown_signal()).await
+}
+
+/// The admin token from `--admin-token` / `CUSTOMS_ADMIN_TOKEN` or the token file. A token
+/// that was set but is empty is an error: quietly running without one would leave a
+/// loopback server open to anonymous policy changes.
+fn admin_token(token: Option<String>, file: Option<PathBuf>) -> anyhow::Result<Option<String>> {
+    let token = match (token, file) {
+        (Some(t), _) => {
+            let t = t.trim().to_string();
+            anyhow::ensure!(
+                !t.is_empty(),
+                "the admin token (--admin-token or CUSTOMS_ADMIN_TOKEN) is empty; set one of \
+                 at least {} characters, or leave it unset",
+                crate::server::MIN_ADMIN_TOKEN_LEN
+            );
+            Some(t)
+        }
+        (None, Some(path)) => {
+            let t = std::fs::read_to_string(&path)
+                .map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))?
+                .trim()
+                .to_string();
+            anyhow::ensure!(
+                !t.is_empty(),
+                "the admin token file {} is empty",
+                path.display()
+            );
+            Some(t)
+        }
+        (None, None) => None,
+    };
+    // clap reads an empty variable as unset; one set to nothing is still a mistake.
+    if token.is_none() {
+        for var in ["CUSTOMS_ADMIN_TOKEN", "CUSTOMS_ADMIN_TOKEN_FILE"] {
+            if std::env::var_os(var).is_some_and(|v| v.is_empty()) {
+                anyhow::bail!(
+                    "{var} is set but empty; give it a value, or unset it to run without an \
+                     admin token"
+                );
+            }
+        }
+    }
+    Ok(token)
 }
 
 /// `name==1.0`, `name@1.0`, `@scope/name@^1` into name and optional version.
@@ -564,6 +619,7 @@ fn scan(a: ScanArgs) -> anyhow::Result<i32> {
         a.name.as_deref(),
         a.config.as_deref(),
         a.models.as_deref(),
+        None,
     )?;
     if a.json {
         println!("{}", serde_json::to_string_pretty(&v)?);
@@ -574,13 +630,16 @@ fn scan(a: ScanArgs) -> anyhow::Result<i32> {
 }
 
 /// Scan a local archive offline (`customs scan`, the MCP `scan_archive` tool). The
-/// ecosystem is guessed from the file name when not given.
+/// ecosystem is guessed from the file name when not given. The policy is `config`, else
+/// `<data_dir>/policy.toml` (default: the client data directory), as for in-process checks:
+/// never the working directory's `customs.toml` or `models/`.
 pub fn scan_file(
     archive: &Path,
     eco: Option<Ecosystem>,
     name: Option<&str>,
     config: Option<&Path>,
     models: Option<&Path>,
+    data_dir: Option<&Path>,
 ) -> anyhow::Result<Verdict> {
     static SCANS: AtomicU64 = AtomicU64::new(0);
     let bytes = std::fs::read(archive)
@@ -596,16 +655,25 @@ pub fn scan_file(
             anyhow::anyhow!("cannot tell the ecosystem of {filename}; pass --ecosystem")
         })?,
     };
-    // Offline: an in-memory engine with no network use, in a throwaway data dir.
-    let tmp = std::env::temp_dir().join(format!(
+    // Offline: an in-memory engine with no network use, in a throwaway data dir that is
+    // removed however this returns.
+    struct RemoveOnDrop(PathBuf);
+    impl Drop for RemoveOnDrop {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let tmp = RemoveOnDrop(std::env::temp_dir().join(format!(
         "customs-scan-{}-{}",
         std::process::id(),
         SCANS.fetch_add(1, Ordering::Relaxed)
-    ));
-    let (policy, source) = resolve_policy(config, &tmp).map_err(|e| anyhow::anyhow!("{e}"))?;
+    )));
+    let policy_dir = data_dir.map_or_else(default_client_data_dir, Path::to_path_buf);
+    let (policy, source) =
+        resolve_policy(config, &policy_dir, None).map_err(|e| anyhow::anyhow!("{e}"))?;
     let engine = Engine::new(EngineConfig {
-        data_dir: tmp.clone(),
-        models: load_models(models)?,
+        data_dir: tmp.0.clone(),
+        models: load_models(models, None)?,
         policy,
         policy_path: source.path,
         scanner: default_scanner(),
@@ -613,8 +681,9 @@ pub fn scan_file(
         metrics: Arc::new(Metrics::new()),
     })?;
     let v = engine.scan_local(&bytes, &filename, eco, name);
+    // The engine holds the database open; close it before the directory goes.
     drop(engine);
-    let _ = std::fs::remove_dir_all(&tmp);
+    drop(tmp);
     Ok(v)
 }
 
@@ -639,8 +708,8 @@ pub fn pretty(v: &Verdict, url: Option<&str>, via: &str) -> String {
         let sha = v
             .sha256
             .as_deref()
-            .map(|h| &h[..h.len().min(12)])
-            .unwrap_or("-");
+            .map(|h| h.chars().take(12).collect::<String>())
+            .unwrap_or_else(|| "-".into());
         s.push_str(&format!(
             "  artifact  {a} (sha256 {sha}...){}\n",
             if v.cached { " [cached]" } else { "" }
@@ -733,12 +802,21 @@ pub fn env_vars(server: &str) -> Vec<(&'static str, String)> {
     vars
 }
 
-/// The built dashboard: `explicit` if given, else the first of [`ui_dir_candidates`]
-/// that holds an `index.html`.
-fn find_ui_dir(explicit: Option<&Path>) -> Option<PathBuf> {
+/// The built dashboard: `explicit` if given (an error when it holds no `index.html`), else
+/// the first of [`ui_dir_candidates`] that holds one.
+fn find_ui_dir(explicit: Option<&Path>) -> anyhow::Result<Option<PathBuf>> {
     match explicit {
-        Some(dir) => first_ui_dir(&[dir.to_path_buf()]),
-        None => first_ui_dir(&ui_dir_candidates(std::env::current_exe().ok().as_deref())),
+        Some(dir) => match first_ui_dir(&[dir.to_path_buf()]) {
+            Some(d) => Ok(Some(d)),
+            None => anyhow::bail!(
+                "no dashboard in {} (--ui-dir or CUSTOMS_UI_DIR): it has no index.html; build \
+                 it with `npm run build` in web/ and pass web/dist, or leave the option unset",
+                dir.display()
+            ),
+        },
+        None => Ok(first_ui_dir(&ui_dir_candidates(
+            std::env::current_exe().ok().as_deref(),
+        ))),
     }
 }
 
@@ -784,12 +862,27 @@ mod tests {
     #[test]
     fn an_explicit_dashboard_dir_is_the_only_one_tried() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(find_ui_dir(Some(dir.path())), None);
+        let e = find_ui_dir(Some(dir.path())).unwrap_err().to_string();
+        assert!(e.contains(&dir.path().display().to_string()), "{e}");
         std::fs::write(dir.path().join("index.html"), "<html>").unwrap();
         assert_eq!(
-            find_ui_dir(Some(dir.path())),
+            find_ui_dir(Some(dir.path())).unwrap(),
             Some(dir.path().to_path_buf())
         );
+    }
+
+    #[test]
+    fn pretty_survives_a_non_ascii_sha256() {
+        let v: Verdict = serde_json::from_value(serde_json::json!({
+            "ts": "2026-01-01T00:00:00.000Z", "ecosystem": "pypi", "name": "x", "version": "1",
+            "artifact": "x-1.tar.gz", "sha256": "ééééééééééééééé", "decision": "allow",
+            "risk": null, "model_decision": "allow", "thresholds": {"warn": 0.5, "block": 0.9},
+            "scores": {}, "policy_hits": [], "reasons": [], "evidence": [],
+            "scanned_ms": 0, "model_version": "none", "cached": false, "mode": "enforce"
+        }))
+        .unwrap();
+        let text = pretty(&v, None, "test");
+        assert!(text.contains("(sha256 éééééééééééé...)"), "{text}");
     }
 
     #[test]

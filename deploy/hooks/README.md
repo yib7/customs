@@ -147,9 +147,9 @@ tool call. `customs audit` checks the servers already configured.
 |---|---|---|---|
 | `--server URL` | `CUSTOMS_SERVER` | `http://127.0.0.1:7878` | Server to ask; in-process when unreachable |
 | `--fail-closed` | `CUSTOMS_HOOK_FAIL_CLOSED` | off | Deny when Customs itself fails (bad input, registry unreachable) instead of staying silent |
-| `--config FILE` | | `./customs.toml` | Policy for in-process checks |
-| `--models DIR` | `CUSTOMS_MODELS` | `./models`, then next to the binary | Models for in-process checks |
-| `--data-dir DIR` | `CUSTOMS_DATA_DIR` | `~/.cache/customs` | Cache for in-process checks |
+| `--config FILE` | | `<data-dir>/policy.toml` | Policy for in-process checks (the project's `customs.toml` is never read) |
+| `--models DIR` | `CUSTOMS_MODELS` | next to the binary | Models for in-process checks (the project's `models/` is never read) |
+| `--data-dir DIR` | `CUSTOMS_DATA_DIR` | `~/.cache/customs` (`%LOCALAPPDATA%\customs` on Windows without `HOME`) | Cache for in-process checks |
 
 By default the hook fails open: if it cannot check a package it writes the reason to
 stderr and returns no decision, so a broken Customs setup does not stop your work.

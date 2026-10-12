@@ -743,6 +743,7 @@ impl McpServer {
                 name.as_deref(),
                 local.config.as_deref(),
                 local.models.as_deref(),
+                local.data_dir.as_deref(),
             )
         })
         .await;

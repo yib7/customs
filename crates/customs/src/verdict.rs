@@ -56,7 +56,9 @@ impl Verdict {
                 parts.push(format!("{}: {}", h.rule, h.detail));
             }
         }
-        if self.model_decision >= Decision::Warn {
+        // An `established` hit sets the model aside, so its score is not a cause.
+        let model_set_aside = self.policy_hits.iter().any(|h| h.rule == "established");
+        if self.model_decision >= Decision::Warn && !model_set_aside {
             if let Some(r) = self.risk {
                 parts.push(format!("model risk {r:.2}"));
             }
@@ -121,4 +123,64 @@ pub struct Event {
     pub decision: Option<Decision>,
     pub risk: Option<f64>,
     pub verdict_id: Option<i64>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use customs_model::{Reason, Scores, Thresholds};
+
+    fn verdict(hits: Vec<PolicyHit>) -> Verdict {
+        Verdict {
+            id: None,
+            ts: "t".into(),
+            ecosystem: Ecosystem::Npm,
+            name: "react".into(),
+            version: Some("18.0.0".into()),
+            artifact: None,
+            sha256: None,
+            decision: Decision::Block,
+            risk: Some(0.97),
+            model_decision: Decision::Block,
+            thresholds: Thresholds::default(),
+            scores: Scores::default(),
+            policy_hits: hits,
+            reasons: vec![Reason {
+                feature: "inst_download_exec".into(),
+                value: Some(2.0),
+                contribution: 1.5,
+                label: "Downloads and executes a payload at install time".into(),
+            }],
+            evidence: vec![],
+            install_surface: vec![],
+            scan_errors: vec![],
+            scanned_ms: 0,
+            model_version: "m".into(),
+            cached: false,
+            mode: Mode::Enforce,
+        }
+    }
+
+    fn hit(rule: &str, severity: Decision) -> PolicyHit {
+        PolicyHit {
+            rule: rule.into(),
+            severity,
+            detail: format!("{rule} fired"),
+        }
+    }
+
+    #[test]
+    fn headline_omits_the_model_when_established() {
+        let v = verdict(vec![hit("deny", Decision::Block)]);
+        assert_eq!(
+            v.headline(),
+            "deny: deny fired; model risk 0.97; Downloads and executes a payload at install time"
+        );
+        // The established prior set the model aside, so it is not a cause.
+        let v = verdict(vec![
+            hit("established", Decision::Allow),
+            hit("deny", Decision::Block),
+        ]);
+        assert_eq!(v.headline(), "deny: deny fired");
+    }
 }

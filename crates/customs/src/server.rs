@@ -1,12 +1,12 @@
 //! HTTP server assembly: routes, middleware, static dashboard, graceful shutdown.
 
 use std::future::Future;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use axum::extract::{MatchedPath, Request, State};
-use axum::http::{header, HeaderValue, Method, StatusCode};
+use axum::http::{header, Method, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{any, get};
@@ -14,7 +14,6 @@ use axum::{Json, Router};
 use serde_json::json;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
-use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
 
 use crate::engine::Engine;
@@ -26,6 +25,9 @@ pub struct AppState {
     /// Flips to `true` when the server begins shutting down.
     pub shutdown: watch::Receiver<bool>,
     pub policy_auth: PolicyAuth,
+    /// Host names, beyond loopback names and IP literals, under which the policy may be
+    /// changed (lowercase, no port); see [`ServeOptions::allowed_hosts`].
+    pub allowed_hosts: Arc<[String]>,
 }
 
 /// Who may change the policy through `PUT /api/policy`.
@@ -104,13 +106,14 @@ pub struct ServeOptions {
     pub admin_token: Option<String>,
     /// Accept policy changes without a token on a server reachable from the network.
     pub allow_anonymous_policy_changes: bool,
+    /// Host names, beyond loopback names and IP literals, under which the policy may be
+    /// changed and a loopback server answers (`--allowed-hosts`, `CUSTOMS_ALLOWED_HOSTS`;
+    /// ports and case ignored).
+    pub allowed_hosts: Vec<String>,
 }
 
 /// Shortest admin token accepted.
 pub const MIN_ADMIN_TOKEN_LEN: usize = 16;
-
-/// The dev server origin of the dashboard; the built dashboard is same-origin.
-const DEV_ORIGIN: &str = "http://localhost:5173";
 
 const NOT_BUILT: &str = r#"<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -125,12 +128,9 @@ code{background:#eee;padding:.1rem .3rem;border-radius:3px}@media(prefers-color-
 <a href="/api/model">/api/model</a>, <a href="/metrics">/metrics</a>.</p>
 </body></html>"#;
 
+/// No CORS: the built dashboard is same-origin, and the Vite dev server proxies `/api`
+/// with the browser's `Host` (`changeOrigin: false`), so its dashboard is same-origin too.
 pub fn router(state: AppState, ui_dir: Option<&Path>) -> Router {
-    let cors = CorsLayer::new()
-        .allow_origin(AllowOrigin::list([HeaderValue::from_static(DEV_ORIGIN)]))
-        .allow_methods([Method::GET, Method::POST, Method::PUT, Method::OPTIONS])
-        .allow_headers([header::CONTENT_TYPE, header::ACCEPT, header::AUTHORIZATION]);
-
     let mut app = Router::new()
         .route("/pypi/simple", get(pypi::simple_index))
         .route("/pypi/simple/", get(pypi::simple_index))
@@ -141,9 +141,7 @@ pub fn router(state: AppState, ui_dir: Option<&Path>) -> Router {
         .route("/npm/{*rest}", any(npm::npm_any))
         .nest(
             "/api",
-            crate::api::router()
-                .layer(middleware::from_fn(guard_api))
-                .layer(cors),
+            crate::api::router().layer(middleware::from_fn_with_state(state.clone(), guard_api)),
         )
         .route("/metrics", get(metrics))
         .route("/healthz", get(healthz));
@@ -161,18 +159,13 @@ pub fn router(state: AppState, ui_dir: Option<&Path>) -> Router {
         .with_state(state)
 }
 
-/// Host names, beyond loopback names and IP literals, under which the policy may be
-/// changed (`CUSTOMS_ALLOWED_HOSTS`, comma-separated, ports ignored).
-fn allowed_hosts() -> &'static [String] {
-    static HOSTS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
-    HOSTS.get_or_init(|| {
-        std::env::var("CUSTOMS_ALLOWED_HOSTS")
-            .unwrap_or_default()
-            .split(',')
-            .map(|h| strip_port(h.trim()).to_ascii_lowercase())
-            .filter(|h| !h.is_empty())
-            .collect()
-    })
+/// `names` as [`host_allowed`] compares them: trimmed, lowercase, without a port.
+fn normalize_hosts(names: &[String]) -> Arc<[String]> {
+    names
+        .iter()
+        .map(|h| strip_port(h.trim()).to_ascii_lowercase())
+        .filter(|h| !h.is_empty())
+        .collect()
 }
 
 fn strip_port(host: &str) -> &str {
@@ -198,20 +191,20 @@ pub fn host_allowed(host: &str, extra: &[String]) -> bool {
 }
 
 /// A browser `Origin` that may send state-changing requests: the dashboard served by this
-/// server (same host and port) or the Vite dev server.
+/// server (same host and port). Any other page, a dev server on another port included, is
+/// cross-origin.
 pub fn origin_allowed(origin: &str, host: &str) -> bool {
-    origin == DEV_ORIGIN
-        || origin
-            .strip_prefix("http://")
-            .or_else(|| origin.strip_prefix("https://"))
-            .is_some_and(|authority| authority.eq_ignore_ascii_case(host))
+    origin
+        .strip_prefix("http://")
+        .or_else(|| origin.strip_prefix("https://"))
+        .is_some_and(|authority| authority.eq_ignore_ascii_case(host))
 }
 
-/// Refuse state-changing API calls a web page could have made. CORS keeps other origins
-/// from reading responses, but a cross-site form or fetch can still send one, and DNS
+/// Refuse state-changing API calls a web page could have made. Without CORS headers other
+/// origins cannot read responses, but a cross-site form or fetch can still send one, and DNS
 /// rebinding makes the page same-origin: its host name resolves to 127.0.0.1, so the
 /// browser sends `Host: attacker.example`. Non-browser clients send no `Origin`.
-async fn guard_api(req: Request, next: Next) -> Response {
+async fn guard_api(State(state): State<AppState>, req: Request, next: Next) -> Response {
     if matches!(*req.method(), Method::GET | Method::HEAD | Method::OPTIONS) {
         return next.run(req).await;
     }
@@ -242,7 +235,7 @@ async fn guard_api(req: Request, next: Next) -> Response {
     }
     // Changing the policy can switch enforcement off, so it also needs a Host that DNS
     // rebinding cannot produce. Checks stay reachable under any name (team servers).
-    if is_policy && !host_allowed(&host, allowed_hosts()) {
+    if is_policy && !host_allowed(&host, &state.allowed_hosts) {
         return refuse(format!(
             "policy changes are accepted only on localhost, an IP address, or a host in \
              CUSTOMS_ALLOWED_HOSTS (got {host:?})"
@@ -256,7 +249,11 @@ async fn guard_api(req: Request, next: Next) -> Response {
 /// rebound to 127.0.0.1. Without this, such a page could read the event log (what this
 /// machine installs) and the policy. Requests without a `Host` (HTTP/2 carries the
 /// authority in the URI) are judged by the URI's authority.
-async fn guard_loopback_host(req: Request, next: Next) -> Response {
+async fn guard_loopback_host(
+    State(allowed): State<Arc<[String]>>,
+    req: Request,
+    next: Next,
+) -> Response {
     let host = req
         .headers()
         .get(header::HOST)
@@ -264,7 +261,7 @@ async fn guard_loopback_host(req: Request, next: Next) -> Response {
         .map(str::to_string)
         .or_else(|| req.uri().authority().map(|a| a.to_string()));
     if let Some(h) = host {
-        if !host_allowed(&h, allowed_hosts()) {
+        if !host_allowed(&h, &allowed) {
             tracing::warn!(host = %h, "request for a foreign host name refused");
             return (
                 StatusCode::FORBIDDEN,
@@ -304,29 +301,46 @@ async fn metrics(State(state): State<AppState>) -> Response {
 
 async fn healthz(State(state): State<AppState>) -> Response {
     let p = state.engine.policy();
+    let m = &state.engine.models;
     (
         StatusCode::OK,
         Json(json!({
             "status": "ok",
             "version": env!("CARGO_PKG_VERSION"),
-            "model_version": state.engine.models.model_version(),
+            "model_version": m.model_version(),
+            // False: no models were found and verdicts come from the policy rules alone.
+            "models_loaded": m.code_gbdt.is_some() || m.code_nn.is_some() || m.name_model.is_some(),
+            "untrained": m.manifest.untrained,
             "mode": p.mode,
         })),
     )
         .into_response()
 }
 
-/// Serve until `shutdown` resolves, then drain in-flight requests.
-pub async fn serve_on(
-    listener: TcpListener,
-    engine: Arc<Engine>,
-    ui_dir: Option<PathBuf>,
-    shutdown: impl Future<Output = ()> + Send + 'static,
-) -> anyhow::Result<()> {
-    serve_with(listener, engine, ui_dir, ServeOptions::default(), shutdown).await
+/// Who may change the policy on a server listening on `ip`: with a token, its holders;
+/// without one, anyone on loopback (or with the opt-out), and nobody on a server the
+/// network can reach.
+pub fn policy_auth_for(ip: IpAddr, opts: &ServeOptions) -> anyhow::Result<PolicyAuth> {
+    Ok(match &opts.admin_token {
+        Some(t) => {
+            anyhow::ensure!(
+                t.len() >= MIN_ADMIN_TOKEN_LEN,
+                "the admin token must be at least {MIN_ADMIN_TOKEN_LEN} characters"
+            );
+            PolicyAuth::Token(t.as_str().into())
+        }
+        None if ip.is_loopback() || opts.allow_anonymous_policy_changes => PolicyAuth::Open,
+        None => {
+            tracing::warn!(
+                %ip,
+                "policy changes over the API are off: this server is reachable from the network                  and has no CUSTOMS_ADMIN_TOKEN"
+            );
+            PolicyAuth::Disabled
+        }
+    })
 }
 
-/// [`serve_on`] with [`ServeOptions`].
+/// Serve on `listener` until `shutdown` resolves, then drain in-flight requests.
 pub async fn serve_with(
     listener: TcpListener,
     engine: Arc<Engine>,
@@ -335,33 +349,21 @@ pub async fn serve_with(
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<()> {
     let addr = listener.local_addr()?;
-    let policy_auth = match opts.admin_token {
-        Some(t) => {
-            anyhow::ensure!(
-                t.len() >= MIN_ADMIN_TOKEN_LEN,
-                "the admin token must be at least {MIN_ADMIN_TOKEN_LEN} characters"
-            );
-            PolicyAuth::Token(t.into())
-        }
-        None if addr.ip().is_loopback() || opts.allow_anonymous_policy_changes => PolicyAuth::Open,
-        None => {
-            tracing::warn!(
-                %addr,
-                "policy changes over the API are off: this server is reachable from the network \
-                 and has no CUSTOMS_ADMIN_TOKEN"
-            );
-            PolicyAuth::Disabled
-        }
-    };
+    let policy_auth = policy_auth_for(addr.ip(), &opts)?;
+    let allowed_hosts = normalize_hosts(&opts.allowed_hosts);
     let (tx, rx) = watch::channel(false);
     let state = AppState {
         engine,
         shutdown: rx,
         policy_auth,
+        allowed_hosts: allowed_hosts.clone(),
     };
     let mut app = router(state, ui_dir.as_deref());
     if addr.ip().is_loopback() {
-        app = app.layer(middleware::from_fn(guard_loopback_host));
+        app = app.layer(middleware::from_fn_with_state(
+            allowed_hosts,
+            guard_loopback_host,
+        ));
     }
     axum::serve(
         listener,
@@ -461,9 +463,49 @@ mod tests {
     }
 
     #[test]
+    fn only_a_reachable_server_without_a_token_refuses_changes() {
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        let open = ServeOptions::default();
+        let opt_out = ServeOptions {
+            allow_anonymous_policy_changes: true,
+            ..Default::default()
+        };
+        let token = ServeOptions {
+            admin_token: Some("0123456789abcdef".into()),
+            ..Default::default()
+        };
+        for a in ["127.0.0.1", "::1"] {
+            assert!(
+                matches!(policy_auth_for(ip(a), &open), Ok(PolicyAuth::Open)),
+                "{a}"
+            );
+        }
+        for a in ["0.0.0.0", "192.0.2.1", "::"] {
+            assert!(
+                matches!(policy_auth_for(ip(a), &open), Ok(PolicyAuth::Disabled)),
+                "{a}"
+            );
+            assert!(
+                matches!(policy_auth_for(ip(a), &opt_out), Ok(PolicyAuth::Open)),
+                "{a}"
+            );
+            assert!(
+                matches!(policy_auth_for(ip(a), &token), Ok(PolicyAuth::Token(_))),
+                "{a}"
+            );
+        }
+        let short = ServeOptions {
+            admin_token: Some("short".into()),
+            ..Default::default()
+        };
+        assert!(policy_auth_for(ip("127.0.0.1"), &short).is_err());
+    }
+
+    #[test]
     fn origins() {
         assert!(origin_allowed("http://127.0.0.1:7878", "127.0.0.1:7878"));
-        assert!(origin_allowed(DEV_ORIGIN, "127.0.0.1:7878"));
+        assert!(!origin_allowed("http://localhost:5173", "127.0.0.1:7878"));
+        assert!(origin_allowed("http://localhost:5173", "localhost:5173"));
         assert!(!origin_allowed("http://evil.example", "127.0.0.1:7878"));
         assert!(!origin_allowed("null", "127.0.0.1:7878"));
     }

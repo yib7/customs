@@ -1612,31 +1612,6 @@ async fn events_filters_stats_model_metrics_health() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn cors_allows_only_the_vite_dev_origin() {
-    let h = Harness::start(|_| {}).await;
-    let r = h
-        .http
-        .get(format!("{}/api/stats", h.base))
-        .header("origin", "http://localhost:5173")
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(
-        r.headers()["access-control-allow-origin"],
-        "http://localhost:5173"
-    );
-    let r = h
-        .http
-        .get(format!("{}/api/stats", h.base))
-        .header("origin", "http://evil.example")
-        .send()
-        .await
-        .unwrap();
-    assert!(r.headers().get("access-control-allow-origin").is_none());
-    h.stop().await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn dashboard_serving() {
     let h = Harness::start(|_| {}).await;
     let body = h.get("/").await.text().await.unwrap();
@@ -1657,6 +1632,50 @@ async fn dashboard_serving() {
     assert_eq!(r.status(), 200);
     assert_eq!(r.text().await.unwrap(), "<html>SPA</html>");
     h.stop().await;
+}
+
+/// Installer and proxy settings a spawned binary must not inherit from the developer.
+const INHERITED_PREFIXES: [&str; 5] = ["CUSTOMS_", "PIP_", "UV_", "NPM_CONFIG_", "YARN_"];
+const INHERITED_VARS: [&str; 5] = [
+    "PIPENV_PYPI_MIRROR",
+    "PDM_PYPI_URL",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+];
+
+/// The real binary, isolated from the machine it runs on: `data_dir` is its data directory,
+/// whose `policy.toml` (unless the test wrote one) points every upstream at `registry` (the
+/// mock) or at a closed port; it gets the dev models and none of the caller's `CUSTOMS_*`,
+/// installer index or proxy variables. A check that misses the server and falls back to an
+/// in-process engine therefore stays offline and writes only below `data_dir`.
+fn customs_cmd(data_dir: &std::path::Path, registry: Option<&str>) -> std::process::Command {
+    std::fs::create_dir_all(data_dir).unwrap();
+    let policy = data_dir.join("policy.toml");
+    if !policy.exists() {
+        let b = registry.unwrap_or("http://127.0.0.1:9");
+        std::fs::write(
+            &policy,
+            format!(
+                "[upstream]\npypi_simple = \"{b}/simple\"\npypi_files = \"{b}/files\"\npypi_json = \"{b}/pypi\"\nnpm = \"{b}/npm\"\n"
+            ),
+        )
+        .unwrap();
+    }
+    let mut c = std::process::Command::new(env!("CARGO_BIN_EXE_customs"));
+    for (k, _) in std::env::vars_os() {
+        let upper = k.to_string_lossy().to_ascii_uppercase();
+        if INHERITED_PREFIXES.iter().any(|p| upper.starts_with(p))
+            || INHERITED_VARS.contains(&upper.as_str())
+        {
+            c.env_remove(&k);
+        }
+    }
+    c.env("CUSTOMS_DATA_DIR", data_dir).env(
+        "CUSTOMS_MODELS",
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../models/dev"),
+    );
+    c
 }
 
 /// Run the real binary as Claude Code would.
@@ -1686,11 +1705,10 @@ fn run_hook_input(
     extra: &[&str],
 ) -> (String, String, i32) {
     use std::io::Write;
-    use std::process::{Command, Stdio};
-    let mut child = Command::new(env!("CARGO_BIN_EXE_customs"))
+    use std::process::Stdio;
+    let mut child = customs_cmd(&cwd.join("hook-data"), None)
         .args(["hook", "claude-code", "--server", server])
         .args(extra)
-        .env("CUSTOMS_DATA_DIR", cwd.join("hook-data"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -2012,8 +2030,8 @@ async fn hook_failure_modes() {
         );
         let garbage = {
             use std::io::Write;
-            use std::process::{Command, Stdio};
-            let mut c = Command::new(env!("CARGO_BIN_EXE_customs"))
+            use std::process::Stdio;
+            let mut c = customs_cmd(&cwd.join("garbage-data"), None)
                 .args(["hook", "claude-code"])
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
@@ -2046,9 +2064,11 @@ async fn hook_failure_modes() {
 async fn cli_check_uses_running_server() {
     let h = Harness::start(|_| {}).await;
     let base = h.base.clone();
+    let data = tempfile::tempdir().unwrap();
+    let (data_dir, registry) = (data.path().to_path_buf(), h.mock.base.clone());
     let out = tokio::task::spawn_blocking(move || {
         let run = |args: &[&str]| {
-            let o = std::process::Command::new(env!("CARGO_BIN_EXE_customs"))
+            let o = customs_cmd(&data_dir, Some(&registry))
                 .args(args)
                 .args(["--server", &base])
                 .output()
@@ -2069,6 +2089,12 @@ async fn cli_check_uses_running_server() {
     assert_eq!(out[0].1, 3, "{}", out[0].0);
     assert!(
         out[0].0.starts_with("pypi evilpkg 0.0.1  BLOCK"),
+        "{}",
+        out[0].0
+    );
+    // The server answered, not an in-process fallback.
+    assert!(
+        out[0].0.contains(&format!(", server {})", h.base)),
         "{}",
         out[0].0
     );
@@ -2125,8 +2151,10 @@ async fn diff_shows_what_a_release_adds() {
     assert_eq!(r.status(), 404);
 
     let base = h.base.clone();
+    let data = tempfile::tempdir().unwrap();
+    let (data_dir, registry) = (data.path().to_path_buf(), h.mock.base.clone());
     let (out, code) = tokio::task::spawn_blocking(move || {
-        let o = std::process::Command::new(env!("CARGO_BIN_EXE_customs"))
+        let o = customs_cmd(&data_dir, Some(&registry))
             .args(["diff", "npm", "diffpkg@1.0.1", "--from", "1.0.0"])
             .args(["--server", &base])
             .output()
@@ -2156,11 +2184,10 @@ async fn diff_shows_what_a_release_adds() {
 
 /// Run the real binary's `audit` in `cwd`.
 fn run_audit(cwd: &std::path::Path, args: &[&str]) -> (String, String, i32) {
-    let o = std::process::Command::new(env!("CARGO_BIN_EXE_customs"))
+    let o = customs_cmd(&cwd.join("audit-data"), None)
         .arg("audit")
         .args(args)
         .current_dir(cwd)
-        .env("CUSTOMS_DATA_DIR", cwd.join("audit-data"))
         .output()
         .unwrap();
     (
@@ -2542,7 +2569,7 @@ fn mcp_recv(stdout: &mut McpOut) -> Value {
 #[test]
 fn mcp_server_over_stdio() {
     use std::io::{BufReader, Read};
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
     let dir = tempfile::tempdir().unwrap();
     // Inert text: the scanner only ever lexes it.
     let archive = npm_tgz(&[
@@ -2557,7 +2584,7 @@ fn mcp_server_over_stdio() {
     ]);
     std::fs::write(dir.path().join("left-padd-1.0.0.tgz"), archive).unwrap();
     let models = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../models/dev");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_customs"))
+    let mut child = customs_cmd(&dir.path().join("data"), None)
         .args(["mcp", "--server", "http://127.0.0.1:9", "--models"])
         .arg(&models)
         .arg("--data-dir")
@@ -2949,20 +2976,30 @@ async fn policy_changes_need_the_admin_token_when_one_is_set() {
     h.stop().await;
 }
 
+/// A server listening beyond loopback without a token refuses policy changes. Which servers
+/// those are is `server::policy_auth_for` (unit-tested there); this serves the resulting
+/// state on loopback, so the test never listens on the network.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_network_facing_server_without_a_token_refuses_policy_changes() {
-    let h = Harness::start_serving(
-        |_| {},
+    use customs::server::{AppState, PolicyAuth};
+    let h = Harness::start(|_| {}).await;
+    let (_shutdown, rx) = tokio::sync::watch::channel(false);
+    let app = customs::server::router(
+        AppState {
+            engine: h.engine.clone(),
+            shutdown: rx,
+            policy_auth: PolicyAuth::Disabled,
+            allowed_hosts: Arc::from(Vec::new()),
+        },
         None,
-        Limits::default(),
-        "0.0.0.0:0",
-        ServeOptions::default(),
-    )
-    .await;
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await });
     let p: Value = h.get("/api/policy").await.json().await.unwrap();
     let r = h
         .http
-        .put(format!("{}/api/policy", h.base))
+        .put(format!("{base}/api/policy"))
         .json(&p)
         .send()
         .await
@@ -2974,14 +3011,481 @@ async fn a_network_facing_server_without_a_token_refuses_policy_changes() {
         .as_str()
         .unwrap()
         .contains("CUSTOMS_ADMIN_TOKEN"));
+    server.abort();
+    h.stop().await;
+}
+
+// ---- Phase 3A: SERVER ----
+
+/// A loopback URL nothing listens on (a port that was just free).
+fn dead_server() -> String {
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    format!("http://{}", l.local_addr().unwrap())
+}
+
+/// Run the real binary (see [`customs_cmd`]) with extra environment and stdin, killed after
+/// `secs`: (stdout, stderr, exit code, or -1 when it had to be killed).
+fn run_customs(
+    args: &[&str],
+    envs: &[(&str, &str)],
+    stdin: &str,
+    secs: u64,
+) -> (String, String, i32) {
+    use std::io::{Read, Write};
+    use std::process::Stdio;
+    let data = tempfile::tempdir().unwrap();
+    let mut child = customs_cmd(data.path(), None)
+        .args(args)
+        .envs(envs.iter().copied())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(stdin.as_bytes())
+        .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(secs);
+    let code = loop {
+        if let Some(s) = child.try_wait().unwrap() {
+            break s.code().unwrap_or(-1);
+        }
+        if std::time::Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            break -1;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let (mut out, mut err) = (String::new(), String::new());
+    child
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_string(&mut out)
+        .unwrap();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut err)
+        .unwrap();
+    (out, err, code)
+}
+
+#[test]
+fn env_backed_flags_accept_1_0_yes_and_no() {
+    let dir = tempfile::tempdir().unwrap();
+    // The shipped compose file and k8s manifest set CUSTOMS_LOG_JSON to "1".
+    for v in ["1", "0", "yes", "true"] {
+        let (out, err, code) = run_customs(&["env"], &[("CUSTOMS_LOG_JSON", v)], "", 30);
+        assert_eq!(code, 0, "CUSTOMS_LOG_JSON={v}: {err}");
+        assert!(out.contains("PIP_INDEX_URL"), "{out}");
+    }
+    let input = json!({
+        "session_id": "t",
+        "cwd": dir.path(),
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"command": "ls"},
+    })
+    .to_string();
+    let server = dead_server();
+    for v in ["1", "0", "no"] {
+        let (_, err, code) = run_customs(
+            &["hook", "claude-code", "--server", &server],
+            &[("CUSTOMS_HOOK_FAIL_CLOSED", v)],
+            &input,
+            30,
+        );
+        assert_eq!(code, 0, "CUSTOMS_HOOK_FAIL_CLOSED={v}: {err}");
+        assert!(!err.contains("invalid value"), "{err}");
+    }
+}
+
+#[test]
+fn serve_refuses_a_missing_explicit_dashboard_dir() {
+    let dir = tempfile::tempdir().unwrap();
+    let ui = dir.path().join("no-such-ui");
+    let data = dir.path().join("data");
+    let (_, err, code) = run_customs(
+        &[
+            "serve",
+            "--bind",
+            "127.0.0.1:0",
+            "--data-dir",
+            data.to_str().unwrap(),
+            "--ui-dir",
+            ui.to_str().unwrap(),
+        ],
+        &[("CUSTOMS_ALLOW_ANONYMOUS_POLICY_CHANGES", "1")],
+        "",
+        30,
+    );
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains(ui.to_str().unwrap()), "{err}");
+}
+
+#[test]
+fn serve_refuses_an_empty_admin_token() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    let data = data.to_str().unwrap();
+    let (_, err, code) = run_customs(
+        &["serve", "--bind", "127.0.0.1:0", "--data-dir", data],
+        &[("CUSTOMS_ADMIN_TOKEN", "")],
+        "",
+        30,
+    );
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("CUSTOMS_ADMIN_TOKEN"), "{err}");
+    let file = dir.path().join("token");
+    std::fs::write(&file, "\n").unwrap();
+    let (_, err, code) = run_customs(
+        &[
+            "serve",
+            "--bind",
+            "127.0.0.1:0",
+            "--data-dir",
+            data,
+            "--admin-token-file",
+            file.to_str().unwrap(),
+        ],
+        &[],
+        "",
+        30,
+    );
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains(file.to_str().unwrap()), "{err}");
+}
+
+#[test]
+fn an_unusable_data_dir_is_named_with_a_remedy() {
+    let dir = tempfile::tempdir().unwrap();
+    // A data dir below a regular file cannot be created.
+    let file = dir.path().join("plain-file");
+    std::fs::write(&file, "x").unwrap();
+    let bad = file.join("data");
+    let bad = bad.to_str().unwrap();
+    let server = dead_server();
+    let (_, err, code) = run_customs(
+        &[
+            "check",
+            "pypi",
+            "requests",
+            "--server",
+            &server,
+            "--data-dir",
+            bad,
+        ],
+        &[],
+        "",
+        60,
+    );
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains(bad), "{err}");
+    assert!(err.contains("--data-dir"), "{err}");
+    let (_, err, code) = run_customs(
+        &["serve", "--bind", "127.0.0.1:0", "--data-dir", bad],
+        &[],
+        "",
+        30,
+    );
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains(bad), "{err}");
+}
+
+#[test]
+fn serve_on_a_taken_port_says_how_to_pick_another() {
+    let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = taken.local_addr().unwrap().to_string();
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    let (_, err, code) = run_customs(
+        &[
+            "serve",
+            "--bind",
+            &addr,
+            "--data-dir",
+            data.to_str().unwrap(),
+        ],
+        &[],
+        "",
+        30,
+    );
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("--bind"), "{err}");
+    assert!(err.contains("CUSTOMS_BIND"), "{err}");
+}
+
+#[test]
+fn doctor_refuses_a_missing_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("nope");
+    let server = dead_server();
+    let (out, err, code) = run_customs(
+        &["doctor", missing.to_str().unwrap(), "--server", &server],
+        &[],
+        "",
+        30,
+    );
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("no such directory"), "{err}");
+    assert!(err.contains(missing.to_str().unwrap()), "{err}");
+    assert!(out.is_empty(), "{out}");
+}
+
+/// `[upstream]` lines pointing every registry at `base`.
+fn upstream_toml(base: &str) -> String {
+    format!(
+        "[upstream]\npypi_simple = \"{base}/simple\"\npypi_files = \"{base}/files\"\npypi_json = \"{base}/pypi\"\nnpm = \"{base}/npm\"\n"
+    )
+}
+
+/// The hook, `check` and `scan` run in the agent's project, which may be hostile: its
+/// `customs.toml` and `models/` must not steer the in-process checks.
+#[tokio::test(flavor = "multi_thread")]
+async fn in_process_checks_ignore_a_projects_customs_toml_and_models() {
+    let mock = start_mock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::write(
+        data.join("policy.toml"),
+        format!(
+            "deny = [\"pypi:goodpkg\", \"npm:left-padd\"]\n{}",
+            upstream_toml(&mock.base)
+        ),
+    )
+    .unwrap();
+    // The project allows what the user denies, and plants its own models.
+    let project = dir.path().join("project");
+    let planted = project.join("models");
+    std::fs::create_dir_all(&planted).unwrap();
+    let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../models/dev");
+    for f in std::fs::read_dir(&dev).unwrap() {
+        let f = f.unwrap().path();
+        std::fs::copy(&f, planted.join(f.file_name().unwrap())).unwrap();
+    }
+    let manifest = std::fs::read_to_string(planted.join("manifest.json")).unwrap();
+    std::fs::write(
+        planted.join("manifest.json"),
+        manifest.replace("dev-untrained", "project-planted"),
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("customs.toml"),
+        format!(
+            "mode = \"monitor\"\nallow = [\"pypi:goodpkg\", \"npm:left-padd\"]\n{}",
+            upstream_toml(&mock.base)
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("left-padd-1.0.0.tgz"),
+        npm_tgz(&[(
+            "package/package.json",
+            r#"{"name":"left-padd","version":"1.0.0"}"#,
+        )]),
+    )
+    .unwrap();
+    let server = dead_server();
+    let run = {
+        let (data, project) = (data.clone(), project.clone());
+        move |args: &[&str], keep_models: bool, stdin: &str| {
+            use std::io::Write;
+            use std::process::Stdio;
+            let mut c = customs_cmd(&data, None);
+            if !keep_models {
+                c.env_remove("CUSTOMS_MODELS");
+            }
+            let mut child = c
+                .args(args)
+                .current_dir(&project)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(stdin.as_bytes())
+                .unwrap();
+            let o = child.wait_with_output().unwrap();
+            (
+                String::from_utf8_lossy(&o.stdout).into_owned(),
+                String::from_utf8_lossy(&o.stderr).into_owned(),
+                o.status.code().unwrap_or(-1),
+            )
+        }
+    };
+    let hook_input = json!({
+        "session_id": "t",
+        "cwd": project,
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"command": "pip install goodpkg==1.0.0"},
+    })
+    .to_string();
+    let srv = server.clone();
+    let (checked, scanned, hooked, malformed) = tokio::task::spawn_blocking(move || {
+        let checked = run(
+            &[
+                "check",
+                "pypi",
+                "goodpkg==1.0.0",
+                "--json",
+                "--server",
+                &srv,
+            ],
+            false,
+            "",
+        );
+        let scanned = run(
+            &[
+                "scan",
+                "left-padd-1.0.0.tgz",
+                "--name",
+                "left-padd",
+                "--json",
+            ],
+            true,
+            "",
+        );
+        let hooked = run(
+            &["hook", "claude-code", "--server", &srv],
+            false,
+            &hook_input,
+        );
+        // A malformed project file must not make the hook fail open either.
+        std::fs::write(project.join("customs.toml"), "mode = \"off\"\n[[[").unwrap();
+        let malformed = run(
+            &["hook", "claude-code", "--server", &srv],
+            false,
+            &hook_input,
+        );
+        (checked, scanned, hooked, malformed)
+    })
+    .await
+    .unwrap();
+
+    let (out, err, code) = &checked;
+    assert_eq!(*code, 3, "{out}{err}");
+    let v: Value = serde_json::from_str(out).unwrap();
+    assert_eq!(v["decision"], "block", "{v}");
+    assert_eq!(v["mode"], "enforce", "{v}");
+    assert_ne!(v["model_version"], "project-planted", "{v}");
+    let (out, err, code) = &scanned;
+    assert_eq!(*code, 3, "{out}{err}");
+    let v: Value = serde_json::from_str(out).unwrap();
+    assert!(rules_of(&v).contains(&"deny".to_string()), "{v}");
+    for (out, err, code) in [&hooked, &malformed] {
+        assert_eq!(*code, 0, "{err}");
+        let d: Value = serde_json::from_str(out.trim()).unwrap_or_else(|_| panic!("{out:?} {err}"));
+        assert_eq!(d["hookSpecificOutput"]["permissionDecision"], "deny", "{d}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_vite_dev_origin_cannot_change_the_policy() {
+    let h = Harness::start(|_| {}).await;
+    let mut p: Value = h.get("/api/policy").await.json().await.unwrap();
+    p["mode"] = json!("monitor");
+    // Any page served on Vite's default port, from any project.
+    let r = h
+        .http
+        .put(format!("{}/api/policy", h.base))
+        .header("origin", "http://localhost:5173")
+        .json(&p)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 403);
+    assert_eq!(h.engine.policy().mode, Mode::Enforce);
+    let r = h
+        .http
+        .get(format!("{}/api/events", h.base))
+        .header("origin", "http://localhost:5173")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.headers().get("access-control-allow-origin").is_none());
+    // The dev server proxies /api with the browser's Host, so its dashboard is same-origin.
+    let r = h
+        .http
+        .put(format!("{}/api/policy", h.base))
+        .header("host", "localhost:5173")
+        .header("origin", "http://localhost:5173")
+        .json(&p)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn healthz_says_whether_the_models_are_trained() {
+    let h = Harness::start(|_| {}).await;
+    let v: Value = h.get("/healthz").await.json().await.unwrap();
+    assert_eq!(v["status"], "ok");
+    assert_eq!(v["untrained"], true, "{v}");
+    assert_eq!(v["models_loaded"], true, "{v}");
     h.stop().await;
 
-    // The explicit opt-out restores anonymous changes.
-    let opts = ServeOptions {
-        allow_anonymous_policy_changes: true,
-        ..Default::default()
-    };
-    let h = Harness::start_serving(|_| {}, None, Limits::default(), "0.0.0.0:0", opts).await;
+    // A server that found no models runs on the policy rules alone, and says so.
+    let dir = tempfile::tempdir().unwrap();
+    let engine = Engine::new(EngineConfig {
+        data_dir: dir.path().to_path_buf(),
+        models: Models::empty(),
+        policy: Policy::default(),
+        policy_path: dir.path().join("policy.toml"),
+        scanner: fake_scanner(Arc::default()),
+        limits: Limits::default(),
+        metrics: Arc::new(Metrics::new()),
+    })
+    .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(customs::server::serve_with(
+        listener,
+        engine,
+        None,
+        ServeOptions::default(),
+        async move {
+            let _ = rx.await;
+        },
+    ));
+    let http = reqwest::Client::builder().no_proxy().build().unwrap();
+    let v: Value = http
+        .get(format!("{base}/healthz"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(v["models_loaded"], false, "{v}");
+    assert_eq!(v["model_version"], "none", "{v}");
+    let _ = tx.send(());
+    server.await.unwrap().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_policy_change_the_log_cannot_record_is_still_reported_as_applied() {
+    let h = Harness::start(|_| {}).await;
+    let db = rusqlite::Connection::open(h._dir.path().join("customs.db")).unwrap();
+    db.execute_batch("DROP TABLE policy_changes").unwrap();
+    drop(db);
+    let mut changes = h.engine.subscribe_policy_changes();
+    let mut p: Value = h.get("/api/policy").await.json().await.unwrap();
+    p["mode"] = json!("monitor");
     let r = h
         .http
         .put(format!("{}/api/policy", h.base))
@@ -2990,6 +3494,245 @@ async fn a_network_facing_server_without_a_token_refuses_policy_changes() {
         .await
         .unwrap();
     assert_eq!(r.status(), 200);
+    let warning = r.headers()["x-customs-warning"]
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(warning.contains("change log"), "{warning}");
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(body["mode"], "monitor");
+    assert_eq!(h.engine.policy().mode, Mode::Monitor);
+    // Counted and announced (the webhook listens to this) like any applied change.
+    let ch = changes.try_recv().unwrap();
+    assert_eq!(ch.changes[0].field, "mode");
+    let metrics = h.get("/metrics").await.text().await.unwrap();
+    assert!(
+        metrics.contains("customs_policy_changes_total{result=\"applied\"} 1"),
+        "{metrics}"
+    );
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn bad_query_and_path_parameters_get_json_errors() {
+    let h = Harness::start(|_| {}).await;
+    for path in [
+        "/api/events?limit=abc",
+        "/api/stats?days=x",
+        "/api/policy/changes?limit=-1",
+        "/api/verdicts/abc",
+    ] {
+        let r = h.get(path).await;
+        assert_eq!(r.status(), 400, "{path}");
+        let v: Value = r.json().await.unwrap();
+        assert!(v["error"].is_string(), "{path}: {v}");
+    }
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_partial_policy_put_is_refused_with_the_missing_keys() {
+    let h = Harness::start(|p| p.deny = vec!["npm:evil-js".into()]).await;
+    let r = h
+        .http
+        .put(format!("{}/api/policy", h.base))
+        .body(r#"{"mode": "enforce"}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 400);
+    let e: Value = r.json().await.unwrap();
+    let msg = e["error"].as_str().unwrap();
+    assert!(msg.contains("deny") && msg.contains("upstream"), "{msg}");
+    assert!(e["errors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|x| x["field"] == "allow"));
+    // A nested table must be whole too.
+    let mut p: Value = h.get("/api/policy").await.json().await.unwrap();
+    p["established"] = json!({"enabled": false});
+    let r = h
+        .http
+        .put(format!("{}/api/policy", h.base))
+        .json(&p)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 400);
+    let e: Value = r.json().await.unwrap();
+    assert!(
+        e["error"].as_str().unwrap().contains("established.top"),
+        "{e}"
+    );
+    assert_eq!(h.engine.policy().deny, vec!["npm:evil-js".to_string()]);
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn upstream_credentials_are_redacted_but_kept() {
+    let h = Harness::start(|p| {
+        p.upstream.npm = p.upstream.npm.replace("http://", "http://user:s3cret@");
+    })
+    .await;
+    let text = h.get("/api/policy").await.text().await.unwrap();
+    assert!(!text.contains("s3cret"), "{text}");
+    assert!(text.contains("http://***@127.0.0.1"), "{text}");
+    // Sending back what the dashboard read keeps the stored credentials.
+    let mut p: Value = serde_json::from_str(&text).unwrap();
+    p["mode"] = json!("monitor");
+    let r = h
+        .http
+        .put(format!("{}/api/policy", h.base))
+        .json(&p)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    assert!(!r.text().await.unwrap().contains("s3cret"));
+    assert!(h.engine.policy().upstream.npm.contains("user:s3cret@"));
+    let saved = std::fs::read_to_string(h.engine.policy_path()).unwrap();
+    assert!(saved.contains("user:s3cret@"), "{saved}");
+    // New credentials are accepted, and the change log shows neither.
+    p["upstream"]["npm"] = json!("https://other:pw-two@npm.example/registry");
+    let r = h
+        .http
+        .put(format!("{}/api/policy", h.base))
+        .json(&p)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    assert!(h.engine.policy().upstream.npm.contains("pw-two"));
+    let log = h.get("/api/policy/changes").await.text().await.unwrap();
+    assert!(!log.contains("s3cret") && !log.contains("pw-two"), "{log}");
+    assert!(log.contains("https://***@npm.example/registry"), "{log}");
+    h.stop().await;
+}
+
+/// `--allowed-hosts` (`CUSTOMS_ALLOWED_HOSTS`) comes in through the server's options, so
+/// the developer's own environment does not change what these tests see.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_allowed_host_name_may_change_the_policy() {
+    let opts = ServeOptions {
+        allowed_hosts: vec!["Customs".into()],
+        ..Default::default()
+    };
+    let h = Harness::start_serving(|_| {}, None, Limits::default(), "127.0.0.1:0", opts).await;
+    let p: Value = h.get("/api/policy").await.json().await.unwrap();
+    for (host, status) in [("customs:7878", 200), ("other.example:7878", 403)] {
+        let r = h
+            .http
+            .put(format!("{}/api/policy", h.base))
+            .header("host", host)
+            .json(&p)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), status, "{host}");
+    }
+    let r = h
+        .http
+        .get(format!("{}/api/events", h.base))
+        .header("host", "customs:7878")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    h.stop().await;
+}
+
+/// A stalled or failed verdict delivery does not hold up policy-change alerts, and a
+/// message that could not be delivered is counted in the next one.
+#[tokio::test(flavor = "multi_thread")]
+async fn webhook_failures_are_counted_and_do_not_delay_policy_alerts() {
+    use customs::notify::{Format, NotifyConfig};
+    use std::sync::atomic::AtomicBool;
+    let received: Arc<Mutex<Vec<Value>>> = Arc::default();
+    let first_done = Arc::new(AtomicBool::new(false));
+    let policy_during_first = Arc::new(AtomicBool::new(false));
+    let (sink, done, during) = (
+        received.clone(),
+        first_done.clone(),
+        policy_during_first.clone(),
+    );
+    let hook = Router::new().route(
+        "/hook",
+        axum::routing::post(move |Json(v): Json<Value>| {
+            let (sink, done, during) = (sink.clone(), done.clone(), during.clone());
+            async move {
+                let first = {
+                    let mut got = sink.lock().unwrap();
+                    got.push(v.clone());
+                    v.get("event").is_some()
+                        && got.iter().filter(|m| m.get("event").is_some()).count() == 1
+                };
+                if v.get("policy_change").is_some() && !done.load(Ordering::SeqCst) {
+                    during.store(true, Ordering::SeqCst);
+                }
+                if first {
+                    // A slow receiver that then refuses (4xx: not retried).
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                    done.store(true, Ordering::SeqCst);
+                    return StatusCode::GONE;
+                }
+                StatusCode::OK
+            }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let hook_url = format!("http://{}/hook", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, hook).await.unwrap() });
+
+    let h = Harness::start(|p| p.deny = vec!["pypi:goodpkg".into()]).await;
+    customs::notify::spawn(
+        h.engine.clone(),
+        NotifyConfig {
+            url: hook_url,
+            format: Format::Json,
+            min_decision: customs_model::Decision::Block,
+            public_url: None,
+        },
+    );
+    let wait_for = |n: usize| {
+        let received = received.clone();
+        async move {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while received.lock().unwrap().len() < n && std::time::Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            received.lock().unwrap().clone()
+        }
+    };
+    let r = h.get(&pypi_file_path("goodpkg", "1.0.0")).await;
+    assert_eq!(r.status(), 403);
+    wait_for(1).await;
+    // While that delivery hangs, a policy change is announced.
+    let mut p: Value = h.get("/api/policy").await.json().await.unwrap();
+    p["min_age_days"] = json!(1);
+    let r = h
+        .http
+        .put(format!("{}/api/policy", h.base))
+        .json(&p)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let got = wait_for(2).await;
+    assert!(got[1].get("policy_change").is_some(), "{got:?}");
+    assert!(policy_during_first.load(Ordering::SeqCst));
+    // The undelivered block is counted in the next message.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !first_done.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let r = h.get(&pypi_file_path("goodpkg", "1.1.0")).await;
+    assert_eq!(r.status(), 403);
+    let got = wait_for(3).await;
+    let text = got[2]["text"].as_str().unwrap_or_default();
+    assert!(text.contains("goodpkg 1.1.0"), "{got:?}");
+    assert!(text.contains("1 earlier notification not sent"), "{text}");
     h.stop().await;
 }
 
