@@ -1269,12 +1269,19 @@ that mentions it, `systemctl`, `service`, `launchctl`, `docker` or `podman` stop
 writes to `.claude/settings*.json`, and pointing installers away from the proxy: an
 assignment (before the command or behind `env`, `sudo` and similar wrappers), `export`,
 `unset` or `env -u` of a variable `customs env` sets or of `YARN_REGISTRY`,
-`PIP_FIND_LINKS` or `UV_FIND_LINKS`, `npm|pnpm|yarn|bun config set|delete registry`, `pip config set|unset *index*`, or a registry or index
-line written into `.npmrc`, `pip.conf`, `pip.ini`, `.yarnrc(.yml)`, `bunfig.toml` or
-`uv.toml`. A value that points at the Customs server (its authority, or the same port on
-a loopback name) is not flagged. The Edit, Write, MultiEdit and NotebookEdit tools get the
-same check on those files when the hook's matcher includes them, which the shipped
-settings do.
+`PIP_FIND_LINKS` or `UV_FIND_LINKS`, any assignment of a variable that loads another
+configuration file (`NPM_CONFIG_USERCONFIG`, `NPM_CONFIG_GLOBALCONFIG`, `PIP_CONFIG_FILE`,
+`UV_CONFIG_FILE`, `YARN_RC_FILENAME`), `npm|pnpm|yarn|bun config set|delete registry`
+(also `npm set`, scoped `@scope:registry` keys, and options anywhere: `config set -g
+registry`), `pip config set|unset *index*|*find-links*` (also `python -m pip`), or a
+registry or index line written into `.npmrc`, `pip.conf`, `pip.ini`, `.yarnrc(.yml)`,
+`bunfig.toml` or `uv.toml`. Program names are read without their directory or a Windows
+`.exe`/`.cmd`/`.bat`/`.ps1` suffix. A value is not flagged when every URL in it parses to
+the Customs server: its host, or a loopback name, on its port. The address appearing
+elsewhere (a query string, userinfo, a `# localhost:7878` comment) does not count. The
+Edit, Write, MultiEdit and NotebookEdit tools and Codex patches get the same check on
+those files, judged on the text the edit leaves (removing the Customs line is flagged),
+when the hook's matcher includes them, which the shipped settings do.
 
 An edit to an MCP server configuration (the files of section 11: `.mcp.json`,
 `.cursor/mcp.json`, `.vscode/mcp.json`, `.gemini/settings.json`, ...) is read as the file

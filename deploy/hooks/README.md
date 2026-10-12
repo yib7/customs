@@ -121,10 +121,11 @@ with the reason, so you confirm them:
   the Edit and Write tools;
 - pointing an installer away from the proxy: setting or unsetting `PIP_INDEX_URL`,
   `npm_config_registry`, `PIP_FIND_LINKS` and the other variables `customs env` sets (also
-  behind `env` or `sudo`), `npm|pnpm|yarn|bun
-  config set registry`, `pip config set global.index-url`, or writing a registry or index
-  line into `.npmrc`, `pip.conf`, `.yarnrc.yml`, `bunfig.toml` or `uv.toml`. Values that
-  point at the Customs server are fine.
+  behind `env` or `sudo`), setting `PIP_CONFIG_FILE`, `NPM_CONFIG_USERCONFIG` and similar,
+  `npm|pnpm|yarn|bun config set registry` (or `npm set registry`), `pip config set
+  global.index-url` (or `python -m pip config ...`), or writing a registry or index line
+  into `.npmrc`, `pip.conf`, `.yarnrc.yml`, `bunfig.toml` or `uv.toml`. Values whose URLs
+  all point at the Customs server (its host or a loopback name, on its port) are fine.
 
 The matcher `Bash|PowerShell|Edit|Write|MultiEdit|NotebookEdit` in the settings above is what lets
 the hook see file edits. A command that builds itself at run time (`echo ... | base64 -d

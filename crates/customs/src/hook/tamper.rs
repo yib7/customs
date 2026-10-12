@@ -34,6 +34,15 @@ const REGISTRY_VARS: &[&str] = &[
     "uv_find_links",
 ];
 
+/// Variables that load another configuration file, which can name any registry.
+const CONFIG_FILE_VARS: &[&str] = &[
+    "npm_config_userconfig",
+    "npm_config_globalconfig",
+    "pip_config_file",
+    "uv_config_file",
+    "yarn_rc_filename",
+];
+
 /// Configuration files where a registry or index URL can be set.
 const REGISTRY_FILES: &[&str] = &[
     ".npmrc",
@@ -55,8 +64,19 @@ const WRITERS: &[&str] = &[
 /// Leading words that run the rest of the line as the command.
 const WRAPPERS: &[&str] = &["sudo", "doas", "command", "exec", "nohup", "time", "nice"];
 
+/// A program's name without its directory or a Windows `.exe`, `.cmd`, `.bat` or `.ps1`
+/// suffix (`C:\nodejs\npm.cmd` runs npm).
 fn base(word: &str) -> &str {
-    word.rsplit('/').next().unwrap_or(word)
+    let b = word.rsplit(['/', '\\']).next().unwrap_or(word);
+    [".exe", ".cmd", ".bat", ".ps1"]
+        .iter()
+        .find_map(|s| {
+            let cut = b.len().checked_sub(s.len())?;
+            b.get(cut..)
+                .filter(|end| end.eq_ignore_ascii_case(s))
+                .map(|_| &b[..cut])
+        })
+        .unwrap_or(b)
 }
 
 /// The program and its arguments, past wrappers, `env` options and variable assignments.
@@ -122,23 +142,99 @@ fn is_assignment(w: &str) -> bool {
     })
 }
 
-/// Whether a value points at this Customs server (same port on a loopback name, or the
-/// server's own authority).
-fn points_at_customs(value: &str, server: &str) -> bool {
-    let authority = server
-        .split_once("://")
-        .map_or(server, |(_, r)| r)
-        .split('/')
-        .next()
-        .unwrap_or("");
-    if !authority.is_empty() && value.contains(authority) {
-        return true;
+fn url_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r#"(?i)\b[a-z][a-z0-9+.-]*://[^\s'"`<>]+"#).unwrap())
+}
+
+/// Whether one URL is this Customs server: the server's own host, or a loopback name, on
+/// the server's port. Only the parsed host and port count, so the address in a query
+/// string, a fragment or userinfo does not.
+fn url_is_customs(value: &str, server: &str) -> bool {
+    let parse = |s: &str| {
+        url::Url::parse(s)
+            .or_else(|_| url::Url::parse(&format!("http://{s}")))
+            .ok()
+    };
+    let (Some(v), Some(s)) = (parse(value), parse(server)) else {
+        return false;
+    };
+    let host = |u: &url::Url| u.host_str().map(str::to_ascii_lowercase);
+    let (Some(vh), Some(sh)) = (host(&v), host(&s)) else {
+        return false;
+    };
+    v.port_or_known_default() == s.port_or_known_default()
+        && (vh == sh || ["localhost", "127.0.0.1", "[::1]"].contains(&vh.as_str()))
+}
+
+/// Whether text that sets a registry or index points only at Customs: it names at least
+/// one URL, and every URL in it is the Customs server. Comments and other text around the
+/// URLs do not count either way.
+fn points_at_customs(text: &str, server: &str) -> bool {
+    let mut urls = url_re().find_iter(text).map(|m| m.as_str()).peekable();
+    urls.peek().is_some() && urls.all(|u| url_is_customs(u, server))
+}
+
+/// The text an Edit, Write, MultiEdit, NotebookEdit or Codex patch leaves in the file:
+/// new strings and contents, without a patch's removed lines.
+fn new_text(tool_input: &Value) -> String {
+    let mut out = Vec::new();
+    for key in ["content", "new_string", "new_source"] {
+        if let Some(s) = tool_input.get(key).and_then(Value::as_str) {
+            out.push(s);
+        }
     }
-    let port = authority.rsplit_once(':').map(|(_, p)| p).unwrap_or("");
-    !port.is_empty()
-        && ["localhost", "127.0.0.1", "[::1]"]
-            .iter()
-            .any(|h| value.contains(&format!("{h}:{port}")))
+    for e in tool_input
+        .get("edits")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if let Some(s) = e.get("new_string").and_then(Value::as_str) {
+            out.push(s);
+        }
+    }
+    out.iter()
+        .map(|s| {
+            if s.starts_with("*** ") {
+                s.lines()
+                    .filter(|l| !l.starts_with('-'))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            } else {
+                s.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// `python -m pip ARGS` (also `python3`, `python3.12`, `py`, with interpreter options
+/// before `-m`): the module and where its arguments start.
+fn python_module(p: &str, args: &[String]) -> Option<(&'static str, usize)> {
+    let python = p == "py"
+        || p.strip_prefix("python")
+            .is_some_and(|v| v.chars().all(|c| c.is_ascii_digit() || c == '.'));
+    if !python {
+        return None;
+    }
+    let m = args.iter().position(|a| !a.starts_with('-') || a == "-m")?;
+    match (
+        args.get(m).map(String::as_str),
+        args.get(m + 1).map(String::as_str),
+    ) {
+        (Some("-m"), Some("pip" | "pip3")) => Some(("pip", m + 2)),
+        _ => None,
+    }
+}
+
+/// Positional arguments, past options. A valued option's value counts as positional,
+/// which is why callers look at every word after the verb.
+fn positionals(args: &[String]) -> Vec<&str> {
+    args.iter()
+        .map(String::as_str)
+        .filter(|a| !a.starts_with('-'))
+        .collect()
 }
 
 fn policy_write_re() -> &'static Regex {
@@ -217,10 +313,14 @@ pub fn command_reasons(command: &str, server: &str) -> Vec<String> {
             .filter_map(|w| w.split_once('='))
             .chain(powershell_env(words));
         for (k, v) in assigned {
-            if REGISTRY_VARS.contains(&k.to_ascii_lowercase().as_str())
-                && !points_at_customs(v, server)
-            {
+            let key = k.to_ascii_lowercase();
+            if REGISTRY_VARS.contains(&key.as_str()) && !points_at_customs(v, server) {
                 out.push(format!("points {k} away from the Customs proxy"));
+            }
+            if CONFIG_FILE_VARS.contains(&key.as_str()) {
+                out.push(format!(
+                    "sets {k}, which loads a configuration file that can name another registry"
+                ));
             }
         }
         let unset_vars: Vec<&String> = match program(words) {
@@ -243,28 +343,49 @@ pub fn command_reasons(command: &str, server: &str) -> Vec<String> {
         let Some((p, args)) = program(words) else {
             continue;
         };
-        let arg = |i: usize| args.get(i).map(String::as_str).unwrap_or("");
+        let (p, args) = match python_module(p, args) {
+            Some((m, skip)) => (m, &args[skip..]),
+            None => (p, args),
+        };
         let mentions_customs = args
             .iter()
             .any(|a| a.to_ascii_lowercase().contains("customs"));
+        // `config VERB KEY VALUE` with options anywhere (`config set -g registry X`), and
+        // npm's `set KEY VALUE` shorthand.
+        let pos = positionals(args);
+        let config = |names: &[&str]| -> Option<(&str, Vec<String>)> {
+            let lower = |r: &[&str]| r.iter().map(|k| k.to_ascii_lowercase()).collect();
+            match pos.as_slice() {
+                ["set", rest @ ..] if names.contains(&"set") => Some(("set", lower(rest))),
+                [c, verb, rest @ ..] if names.contains(c) => Some((*verb, lower(rest))),
+                _ => None,
+            }
+        };
+        let values_at_customs = || points_at_customs(&args.join(" "), server);
         match p {
-            "npm" | "pnpm" | "yarn" | "bun" if arg(0) == "config" => {
-                let key = arg(2).to_ascii_lowercase();
-                let changes = matches!(arg(1), "set" | "delete" | "rm" | "unset" | "edit");
-                if changes
-                    && (key.contains("registry") || arg(1) == "edit")
-                    && !args.iter().any(|a| points_at_customs(a, server))
-                {
-                    out.push(format!("changes the {p} registry setting"));
+            "npm" | "pnpm" | "yarn" | "bun" => {
+                let names: &[&str] = if p == "npm" {
+                    &["config", "c", "set"]
+                } else {
+                    &["config"]
+                };
+                if let Some((verb, rest)) = config(names) {
+                    let changes = matches!(verb, "set" | "delete" | "rm" | "unset" | "edit");
+                    let registry = rest.iter().any(|k| k.contains("registry"));
+                    if changes && (registry || verb == "edit") && !values_at_customs() {
+                        out.push(format!("changes the {p} registry setting"));
+                    }
                 }
             }
-            "pip" | "pip3" if arg(0) == "config" => {
-                let changes = matches!(arg(1), "set" | "unset" | "edit");
-                if changes
-                    && (arg(2).contains("index") || arg(1) == "edit")
-                    && !args.iter().any(|a| points_at_customs(a, server))
-                {
-                    out.push("changes pip's index setting".to_string());
+            "pip" | "pip3" => {
+                if let Some((verb, rest)) = config(&["config"]) {
+                    let changes = matches!(verb, "set" | "unset" | "edit");
+                    let index = rest
+                        .iter()
+                        .any(|k| k.contains("index") || k.contains("find-links"));
+                    if changes && (index || verb == "edit") && !values_at_customs() {
+                        out.push("changes pip's index setting".to_string());
+                    }
                 }
             }
             "pkill" | "killall" if mentions_customs => {
@@ -334,13 +455,13 @@ pub fn edit_reason(path: &str, tool_input: &Value, server: &str) -> Option<Strin
             "edits the hooks in Codex settings, where the Customs hook is registered".into(),
         );
     }
-    if REGISTRY_FILES.contains(&name) {
-        let text = tool_input.to_string().to_ascii_lowercase();
-        if ["registry", "index"].iter().any(|k| text.contains(k))
-            && !points_at_customs(&text, server)
-        {
-            return Some("changes a package manager's registry or index configuration".into());
-        }
+    // Judged by the text the edit leaves: replacing a public registry with Customs is
+    // fine; removing the Customs line, or adding another URL next to it, is not.
+    if REGISTRY_FILES.contains(&name)
+        && ["registry", "index"].iter().any(|k| text.contains(k))
+        && !points_at_customs(&new_text(tool_input), server)
+    {
+        return Some("changes a package manager's registry or index configuration".into());
     }
     None
 }
@@ -493,5 +614,108 @@ mod tests {
         let other = json!({"new_string": "save-exact=true"});
         assert!(edit_reason("/repo/.npmrc", &other, S).is_none());
         assert!(edit_reason("/repo/src/main.rs", &none, S).is_none());
+    }
+
+    #[test]
+    fn customs_address_must_match_exactly() {
+        // The Customs address somewhere in the text (a query string, a comment, another
+        // URL's userinfo) is not the same as the value pointing at Customs.
+        for c in [
+            "export PIP_INDEX_URL='https://evil.example/simple?127.0.0.1:7878'",
+            "export PIP_INDEX_URL=https://evil.example/simple?u=http://127.0.0.1:7878/",
+            "export PIP_INDEX_URL=http://127.0.0.1:7878@evil.example/simple",
+            "export npm_config_registry=http://127.0.0.1:78789/npm/",
+            "export npm_config_registry=http://localhost.evil.example:7878/npm/",
+            "echo 'registry=https://evil.example/' > .npmrc # localhost:7878",
+            "echo 'registry=https://evil.example/' > .npmrc # http://127.0.0.1:7878/npm/",
+            "npm config set registry https://evil.example/ # http://127.0.0.1:7878",
+        ] {
+            assert!(flagged(c), "{c}");
+        }
+        for c in [
+            "export PIP_INDEX_URL=http://127.0.0.1:7878/pypi/simple",
+            "export npm_config_registry=http://[::1]:7878/npm/",
+            "echo 'registry=http://localhost:7878/npm/' > .npmrc",
+        ] {
+            assert!(!flagged(c), "{c}: {:?}", command_reasons(c, S));
+        }
+
+        let npmrc = |s: &str| json!({ "content": s });
+        for text in [
+            "registry=https://evil.example/\n# localhost:7878\n",
+            "registry=https://evil.example/?x=127.0.0.1:7878\n",
+        ] {
+            assert!(
+                edit_reason("/r/.npmrc", &npmrc(text), S).is_some(),
+                "{text}"
+            );
+        }
+        // Edits are judged by the text they leave, not the text they replace.
+        let fixes = json!({
+            "old_string": "registry=https://registry.npmjs.org/",
+            "new_string": "registry=http://127.0.0.1:7878/npm/",
+        });
+        assert!(edit_reason("/r/.npmrc", &fixes, S).is_none());
+        let removes = json!({
+            "old_string": "registry=http://127.0.0.1:7878/npm/\n",
+            "new_string": "",
+        });
+        assert!(edit_reason("/r/.npmrc", &removes, S).is_some());
+        let multi = json!({ "edits": [
+            { "old_string": "a", "new_string": "index-url = https://evil.example/simple" },
+        ]});
+        assert!(edit_reason("/r/pip.conf", &multi, S).is_some());
+        // A Codex patch: removed lines are not what the file will say.
+        let patch = json!({ "content": concat!(
+            "*** Update File: .npmrc\n",
+            "-registry=http://127.0.0.1:7878/npm/\n",
+            "+registry=https://evil.example/\n",
+        )});
+        assert!(edit_reason("/r/.npmrc", &patch, S).is_some());
+        let patch = json!({ "content": concat!(
+            "*** Update File: .npmrc\n",
+            "-registry=https://registry.npmjs.org/\n",
+            "+registry=http://127.0.0.1:7878/npm/\n",
+        )});
+        assert!(edit_reason("/r/.npmrc", &patch, S).is_none());
+    }
+
+    #[test]
+    fn more_registry_rewrites() {
+        for c in [
+            "npm set registry https://evil.example/",
+            "npm config set -g registry https://evil.example/",
+            "npm config set --location global registry https://evil.example/",
+            "npm c set registry https://evil.example/",
+            "npm config set @evil:registry https://evil.example/",
+            "yarn config set registry https://evil.example/",
+            "python -m pip config set global.index-url https://evil.example/simple",
+            "python3 -I -m pip config set global.extra-index-url https://evil.example/simple",
+            "pip config --user set global.index-url https://evil.example/simple",
+            "pip config set global.find-links https://evil.example/wheels",
+            "export NPM_CONFIG_USERCONFIG=/tmp/npmrc",
+            "NPM_CONFIG_GLOBALCONFIG=/tmp/npmrc npm i x",
+            "PIP_CONFIG_FILE=/tmp/pip.conf pip install x",
+            "export UV_CONFIG_FILE=/tmp/uv.toml",
+            "YARN_RC_FILENAME=.evilrc yarn add x",
+            "$env:PIP_CONFIG_FILE = 'C:\\tmp\\pip.ini'",
+            // Windows program names.
+            "npm.cmd config set registry https://evil.example/",
+            "'C:\\Program Files\\nodejs\\npm.cmd' config set registry https://evil.example/",
+            "pip.exe config set global.index-url https://evil.example/simple",
+        ] {
+            assert!(flagged(c), "{c}");
+        }
+        for c in [
+            "npm set registry http://127.0.0.1:7878/npm/",
+            "npm config set -g registry http://127.0.0.1:7878/npm/",
+            "python -m pip config set global.index-url http://127.0.0.1:7878/pypi/simple",
+            "npm config set save-exact true",
+            "python -m pip config list",
+            "python -m pip install requests",
+            "yarn set version stable",
+        ] {
+            assert!(!flagged(c), "{c}: {:?}", command_reasons(c, S));
+        }
     }
 }
