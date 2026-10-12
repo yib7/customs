@@ -748,6 +748,11 @@ def stage_train() -> dict:
             "diff_only": int(((b <= tb) & (d > td))[y == 1].sum()),
             "neither": int(((b <= tb) & (d <= td))[y == 1].sum()),
         }
+        if "name" in rows:
+            only = rows[(y == 1) & (b <= tb) & (d > td)].sort_values("base_risk")
+            out["overlap_at_fpr_0.005"]["diff_only_releases"] = [
+                f"{n} {v}" for n, v in zip(only.name, only.version, strict=True)
+            ]
         if 0 < y.sum() < len(y):
             cl = rows.cluster.fillna(-1).to_numpy()
             from sklearn.metrics import roc_auc_score

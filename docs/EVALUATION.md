@@ -150,7 +150,7 @@ Logistic regression on name structure, typosquat distance to the 5,000 most popu
 | pypi | 14,463 | 0.946 | 0.958 |
 | npm | 192,090 | 0.980 | 0.983 |
 
-The name model's job is the pre-download check (typosquats and names an agent hallucinated), before any archive exists to scan. Once the archive is scanned it adds nothing: its stacking weight is near zero. An earlier run gave it a clearly positive weight; that turned out to be a leak (the source dataset spells scoped npm names `@scope@name`, a form no benign name has), found by the end-to-end replay and fixed.
+The name model's job is the pre-download check (typosquats and names an agent hallucinated), before any archive exists to scan. Once the archive is scanned it adds nothing: its stacking weight is near zero. Scoped npm names are decoded before training: the source dataset spells them `@scope@name`, a form no benign name has, which would otherwise give the name model the label.
 
 ## End to end through the Rust firewall
 
@@ -194,7 +194,7 @@ The time-split test above uses one collector's malware. MalRegistry (the PyPI ma
 
 Novel malware from another collector is much harder than the time-split test set. Thresholds move between retrains, so the comparisons below are made at matched false positive rates on the benign test split.
 
-**Dev-half error analysis.** Most dev misses carried clear behavior indicators, but none on the install surface: the payload sat in a module that `setup.py` imports, or after a long run of blanks on one line, or in decoded data executed on the line that decodes it. The scanner now follows the package's own imports from setup-time files and has features for the other two. (Following imports from `__init__.py` as well lowers detection: it pulls each benign library onto the install surface.) The *before* columns are the same evaluation with the scanner as it was before these changes, kept with `python -m customs_ml.external evaluate --save-as baseline`.
+**Dev-half error analysis.** Most dev misses carried clear behavior indicators, but none on the install surface: the payload sat in a module that `setup.py` imports, or after a long run of blanks on one line, or in decoded data executed on the line that decodes it. The scanner follows the package's own imports from setup-time files and has features for the other two. (Following imports from `__init__.py` as well lowers detection: it pulls each benign library onto the install surface.) The *before* columns are the same evaluation with the scanner as it was before these changes, kept with `python -m customs_ml.external evaluate --save-as baseline`.
 
 | FPR | Dev, before | Dev, after | Held-out, before | Held-out, after |
 |---:|---:|---:|---:|---:|
@@ -343,7 +343,7 @@ The tree model and the CNN retrained with 5 seeds (7, 11, 23, 42, 101) on identi
 | PyPI malware vs all benign: ROC AUC | 0.941 | 0.007 | 0.935 | 0.952 |
 | PyPI malware: recall at block | 43.0% | 4.8 pts | 39.2% | 51.2% |
 
-ROC AUC and recall at warn barely move between seeds. Everything at 0.1% FPR is a tail statistic: the block threshold rests on two or three of about 2,000 benign validation packages, and the threshold-free row on four of 4,217 benign test packages, so both move several points between retrains: recall at block spans 8.4 points across these seeds, and a difference at the block rate between two runs needs to exceed that before it says anything about the model. Training is reproducible: the same seed in a fresh process (different string hash seed) produces bit-identical tree and CNN outputs, after the CNN vocabulary stopped breaking document-frequency ties by set order.
+ROC AUC and recall at warn barely move between seeds. Everything at 0.1% FPR is a tail statistic: the block threshold rests on the top 2 or 3 of 2,172 benign validation packages, and the threshold-free row on about 4 of 4,217 benign test packages, so both move several points between retrains: recall at block spans 8.4 points across these seeds, and a difference at the block rate between two runs needs to exceed that before it says anything about the model. Training is reproducible: the same seed in a fresh process (different string hash seed) produces bit-identical tree and CNN outputs (the CNN vocabulary breaks document-frequency ties by token, not by set order).
 
 Averaging the tree and CNN logits of several seeds before stacking (seed bagging, `python -m customs_ml.variance bag`), over every subset of the seeds of each size:
 
@@ -389,7 +389,7 @@ Risk is calibrated (Platt scaling on out-of-fold validation scores) at the class
 ## Limitations
 
 * **Label source bias.** Malware comes from Datadog's dataset, mostly found by GuardDog's heuristics, so the positives over-represent what heuristics already catch. Novel techniques that neither GuardDog nor these features describe are under-represented in both training and test.
-* **Benign label noise.** Long-tail benign packages could include undiscovered malware. They were filtered against all 234K OSSF reports and required to be at least 90 days old, which removes most of it but not all.
+* **Benign label noise.** Long-tail benign packages could include undiscovered malware. They were filtered against every OSSF malicious-package report and required to be at least 90 days old, which removes most of it but not all.
 * **Static analysis only.** Code that fetches its payload at runtime from a clean host, or hides logic in native binaries, gives little static signal. The policy rules (minimum age, nonexistent names, install scripts in new packages) are the backstop.
 * **Adaptive attackers.** The robustness table covers a handful of cheap evasions. An attacker who can query the model can do better; published work on prompt and malware detectors shows adaptive attacks break most static classifiers. Customs is one layer, not a guarantee.
 

@@ -6,8 +6,9 @@ Run after `evaluate` and `robustness`:  python -m customs_ml.report
 from __future__ import annotations
 
 import json
+import math
 
-from . import config
+from . import config, splits
 from .pipeline import SCHEME, work
 
 
@@ -65,6 +66,10 @@ def second_source_note(stage: dict | None) -> str:
 
 def render(scheme: str = SCHEME) -> str:
     ev = _load(f"eval_{scheme}.json")
+    if ev is None:
+        raise FileNotFoundError(
+            f"{work() / f'eval_{scheme}.json'} not found: run the pipeline's evaluate stage first"
+        )
     base = _load(f"baseline_eval_{scheme}.json")
     rob = _load(f"robustness_{scheme}.json")
     base_rob = _load(f"baseline_robustness_{scheme}.json")
@@ -407,10 +412,9 @@ def render(scheme: str = SCHEME) -> str:
         add(
             "The name model's job is the pre-download check (typosquats and names an agent "
             "hallucinated), before any archive exists to scan. Once the archive is scanned "
-            "it adds nothing: its stacking weight is near zero. An earlier run gave it a "
-            "clearly positive weight; that turned out to be a leak (the source dataset "
-            "spells scoped npm names `@scope@name`, a form no benign name has), found by "
-            "the end-to-end replay and fixed.\n"
+            "it adds nothing: its stacking weight is near zero. Scoped npm names are decoded "
+            "before training: the source dataset spells them `@scope@name`, a form no benign "
+            "name has, which would otherwise give the name model the label.\n"
         )
 
     rep = _load("replay.json")
@@ -521,7 +525,7 @@ def render(scheme: str = SCHEME) -> str:
                 "**Dev-half error analysis.** Most dev misses carried clear behavior "
                 "indicators, but none on the install surface: the payload sat in a module "
                 "that `setup.py` imports, or after a long run of blanks on one line, or in "
-                "decoded data executed on the line that decodes it. The scanner now follows "
+                "decoded data executed on the line that decodes it. The scanner follows "
                 "the package's own imports from setup-time files and has features for the "
                 "other two. (Following imports from `__init__.py` as well lowers detection: "
                 "it pulls each benign library onto the install surface.) The *before* columns "
@@ -657,11 +661,12 @@ def render(scheme: str = SCHEME) -> str:
         for f, r in rt["matched_fpr"].items():
             add(f"| {pct(float(f))} | {pct(r['base_recall'])} | {pct(r['combined_recall'])} |")
         ov = rt["overlap_at_fpr_0.005"]
+        lowest = ov.get("diff_only_releases") or []
+        examples = f" (lowest base score first: {', '.join(lowest[:3])})" if lowest else ""
         add(
             f"\nAt 0.5% FPR the two models disagree often: {ov['both']} releases are caught "
             f"by both, {ov['base_only']} only by the base model and {ov['diff_only']} only by "
-            "the diff model (among them litellm 1.82.7 and 1.82.8, which the base model "
-            "scores far below its warn threshold). The diff model misses releases whose "
+            f"the diff model{examples}. The diff model misses releases whose "
             "previous version was already compromised, since the payload is then not new.\n"
         )
         mf = rt["matched_fpr"]
@@ -915,17 +920,22 @@ def render(scheme: str = SCHEME) -> str:
                     f"| {label} | {v['mean']:.3f} | {v['std']:.3f} | {v['min']:.3f} | "
                     f"{v['max']:.3f} |"
                 )
+        counts = ev["counts"]
+        n_val, n_test = counts[splits.VAL]["benign"], counts[splits.TEST]["benign"]
+        lo, hi = math.floor(0.001 * n_val), math.ceil(0.001 * n_val)
+        top = str(lo) if lo == hi else f"{lo} or {hi}"
         add(
             "\nROC AUC and recall at warn barely move between seeds. Everything at 0.1% "
-            "FPR is a tail statistic: the block threshold rests on two or three of about "
-            "2,000 benign validation packages, and the threshold-free row on four of 4,217 "
-            "benign test packages, so both move several points between retrains: recall at "
+            f"FPR is a tail statistic: the block threshold rests on the top {top} of "
+            f"{n_val:,} benign validation packages, and the threshold-free row on about "
+            f"{round(0.001 * n_test)} of {n_test:,} benign test packages, so both move "
+            "several points between retrains: recall at "
             f"block spans {100 * (sp['recall_block']['max'] - sp['recall_block']['min']):.1f} "
             "points across these seeds, and a difference at the block rate between two runs "
             "needs to exceed that before it says anything about the model. Training is "
             "reproducible: the same seed in a fresh process (different string hash seed) "
-            "produces bit-identical tree and CNN outputs, after the CNN vocabulary stopped "
-            "breaking document-frequency ties by set order.\n"
+            "produces bit-identical tree and CNN outputs (the CNN vocabulary breaks "
+            "document-frequency ties by token, not by set order).\n"
         )
         bag = _load("seed_bagging.json")
         if bag:
@@ -996,7 +1006,8 @@ def render(scheme: str = SCHEME) -> str:
     )
     add(
         "* **Benign label noise.** Long-tail benign packages could include undiscovered "
-        "malware. They were filtered against all 234K OSSF reports and required to be at "
+        "malware. They were filtered against every OSSF malicious-package report and "
+        "required to be at "
         "least 90 days old, which removes most of it but not all."
     )
     add(
