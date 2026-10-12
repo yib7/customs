@@ -159,7 +159,9 @@ i.sh`, `irm ... | iex`) never reaches the proxy, so the hook asks first and name
 switch Customs off (a policy change, stopping the server, removing the hook from Claude
 Code's settings, pointing pip or npm back at the public registry) come back to you for
 confirmation. A server set up for a team takes policy changes only with its admin token
-(`CUSTOMS_ADMIN_TOKEN`). See [`deploy/hooks/README.md`](deploy/hooks/README.md).
+(`CUSTOMS_ADMIN_TOKEN`). Customs serves plain HTTP, so on a shared network put it behind a
+reverse proxy or ingress that terminates TLS, and that token never crosses the network in
+the clear. See [`deploy/hooks/README.md`](deploy/hooks/README.md).
 
 `scripts/demo.sh` runs the whole tour against the live registries. It and the
 `scripts/replay.py` and `scripts/loadtest.py` harnesses run `$CUSTOMS_BIN` when it is set,

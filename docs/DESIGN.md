@@ -857,7 +857,9 @@ proxies `/api` with the browser's `Host`, so its dashboard is same-origin as wel
   characters) the request needs `Authorization: Bearer <token>`, compared in constant
   time; without it the answer is 401 with `WWW-Authenticate: Bearer` and `code`
   `admin_token_required` or `admin_token_invalid`, and the dashboard then asks for the
-  token and keeps it in session storage. After 10 wrong tokens within a minute from one
+  token and keeps it in session storage. Customs has no TLS listener: a server reached over
+  a shared network belongs behind a reverse proxy or ingress that terminates TLS, so the
+  token is not sent in the clear. After 10 wrong tokens within a minute from one
   address (an IPv6 /64 counts as one), that address gets 429 `too_many_attempts` with
   `Retry-After` until the minute is up, even with the right token. Behind a reverse proxy
   every client shares the proxy's address, so a flood of wrong tokens holds off policy
