@@ -587,7 +587,7 @@ impl Engine {
                 eco,
                 name,
                 Some(format!(
-                    "archive is {} MB, above the {limit} MB scan limit; scored on name and metadata only",
+                    "archive is {} MB, above the {limit} MB scan limit; not scored by the models (archive not scanned), judged on metadata and policy rules only",
                     size >> 20,
                 )),
             );
@@ -869,7 +869,7 @@ impl Engine {
                 eco,
                 &name,
                 Some(format!(
-                    "{} is {} MB, above the {} MB check limit; scored on name and metadata only",
+                    "{} is {} MB, above the {} MB check limit; not scored by the models (archive not scanned), judged on metadata and policy rules only",
                     file.filename,
                     file.size.unwrap_or(0) >> 20,
                     self.limits.max_check_bytes >> 20

@@ -32,12 +32,7 @@
     "code_nn": -0.774972,
     "name": null
    },
-   "out": {
-    "raw": 0.2962992648892184,
-    "risk": 0.6427771010349328,
-    "weight_set": "partial:code_gbdt+name",
-    "z": -0.8649832
-   }
+   "out": null
   },
   {
    "logits": {
@@ -58,12 +53,7 @@
     "code_nn": 0.763492,
     "name": 1.064046
    },
-   "out": {
-    "raw": 0.7341413093170942,
-    "risk": 0.8122003285918428,
-    "weight_set": "partial:code_gbdt",
-    "z": 1.0157365999999999
-   }
+   "out": null
   },
   {
    "logits": {
@@ -71,12 +61,7 @@
     "code_nn": 1.843069,
     "name": -3.094646
    },
-   "out": {
-    "raw": 0.11112114031502508,
-    "risk": 0.1527919248138564,
-    "weight_set": "partial:code_gbdt",
-    "z": -2.0793399999999997
-   }
+   "out": null
   },
   {
    "logits": {
@@ -144,12 +129,7 @@
     "code_nn": -0.741329,
     "name": -1.23916
    },
-   "out": {
-    "raw": 0.1234625672055273,
-    "risk": 0.27496121712997773,
-    "weight_set": "partial:code_gbdt",
-    "z": -1.9600414000000002
-   }
+   "out": null
   },
   {
    "logits": {
@@ -157,12 +137,7 @@
     "code_nn": 0.855366,
     "name": 3.46863
    },
-   "out": {
-    "raw": 0.9621298639206627,
-    "risk": 0.9499416545302706,
-    "weight_set": "partial:code_gbdt",
-    "z": 3.2349866
-   }
+   "out": null
   },
   {
    "logits": {
@@ -326,12 +301,7 @@
     "code_nn": -0.603582,
     "name": null
    },
-   "out": {
-    "raw": 0.31817983360851604,
-    "risk": 0.6517365073958291,
-    "weight_set": "partial:code_gbdt+name",
-    "z": -0.7621492
-   }
+   "out": null
   },
   {
    "logits": {
@@ -365,12 +335,7 @@
     "code_nn": 0.400485,
     "name": 3.427176
    },
-   "out": {
-    "raw": 0.9490564150173987,
-    "risk": 0.9427480535995253,
-    "weight_set": "partial:code_gbdt",
-    "z": 2.9247494
-   }
+   "out": null
   },
   {
    "logits": {
@@ -378,12 +343,7 @@
     "code_nn": -2.147529,
     "name": -4.295033
    },
-   "out": {
-    "raw": 0.003856823429056301,
-    "risk": 0.08564205746714437,
-    "weight_set": "partial:code_gbdt",
-    "z": -5.5540471
-   }
+   "out": null
   }
  ]
 }

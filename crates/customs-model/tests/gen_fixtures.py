@@ -14,7 +14,8 @@ computation the Rust crate performs (DESIGN.md sections 4.5 and 5):
 - the `customs-code-cnn-v1` forward pass (embedding, valid 1D convolutions, ReLU, global
   max pool, dense layers with per-layer activation, short inputs padded to 16);
 - `customs-ensemble-v1` logistic stacking with fallback weight sets selected by the set of
-  missing components, then isotonic calibration.
+  missing components (no risk for a set without one unless the file sets `partial`), then
+  isotonic calibration.
 
 It writes a small model bundle to `fixtures/models/` plus `fixtures/expected_*.json`; the
 Rust tests in `parity.rs` load both and require agreement within 1e-5. The training
@@ -354,9 +355,12 @@ def ensemble_combine(ens, logits):
         w, bias = fb["weights"], fb.get("bias", 0.0)
         cal = fb.get("calibration") or ens.get("calibration")
         ws = "missing:" + "+".join(missing)
-    else:
+    elif ens.get("partial", False):
         w, bias, cal = ens["weights"], ens["bias"], ens.get("calibration")
         ws = "partial:" + "+".join(missing)
+    else:
+        # No weights were fitted for this set of inputs: no risk.
+        return None
     z = bias
     for c in COMPONENTS:
         if logits.get(c) is not None:

@@ -8,7 +8,10 @@
 //! threshold far above where it transfers to new data.
 //! When a component cannot run for an input (no token stream for the CNN, no name, no
 //! features), the stacker uses the entry of `fallbacks` whose `missing` set equals the set
-//! of unavailable components; those weights were fitted for exactly that situation.
+//! of unavailable components; those weights were fitted for exactly that situation. With
+//! no matching entry there is no risk, unless the file sets `partial: true` to apply the
+//! primary weights to whatever ran: weights fitted with the code models present say
+//! nothing about a name scored alone.
 
 use std::collections::BTreeMap;
 
@@ -71,6 +74,10 @@ pub struct Ensemble {
     /// Bound applied to every component logit before stacking, for all weight sets.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clip: Option<f64>,
+    /// Apply the primary weights to the components that ran when no fallback matches the
+    /// missing set. Off by default: such a set gets no risk.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub partial: bool,
 }
 
 /// Per-component logits; `None` means the component did not run.
@@ -110,13 +117,21 @@ pub struct EnsembleOutput {
     /// Calibrated risk in [0, 1].
     pub risk: f64,
     /// Which weights were used: `"primary"`, `"missing:<components>"` for a fallback entry,
-    /// or `"partial:<components>"` when no fallback matched and the primary weights were
-    /// applied to the components that ran.
+    /// or `"partial:<components>"` when no fallback matched and the file opted in to
+    /// applying the primary weights to the components that ran.
     pub weight_set: String,
 }
 
 fn same_set(a: &[String], b: &[&str]) -> bool {
     a.len() == b.len() && b.iter().all(|x| a.iter().any(|y| y == x))
+}
+
+/// The weights, bias, calibration and label used for one set of missing components.
+struct WeightSet<'a> {
+    weights: &'a BTreeMap<String, f64>,
+    bias: f64,
+    calibration: Option<&'a Calibration>,
+    label: String,
 }
 
 impl Ensemble {
@@ -185,7 +200,8 @@ impl Ensemble {
         Ok(e)
     }
 
-    /// Equal-weight stacker used when no `ensemble.json` is shipped.
+    /// Equal-weight stacker used when no `ensemble.json` is shipped. Equal weights mean the
+    /// same for any subset of components, so it stacks partial inputs too.
     pub fn unweighted() -> Self {
         Self {
             format: None,
@@ -196,6 +212,7 @@ impl Ensemble {
             calibration: None,
             thresholds: Thresholds::default(),
             clip: None,
+            partial: true,
         }
     }
 
@@ -205,17 +222,43 @@ impl Ensemble {
             .find(|f| same_set(&f.missing, missing))
     }
 
-    /// Stacking weight of a component under the weight set used for `logits`.
-    pub fn weight_for(&self, logits: &Logits, component: &str) -> f64 {
-        let missing = logits.missing();
-        let ws = if missing.is_empty() {
-            &self.weights
+    /// The weight set for a set of missing components; `None` when nothing ran, or when no
+    /// fallback was fitted for that set and the file did not opt in to `partial`.
+    fn weight_set(&self, missing: &[&str]) -> Option<WeightSet<'_>> {
+        if missing.len() == COMPONENTS.len() {
+            None
+        } else if missing.is_empty() {
+            Some(WeightSet {
+                weights: &self.weights,
+                bias: self.bias,
+                calibration: self.calibration.as_ref(),
+                label: "primary".to_string(),
+            })
+        } else if let Some(f) = self.fallback_for(missing) {
+            Some(WeightSet {
+                weights: &f.weights,
+                bias: f.bias,
+                calibration: f.calibration.as_ref().or(self.calibration.as_ref()),
+                label: format!("missing:{}", missing.join("+")),
+            })
+        } else if self.partial {
+            Some(WeightSet {
+                weights: &self.weights,
+                bias: self.bias,
+                calibration: self.calibration.as_ref(),
+                label: format!("partial:{}", missing.join("+")),
+            })
         } else {
-            self.fallback_for(&missing)
-                .map(|f| &f.weights)
-                .unwrap_or(&self.weights)
-        };
-        ws.get(component).copied().unwrap_or(0.0)
+            None
+        }
+    }
+
+    /// Stacking weight of a component under the weight set used for `logits` (0 when
+    /// there is no weight set, so nothing is attributed to a stack that did not happen).
+    pub fn weight_for(&self, logits: &Logits, component: &str) -> f64 {
+        self.weight_set(&logits.missing())
+            .and_then(|ws| ws.weights.get(component).copied())
+            .unwrap_or(0.0)
     }
 
     /// A component logit as the stacker sees it.
@@ -236,47 +279,23 @@ impl Ensemble {
         }
     }
 
-    /// Combine the available logits. `None` when no component ran.
+    /// Combine the available logits. `None` when no component ran or there are no weights
+    /// for the set that did (see [`Ensemble::partial`]).
     pub fn combine(&self, logits: &Logits) -> Option<EnsembleOutput> {
-        let missing = logits.missing();
-        if missing.len() == COMPONENTS.len() {
-            return None;
-        }
-        let (weights, bias, calibration, weight_set) = if missing.is_empty() {
-            (
-                &self.weights,
-                self.bias,
-                self.calibration.as_ref(),
-                "primary".to_string(),
-            )
-        } else if let Some(f) = self.fallback_for(&missing) {
-            (
-                &f.weights,
-                f.bias,
-                f.calibration.as_ref().or(self.calibration.as_ref()),
-                format!("missing:{}", missing.join("+")),
-            )
-        } else {
-            (
-                &self.weights,
-                self.bias,
-                self.calibration.as_ref(),
-                format!("partial:{}", missing.join("+")),
-            )
-        };
-        let mut z = bias;
+        let ws = self.weight_set(&logits.missing())?;
+        let mut z = ws.bias;
         for c in COMPONENTS {
             if let Some(l) = logits.get(c) {
-                z += weights.get(c).copied().unwrap_or(0.0) * self.clip_logit(l);
+                z += ws.weights.get(c).copied().unwrap_or(0.0) * self.clip_logit(l);
             }
         }
         let raw = sigmoid(z);
-        let risk = calibration.map(|c| c.apply(raw)).unwrap_or(raw);
+        let risk = ws.calibration.map(|c| c.apply(raw)).unwrap_or(raw);
         Some(EnsembleOutput {
             z,
             raw,
             risk,
-            weight_set,
+            weight_set: ws.label,
         })
     }
 }
@@ -328,6 +347,28 @@ mod tests {
         assert!((o.z - (-0.5 + 1.5 + 1.0)).abs() < 1e-12);
         assert_eq!(e.weight_for(&no_nn, "code_gbdt"), 1.5);
 
+        assert!(e.combine(&Logits::default()).is_none());
+        assert_eq!(e.thresholds.target_fpr_warn, Some(0.01));
+    }
+
+    #[test]
+    fn no_risk_for_a_missing_set_without_fitted_weights() {
+        // Like the shipped ensemble: fallbacks only for the sets training fitted. The
+        // primary weights were fitted with the code models present, so applying them to a
+        // name alone gives a number that means nothing.
+        let e = ens();
+        let only_name = Logits {
+            name: Some(5.0),
+            ..Default::default()
+        };
+        assert!(e.combine(&only_name).is_none());
+        assert_eq!(e.weight_for(&only_name, "name"), 0.0);
+    }
+
+    #[test]
+    fn partial_stacking_only_when_the_file_opts_in() {
+        let mut e = ens();
+        e.partial = true;
         let only_name = Logits {
             name: Some(0.5),
             ..Default::default()
@@ -335,8 +376,12 @@ mod tests {
         let o = e.combine(&only_name).unwrap();
         assert_eq!(o.weight_set, "partial:code_gbdt+code_nn");
         assert!((o.z - 0.0).abs() < 1e-12);
-        assert!(e.combine(&Logits::default()).is_none());
-        assert_eq!(e.thresholds.target_fpr_warn, Some(0.01));
+        assert_eq!(e.weight_for(&only_name, "name"), 2.0);
+        // The equal-weight stacker used without an ensemble.json stacks any subset.
+        let u = Ensemble::unweighted();
+        assert_eq!(u.combine(&only_name).unwrap().z, 0.5);
+        let parsed = Ensemble::from_json(r#"{"weights": {"name": 1.0}, "partial": true}"#);
+        assert!(parsed.unwrap().partial);
     }
 
     #[test]

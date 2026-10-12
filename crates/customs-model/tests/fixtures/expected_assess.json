@@ -113,7 +113,7 @@
    "ecosystem": "pypi",
    "features": {},
    "name": "scikit_learn",
-   "risk": 0.08564205746714437,
+   "risk": null,
    "scores": {
     "code_gbdt": null,
     "code_nn": 0.6040192867874217,
@@ -141,7 +141,7 @@
     "eval",
     "https"
    ],
-   "weight_set": "partial:code_gbdt"
+   "weight_set": null
   },
   {
    "ecosystem": "npm",
@@ -263,7 +263,7 @@
    "ecosystem": "pypi",
    "features": {},
    "name": "requests",
-   "risk": 0.08564205746714437,
+   "risk": null,
    "scores": {
     "code_gbdt": null,
     "code_nn": 0.6007273230419592,
@@ -291,7 +291,7 @@
     "\"",
     "("
    ],
-   "weight_set": "partial:code_gbdt"
+   "weight_set": null
   },
   {
    "ecosystem": "pypi",
@@ -408,14 +408,14 @@
    "ecosystem": "npm",
    "features": {},
    "name": "react",
-   "risk": 0.08564205746714437,
+   "risk": null,
    "scores": {
     "code_gbdt": null,
     "code_nn": 0.5099819837738291,
     "name": 0.0001928102730608361
    },
    "tokens": [],
-   "weight_set": "partial:code_gbdt"
+   "weight_set": null
   },
   {
    "ecosystem": "npm",
