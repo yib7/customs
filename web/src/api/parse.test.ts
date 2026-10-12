@@ -343,14 +343,12 @@ describe('parseReleaseDiff', () => {
       files: { added: [{ path: 'setup.js', size: 40, lines_added: 2 }, { size: 1 }], modified: [], removed: [], unchanged: 3 },
       new_evidence: [{ indicator: 'network', file: 'setup.js', line: 1, snippet: 'fetch(u)' }],
       new_install_surface: ['setup.js'],
-      verdict: { name: 'pkg', decision: 'block' },
     });
     expect(d.metadata).toEqual([{ field: 'install script postinstall', before: null, after: 'node setup.js' }]);
     expect(d.dependencies[0]).toEqual({ name: 'lure', before: null, after: '^0.0.1' });
     expect(d.files?.added).toEqual([{ path: 'setup.js', size: 40, lines_added: 2, lines_removed: null }]);
     expect(d.files?.unchanged).toBe(3);
     expect(d.files_note).toBeNull();
-    expect(d.verdict?.decision).toBe('block');
     expect(d.from.published).not.toBeNull();
   });
 
@@ -359,6 +357,5 @@ describe('parseReleaseDiff', () => {
     const d = parseReleaseDiff({ name: 'pkg', from: { version: '1' }, to: { version: '2' }, files: null, files_note: 'too big' });
     expect(d.files).toBeNull();
     expect(d.files_note).toBe('too big');
-    expect(d.verdict).toBeNull();
   });
 });

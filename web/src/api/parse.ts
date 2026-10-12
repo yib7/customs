@@ -52,13 +52,13 @@ function asRecord(v: unknown): Rec {
   return isRecord(v) ? v : {};
 }
 
-export function asString(v: unknown): string | null {
+function asString(v: unknown): string | null {
   if (typeof v === 'string') return v;
   if (typeof v === 'number' && Number.isFinite(v)) return String(v);
   return null;
 }
 
-export function asNumber(v: unknown): number | null {
+function asNumber(v: unknown): number | null {
   if (typeof v === 'number' && Number.isFinite(v)) return v;
   if (typeof v === 'string' && v.trim() !== '') {
     const n = Number(v);
@@ -88,20 +88,20 @@ function asStringArray(v: unknown): string[] {
   return asArray(v).filter((x): x is string => typeof x === 'string');
 }
 
-export function parseDecision(v: unknown): Decision | null {
+function parseDecision(v: unknown): Decision | null {
   if (typeof v !== 'string') return null;
   const d = v.toLowerCase();
   return d === 'allow' || d === 'warn' || d === 'block' ? d : null;
 }
 
-export function parseEcosystem(v: unknown): Ecosystem {
+function parseEcosystem(v: unknown): Ecosystem {
   const s = asString(v);
   if (!s) return 'unknown';
   const lower = s.toLowerCase();
   return lower === 'pypi' || lower === 'npm' ? lower : s;
 }
 
-export function parseKind(v: unknown): EventKind {
+function parseKind(v: unknown): EventKind {
   if (v === 'check' || v === 'nonexistent_package' || v === 'install') return v;
   return 'install';
 }
@@ -121,7 +121,7 @@ export function parseTimestamp(v: unknown): string | null {
   return null;
 }
 
-export function parseScores(v: unknown): Scores {
+function parseScores(v: unknown): Scores {
   const r = asRecord(v);
   return {
     code_gbdt: asProbability(r.code_gbdt),
@@ -167,7 +167,7 @@ function parseEvidence(v: unknown): Evidence | null {
   };
 }
 
-export function parseThresholds(v: unknown): Thresholds | null {
+function parseThresholds(v: unknown): Thresholds | null {
   if (!isRecord(v)) return null;
   const warn = asProbability(v.warn);
   const block = asProbability(v.block);
@@ -486,12 +486,6 @@ export function parseReleaseDiff(v: unknown): ReleaseDiff {
   const from = parseReleaseSide(v.from);
   const to = parseReleaseSide(v.to);
   if (!name || !from || !to) throw new ParseError('release diff has no package or versions');
-  let verdict: Verdict | null;
-  try {
-    verdict = isRecord(v.verdict) ? parseVerdict(v.verdict) : null;
-  } catch {
-    verdict = null;
-  }
   return {
     ecosystem: parseEcosystem(v.ecosystem),
     name,
@@ -507,6 +501,5 @@ export function parseReleaseDiff(v: unknown): ReleaseDiff {
     files_note: asString(v.files_note),
     new_evidence: compact(asArray(v.new_evidence).map(parseEvidence)),
     new_install_surface: asStringArray(v.new_install_surface),
-    verdict,
   };
 }

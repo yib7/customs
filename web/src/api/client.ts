@@ -118,7 +118,7 @@ async function request<T>(path: string, parse: (v: unknown) => T, init: RequestI
   return parse(body);
 }
 
-export function eventsPath(q: EventQuery = {}): string {
+function eventsPath(q: EventQuery = {}): string {
   const params = new URLSearchParams();
   if (q.limit !== undefined) params.set('limit', String(q.limit));
   if (q.before) params.set('before', q.before);

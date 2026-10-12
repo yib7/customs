@@ -42,10 +42,10 @@ export interface RawEvent {
   verdict_id: number | null;
 }
 
-export const MODEL_VERSION = '2026.10.0';
+const MODEL_VERSION = '2026.10.0';
 
 /** The model's own thresholds (ensemble.json). */
-export const MODEL_THRESHOLDS = { warn: 0.35, block: 0.8, target_fpr_block: 0.001 };
+const MODEL_THRESHOLDS = { warn: 0.35, block: 0.8, target_fpr_block: 0.001 };
 
 /** Days of history, as the server's `GET /api/stats` reports by default. */
 export const HISTORY_DAYS = 30;
@@ -81,7 +81,7 @@ function fnv1a(s: string, seed = 0x811c9dc5): number {
 }
 
 /** Fake but stable 64-hex sha256 for a string. */
-export function fakeSha(s: string): string {
+function fakeSha(s: string): string {
   let out = '';
   let h = fnv1a(s);
   while (out.length < 64) {
@@ -240,7 +240,7 @@ export const BLOCKED_SCOPE_SQUAT = base({
   cached: false,
 });
 
-export const WARNED_NEW = base({
+const WARNED_NEW = base({
   id: 43,
   ecosystem: 'npm',
   name: 'vite-plugin-env-loader',
@@ -277,7 +277,7 @@ export const WARNED_NEW = base({
   cached: false,
 });
 
-export const WARNED_TOKEN = base({
+const WARNED_TOKEN = base({
   id: 44,
   ecosystem: 'pypi',
   name: 'langchain-community-tools',

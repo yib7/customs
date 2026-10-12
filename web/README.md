@@ -32,6 +32,8 @@ npm run typecheck
 
 Playwright uses its own Chromium (`npx playwright install chromium`). Set `CUSTOMS_CHROMIUM_PATH` to use another Chromium binary. Running `npm run e2e` also refreshes the screenshots in `screenshots/` (every page, light and dark, at 1440px and 390px wide).
 
+Two scripts work against a running `customs serve` instead of the mock: `node scripts/live-screenshots.mjs [baseUrl] [outDir]` takes the screenshots in the top-level README (`docs/screenshots/`, real verdicts from the trained models), and `node scripts/demo-gif.mjs [baseUrl] [out.webm]` records the demo.
+
 ## Mock API
 
 `src/mock/` is an in-memory implementation of the HTTP API with realistic fixtures: popular allowed packages, a blocked `reqeusts` typosquat with install-time `os.system` and a Discord webhook, a blocked npm scope squat whose snippets contain HTML and bidi control characters, warned brand-new packages, and nonexistent names requested by an agent. It is only bundled when `VITE_MOCK=1`. In the browser, `window.__customsMock` can push events (`emit()`, `emitBlocked()`) or drop the stream (`dropStream()`).

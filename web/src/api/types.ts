@@ -131,7 +131,7 @@ export type HistoryRule =
  * The established-release prior: a release of one of the `top` most popular names, published
  * at least `min_age_days` ago and not yanked, is allowed whatever the model scores it.
  */
-export interface EstablishedPolicy {
+interface EstablishedPolicy {
   enabled: boolean;
   top: number;
   min_age_days: number;
@@ -288,5 +288,4 @@ export interface ReleaseDiff {
   files_note: string | null;
   new_evidence: Evidence[];
   new_install_surface: string[];
-  verdict: Verdict | null;
 }

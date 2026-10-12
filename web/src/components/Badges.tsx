@@ -3,11 +3,6 @@ import { ecosystemLabel } from '../lib/format';
 import { DECISION_META } from './decisionMeta';
 import { IconGhost } from './Icons';
 
-export function DecisionIcon({ decision, size = 16 }: { decision: Decision; size?: number }) {
-  const { Icon } = DECISION_META[decision];
-  return <Icon size={size} />;
-}
-
 export function DecisionBadge({
   decision,
   kind,
