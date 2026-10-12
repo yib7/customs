@@ -9,7 +9,7 @@
 //! install would stop for review.
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use customs_scan::Ecosystem;
 use serde_json::Value;
@@ -26,8 +26,6 @@ pub struct Expanded {
     pub targets: Vec<Target>,
     /// `(label, reason)` for each lockfile entry that installs another package than it names.
     pub mismatches: Vec<(String, String)>,
-    /// The lockfile read, if the project has one.
-    pub lockfile: Option<PathBuf>,
     /// How many of `targets`, from the front, the lockfile pins.
     pub locked: usize,
 }
@@ -95,7 +93,6 @@ pub fn expand(manager: Manager, dir: &Path, extras: &[String]) -> Expanded {
                 reason: format!("the lockfile could not be read ({e})"),
             }),
         }
-        out.lockfile = Some(lock.clone());
     }
     for t in manifest_targets(manager, dir, extras) {
         match &t {
@@ -554,7 +551,6 @@ mod tests {
         assert_eq!(e.mismatches[0].0, "npm:ms 2.1.2");
         assert!(e.mismatches[0].1.contains("is-number@7.0.0"));
         assert_eq!(e.locked, 3);
-        assert!(e.lockfile.unwrap().ends_with("package-lock.json"));
     }
 
     #[test]
@@ -571,7 +567,7 @@ mod tests {
         );
         // Another manager's lockfile is not this one's.
         write(d.path(), "yarn.lock", "debug@^4:\n  version \"4.3.4\"\n");
-        assert!(expand(Manager::Npm, d.path(), &[]).lockfile.is_none());
+        assert_eq!(expand(Manager::Npm, d.path(), &[]).locked, 0);
         assert_eq!(
             names(&expand(Manager::Yarn, d.path(), &[])),
             vec!["debug 4.3.4"]
@@ -629,7 +625,7 @@ httpx = {version = ">=0.27", extras = ["http2"]}
             vec!["django 5.0", "requests -"]
         );
         let e = expand(Manager::Pipenv, Path::new("/nonexistent"), &[]);
-        assert!(e.targets.is_empty() && e.lockfile.is_none());
+        assert!(e.targets.is_empty() && e.locked == 0);
         assert_eq!(Manager::Pipenv.ecosystem(), Ecosystem::Pypi);
     }
 

@@ -495,12 +495,6 @@ pub fn parse_input(input: &str, agent: Agent) -> anyhow::Result<Option<ToolCall>
     })
 }
 
-/// Evaluate one Claude Code hook invocation. `Err` is an internal failure (bad input, no
-/// checker).
-pub async fn evaluate(input: &str, opts: &HookOptions) -> anyhow::Result<Option<HookDecision>> {
-    evaluate_for(input, opts, Agent::ClaudeCode).await
-}
-
 pub async fn evaluate_for(
     input: &str,
     opts: &HookOptions,
@@ -1018,6 +1012,11 @@ fn finish_error(msg: &str, fail_closed: bool, agent: Agent) -> i32 {
 mod tests {
     use super::*;
     use crate::hook::parse::Manager;
+
+    /// Evaluate one Claude Code hook invocation.
+    async fn evaluate(input: &str, opts: &HookOptions) -> anyhow::Result<Option<HookDecision>> {
+        evaluate_for(input, opts, Agent::ClaudeCode).await
+    }
     use crate::verdict::PolicyHit;
     use customs_model::{Scores, Thresholds};
     use customs_scan::Ecosystem;
