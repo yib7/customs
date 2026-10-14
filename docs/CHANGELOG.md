@@ -85,6 +85,7 @@ Released 2026-10-12. First public release.
   CPU at a time.
 - Model loading rejects non-finite weights and malformed calibrations; a non-finite risk
   blocks.
+- rustls 0.23.46, which fixes RUSTSEC-2026-0346, 0347, 0348 and 0349.
 
 ### Distribution
 
